@@ -345,4 +345,6 @@ def install_option_feed_resilience() -> None:
         return
     MarketData.refresh_chain = resilient_refresh_chain
     MarketData.refresh_iv_surface = resilient_refresh_iv_surface
+    from .data.instrument_refresh import install_instrument_refresh_isolation
+    install_instrument_refresh_isolation(MarketData)
     _INSTALLED = True

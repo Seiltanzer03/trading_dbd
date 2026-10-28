@@ -24,6 +24,50 @@ def test_actual_loaded_model_contracts_are_verified(tmp_path,monkeypatch):
     assert result['validated_models']==value['family_market_model_summary']['trained_models']>0
 
 
+def setup_coverage(value):
+    function = getattr(verifier(), 'verify_setup_coverage', None)
+    assert callable(function), 'release acceptance checks only the current trade, not all configured setups'
+    return function(value, expected_sha='a'*40, captured_ts=T0+20)
+
+
+def test_every_configured_setup_has_its_own_explicit_model_coverage(tmp_path, monkeypatch):
+    value = report(tmp_path, monkeypatch)
+    result = setup_coverage(value)
+    assert result['instrument_count'] == 10 and result['setup_count'] == 16
+    assert result['setup_instruments'] == {
+        '1':'NAS100','2':'NAS100','3':'NAS100','4':'SP500','5':'SP500',
+        '6':'US30','7':'GER40','8':'GER40','9':'UK100','10':'JPY100',
+        '11':'XAU','12':'XAU','13':'XAG','14':'EURUSD','15':'EURUSD','16':'USDCAD'}
+    assert result['scope'] == 'CONFIGURED_MODELS_NOT_CURRENT_SETUP_RECOMMENDATIONS'
+    assert result['current_inputs_verified'] is False
+    assert result['instruments']['XAU']['setups'] == [11,12]
+    assert len(result['instruments']['JPY100']['families']) == 8
+    assert result['instruments']['JPY100']['trained_families'] == []
+    assert result['instruments']['JPY100']['families']['session']['reason'] == 'TARGET_COMPLETED_BARS_UNAVAILABLE'
+    assert result['trained_noncrypto_families'] > 0
+    assert 'BTCUSD' not in result['instruments']
+
+
+@pytest.mark.parametrize('case', ['missing_instrument','missing_family','missing_reason','wrong_target'])
+def test_all_setup_acceptance_cannot_hide_missing_or_mislabeled_cells(case, tmp_path, monkeypatch):
+    value = report(tmp_path, monkeypatch)
+    if case == 'missing_instrument':
+        del value['family_market_models']['JPY100']
+    elif case == 'missing_family':
+        del value['family_market_models']['JPY100']['event']
+    elif case == 'missing_reason':
+        value['family_market_models']['JPY100']['option']['reason'] = ''
+    else:
+        model = value['family_market_models']['NAS100']['session']
+        model['source']['ticker'] = '^N225'
+        from seiltanzer.mathematical_edge import fingerprint
+        model['model_sha256'] = fingerprint({k:v for k,v in model.items() if k!='model_sha256'})
+    function = getattr(verifier(), 'verify_setup_coverage', None)
+    assert callable(function), 'all-setup coverage verifier is missing'
+    with pytest.raises(ValueError):
+        function(value, expected_sha='a'*40, captured_ts=T0+20)
+
+
 @pytest.mark.parametrize('case',['unavailable','wrong_sha','damaged_model','count_mismatch','future_model'])
 def test_release_cannot_accept_missing_or_rejected_models(case,tmp_path,monkeypatch):
     value=deepcopy(report(tmp_path,monkeypatch))

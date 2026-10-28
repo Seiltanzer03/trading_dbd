@@ -587,10 +587,12 @@ class Engine:
         req = set(setup.filters) if setup else set()
 
         def vol_chip(key: str, label: str, code: str, cmp_pass) -> dict:
-            feed = self.market.vols[key]
+            feed = dict(self.market.vols[key])
             required = code in req
             chip = {"key": key, "label": label, "required": required,
                     "value": feed.get("value"), "status_feed": feed.get("status"),
+                    "source": feed.get("source"), "source_ts": feed.get("ts"),
+                    "timeframe": feed.get("timeframe"),
                     "state": "na", "detail": None,
                     # Yahoo даёт бесплатный 15m-контекст, но не подтверждает
                     # многошаговую 4H-логику. Показываем, не блокируем опционный
