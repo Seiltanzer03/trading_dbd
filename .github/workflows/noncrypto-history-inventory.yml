@@ -10,22 +10,39 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Measure complete immutable fence with CPU scheduling isolated
+      - name: Measure full fence during a reversible CPU scheduling lease
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 30s
+          command_timeout: 40s
           script: |
+            set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 10 9
+            old_weight=$(systemctl show seiltanzer -p CPUWeight --value)
+            case "$old_weight" in ""|"[not set]") old_weight=100;; esac
+            test "$old_weight" -ge 1
+            test "$old_weight" -le 10000
+            old_pid=$(systemctl show seiltanzer -p MainPID --value)
+            restore_weight() { systemctl set-property --runtime seiltanzer.service "CPUWeight=$old_weight"; }
+            trap restore_weight EXIT
+            systemd-run --quiet --unit=seiltanzer-fence-weight-restore-20261028 --on-active=30s /usr/bin/systemctl set-property --runtime seiltanzer.service "CPUWeight=$old_weight"
+            systemctl set-property --runtime seiltanzer.service CPUWeight=10
             /usr/bin/python3 -B -u - <<'PY'
-            import json,os,pathlib,runpy,time
+            import json,pathlib,resource,runpy,time
             root=pathlib.Path('/opt/seiltanzer')
-            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_scheduling_measurement')
-            print('SCHEDULING_BEFORE',os.cpu_count(),os.getloadavg(),os.getpriority(os.PRIO_PROCESS,0),flush=True)
-            os.setpriority(os.PRIO_PROCESS,0,-10)
+            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_lease_measurement')
+            before=resource.getrusage(resource.RUSAGE_SELF)
             started=time.monotonic();cpu=time.process_time()
             measured=ns['check_start'](root/'data/trades.db',root)
-            print('IDENTICAL_FULL_FENCE_CPU_PRIORITY',json.dumps(measured),'wall',round(time.monotonic()-started,3),'cpu',round(time.process_time()-cpu,3),'nice',os.getpriority(os.PRIO_PROCESS,0),flush=True)
+            after=resource.getrusage(resource.RUSAGE_SELF)
+            print('FULL_FENCE_CPU_LEASE',json.dumps(measured),'wall',round(time.monotonic()-started,3),'cpu',round(time.process_time()-cpu,3),'disk_blocks',after.ru_inblock-before.ru_inblock,flush=True)
             PY
+            restore_weight
+            trap - EXIT
+            test "$(systemctl show seiltanzer -p MainPID --value)" = "$old_pid"
+            echo "SERVICE_PID_UNCHANGED=$old_pid"
+            systemctl show seiltanzer -p CPUWeight -p ActiveState
