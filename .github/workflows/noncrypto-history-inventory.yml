@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Measure full fence during a reversible CPU scheduling lease
+      - name: Acquire auto-expiring CPU lease for unchanged canonical release guard
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -20,29 +20,21 @@ jobs:
           command_timeout: 40s
           script: |
             set -euo pipefail
+            cd /opt/seiltanzer
             exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
             flock -w 10 9
-            old_weight=$(systemctl show seiltanzer -p CPUWeight --value)
-            case "$old_weight" in ""|"[not set]") old_weight=100;; esac
-            test "$old_weight" -ge 1
-            test "$old_weight" -le 10000
+            test "$(git rev-parse HEAD)" = 0f9525e66ca17c716c71dadc4b37496cf705d6da
+            test ! -e data/cutover.active
+            test ! -L data/cutover.active
             old_pid=$(systemctl show seiltanzer -p MainPID --value)
-            restore_weight() { systemctl set-property --runtime seiltanzer.service "CPUWeight=$old_weight"; }
+            test "$old_pid" = 4095659
+            test "$(systemctl show seiltanzer -p CPUWeight --value)" = 100
+            restore_weight() { systemctl set-property --runtime seiltanzer.service CPUWeight=100; }
             trap restore_weight EXIT
-            systemd-run --quiet --unit=seiltanzer-fence-weight-restore-20261028 --on-active=30s /usr/bin/systemctl set-property --runtime seiltanzer.service "CPUWeight=$old_weight"
-            systemctl set-property --runtime seiltanzer.service CPUWeight=10
-            /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,resource,runpy,time
-            root=pathlib.Path('/opt/seiltanzer')
-            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_lease_measurement')
-            before=resource.getrusage(resource.RUSAGE_SELF)
-            started=time.monotonic();cpu=time.process_time()
-            measured=ns['check_start'](root/'data/trades.db',root)
-            after=resource.getrusage(resource.RUSAGE_SELF)
-            print('FULL_FENCE_CPU_LEASE',json.dumps(measured),'wall',round(time.monotonic()-started,3),'cpu',round(time.process_time()-cpu,3),'disk_blocks',after.ru_inblock-before.ru_inblock,flush=True)
-            PY
-            restore_weight
-            trap - EXIT
+            systemd-run --quiet --unit=seiltanzer-release-cpu-restore-20261028 --on-active=300s /usr/bin/systemctl set-property --runtime seiltanzer.service CPUWeight=100
+            systemctl set-property --runtime seiltanzer.service CPUWeight=1
+            /usr/bin/python3 -B /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer
             test "$(systemctl show seiltanzer -p MainPID --value)" = "$old_pid"
-            echo "SERVICE_PID_UNCHANGED=$old_pid"
+            trap - EXIT
+            echo "BOUNDED_CPU_LEASE_ACTIVE_SECONDS=300"
             systemctl show seiltanzer -p CPUWeight -p ActiveState
