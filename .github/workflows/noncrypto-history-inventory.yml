@@ -1,4 +1,4 @@
-name: release-capacity-readonly-7e222
+name: release-reproducible-cache-maintenance-7e222
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,7 +8,7 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
       - uses: appleboy/ssh-action@v1
         with:
@@ -16,36 +16,53 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 35s
+          command_timeout: 3m
           script: |
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import os,sys,json,time,subprocess,pathlib,urllib.request
+            set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
+            /opt/seiltanzer/.venv/bin/python -B -u - <<'PY'
+            import json,pathlib,shutil,subprocess,sys,os,hashlib,time
             sys.dont_write_bytecode=True
-            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('ACTUAL_RUNTIME',actual,flush=True)
-            assert actual=='7e222a36b7ce6f88abd9136db011cbd431c47298'
-            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,MainPID,NRestarts,FreezerState','--no-pager'],text=True).strip(),flush=True)
-            import shutil
-            print('DISK',json.dumps(shutil.disk_usage('/opt/seiltanzer')._asdict()),flush=True)
-            for root in ('/opt/seiltanzer/.venv/lib/python3.12/site-packages','/opt/seiltanzer/.venv/lib/python3.11/site-packages'):
-             p=pathlib.Path(root)
-             if not p.is_dir():continue
-             count=size=0
-             for f in p.rglob('*.pyc'):
-              if f.is_symlink() or not f.is_file():continue
-              source=f.parent.parent/(f.name.split('.')[0]+'.py') if f.parent.name=='__pycache__' else f.with_suffix('.py')
-              if source.is_file():count+=1;size+=f.stat().st_size
-             print('SOURCE_BACKED_BYTECODE',json.dumps({'root':root,'files':count,'bytes':size}),flush=True)
-            for root in ('/root/.cache/pip','/opt/seiltanzer/.cache/pip','/var/cache/apt/archives'):
-             p=pathlib.Path(root)
-             size=sum(f.stat().st_size for f in p.rglob('*') if f.is_file() and not f.is_symlink()) if p.is_dir() else 0
-             print('REPRODUCIBLE_CACHE',root,size,flush=True)
-            print('GIT_OBJECTS',subprocess.check_output(['git','-C','/opt/seiltanzer','count-objects','-v'],text=True),flush=True)
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/status',timeout=8) as r:research=json.load(r)
-            print('RESEARCH_STATUS_KEYS',json.dumps(list(research)),flush=True)
-            for key in ('budget','admission','disk','resource_budget','research_budget','cycle','worker'):
-             if key in research:print('RESEARCH_RESOURCE',key,json.dumps(research[key])[:10000],flush=True)
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as r:s=json.load(r)
-            print('SNAPSHOT',json.dumps({k:s.get(k) for k in ('ready','building','last_error')}),flush=True)
-            print('READ_ONLY_CAPACITY_NO_RESTART_NO_FIT_NO_PROVIDER_CALL')
+            root=pathlib.Path('/opt/seiltanzer')
+            def git(*args):return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
+            def service():return subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+            assert git('rev-parse','HEAD')=='7e222a36b7ce6f88abd9136db011cbd431c47298'
+            assert service()=='4124410'
+            assert subprocess.check_output(['systemctl','is-active','seiltanzer'],text=True).strip()=='active'
+            assert not os.path.lexists(root/'data/cutover.active')
+            before=shutil.disk_usage(root).free
+            heads=git('show-ref');head=git('rev-parse','HEAD')
+            reflogs=git('reflog','show','--all','--format=%H %gD')
+            roots=[root/'.venv/lib/python3.12/site-packages',root/'seiltanzer',root/'scripts',pathlib.Path('/usr/lib/python3.12')]
+            files=[]
+            for folder in roots:
+             if not folder.is_dir() or folder.is_symlink():continue
+             for cache in folder.rglob('*.pyc'):
+              if cache.is_symlink() or not cache.is_file():continue
+              if not cache.resolve().is_relative_to(folder.resolve()):continue
+              source=cache.parent.parent/(cache.name.split('.')[0]+'.py') if cache.parent.name=='__pycache__' else cache.with_suffix('.py')
+              if source.is_file() and not source.is_symlink():
+               st=cache.stat();files.append((cache,st.st_size))
+            assert len(files)<=15000 and sum(n for _,n in files)<=256*1024**2
+            removed=removed_bytes=0
+            for cache,size in files:
+             try:cache.unlink();removed+=1;removed_bytes+=size
+             except FileNotFoundError:pass
+            print('SOURCE_BACKED_BYTECODE_REMOVED',json.dumps({'files':removed,'bytes':removed_bytes}),flush=True)
+            stats=dict(line.split(': ',1) for line in git('count-objects','-v').splitlines())
+            pack_bytes=int(stats.get('size-pack',0))*1024
+            mem=dict(line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines())
+            available=int(mem['MemAvailable'].strip().split()[0])*1024
+            if pack_bytes<=128*1024**2 and available>=256*1024**2 and shutil.disk_usage(root).free>4*pack_bytes:
+             subprocess.run(['git','-C',str(root),'-c','pack.threads=1','-c','pack.windowMemory=16m','-c','pack.deltaCacheSize=8m','repack','-a','-d','--keep-unreachable'],check=True,timeout=90)
+             print('LOSSLESS_GIT_REPACK_DONE',flush=True)
+            else:print('LOSSLESS_GIT_REPACK_SKIPPED_RESOURCE_BOUND',flush=True)
+            assert git('show-ref')==heads and git('rev-parse','HEAD')==head
+            assert git('reflog','show','--all','--format=%H %gD')==reflogs
+            subprocess.run(['git','-C',str(root),'fsck','--connectivity-only','--no-dangling'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=30)
+            assert service()=='4124410'
+            after=shutil.disk_usage(root).free
+            print('CAPACITY_RECOVERY',json.dumps({'before_bytes':before,'after_bytes':after,'minimum_bytes':1107296256,'safe_resume_bytes':1107296256+32*1024**2,'pid_unchanged':True,'refs_and_reflogs_unchanged':True,'runtime_sha':head}),flush=True)
+            print('NO_DATABASE_EVIDENCE_BACKUP_LOG_OR_USER_FILE_DELETION_NO_RESTART_NO_PROVIDER_CALL')
             PY
