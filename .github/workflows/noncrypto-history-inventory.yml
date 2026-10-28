@@ -8,35 +8,58 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
-      - name: Inspect reproducible apt and bytecode caches
+      - name: Reclaim reproducible caches and profile unchanged read-only fence
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 60s
+          command_timeout: 120s
           script: |
-            set -eu
+            set -euo pipefail
             cd /opt/seiltanzer
-            git rev-parse HEAD
-            systemctl show seiltanzer -p MainPID -p NRestarts -p ActiveState
-            df -B1 /
-            du -x -B1 -d1 /var/lib/apt/lists /root /opt /usr/local/lib /usr/lib/python3.10 /usr/lib/python3.11 2>/dev/null | sort -n | tail -n 22 || true
-            journalctl --disk-usage
-            du -x -B1 -d1 /var/log /var/cache /root/.cache /opt/seiltanzer/data /opt/seiltanzer/.git 2>/dev/null | sort -n | tail -n 28
-            /usr/bin/python3 -u - <<'PY'
-            import json,pathlib,subprocess,time
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 30 9
+            /usr/bin/python3 -B -u - <<'PY'
+            import importlib.util,os,pathlib,stat,subprocess
             root=pathlib.Path('/opt/seiltanzer')
-            print('ACTIVE_GUARD', (root/'data/cutover.active').exists(),flush=True)
-            for directory in [pathlib.Path('/usr/lib'),pathlib.Path('/usr/local/lib')]:
-             files=[p for p in directory.rglob('*.pyc') if p.is_file() and not p.is_symlink()]
-             print('SYSTEM_BYTECODE',str(directory),len(files),sum(p.stat().st_blocks*512 for p in files),flush=True)
-            started=time.monotonic()
-            r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=10)
-            print('FENCE',r.returncode,round(time.monotonic()-started,3),r.stdout.strip(),flush=True)
-            for base in [root/'data',root/'.git/objects/pack']:
-             print('DIRECT_LARGE_FILES',str(base),json.dumps(sorted([(p.name,p.stat().st_size) for p in base.iterdir() if p.is_file() and p.stat().st_size>1000000],key=lambda p:p[1],reverse=True)[:18]),flush=True)
+            if os.path.lexists(root/'data/cutover.active'):
+             raise SystemExit('ACTIVE_CUTOVER_REFUSED')
+            refs=subprocess.check_output(['git','show-ref'],cwd=root)
+            head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root)
+            before=os.statvfs(root);print('FREE_BEFORE',before.f_bavail*before.f_frsize,flush=True)
+            removed=freed=0
+            for base in [root/'.venv',root/'seiltanzer',pathlib.Path('/usr/lib'),pathlib.Path('/usr/local/lib')]:
+             for directory,dirs,names in os.walk(base,followlinks=False):
+              dirs[:]=[name for name in dirs if not pathlib.Path(directory,name).is_symlink()]
+              if pathlib.Path(directory).name!='__pycache__':continue
+              for name in names:
+               if not name.endswith('.pyc'):continue
+               p=pathlib.Path(directory,name)
+               try:
+                info=p.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:continue
+                source=pathlib.Path(importlib.util.source_from_cache(str(p)))
+                if not source.is_file() or source.is_symlink():continue
+                p.unlink();removed+=1;freed+=info.st_blocks*512
+               except (ValueError,OSError):continue
+            print('REPRODUCIBLE_BYTECODE_REMOVED',removed,freed,flush=True)
+            subprocess.run(['git','-c','gc.reflogExpire=never','-c','gc.reflogExpireUnreachable=never','-c','pack.threads=1','-c','pack.windowMemory=32m','-c','pack.deltaCacheSize=16m','gc','--prune=never'],cwd=root,check=True,timeout=60)
+            assert refs==subprocess.check_output(['git','show-ref'],cwd=root)
+            assert head==subprocess.check_output(['git','rev-parse','HEAD'],cwd=root)
+            subprocess.run(['git','fsck','--connectivity-only','--no-dangling'],cwd=root,check=True,timeout=20)
+            after=os.statvfs(root);print('FREE_AFTER',after.f_bavail*after.f_frsize,flush=True)
+            print('HEAD_AND_ALL_REFS_UNCHANGED',head.decode().strip(),flush=True)
+            PY
+            /usr/bin/python3 -B -u - <<'PY'
+            import cProfile,io,json,pathlib,pstats,runpy,sqlite3,time
+            root=pathlib.Path('/opt/seiltanzer')
+            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_profile')
+            profiler=cProfile.Profile()
+            started=time.monotonic();result=profiler.runcall(ns['check_start'],root/'data/trades.db',root)
+            print('UNCHANGED_FENCE',json.dumps(result),round(time.monotonic()-started,3),flush=True)
+            s=io.StringIO();pstats.Stats(profiler,stream=s).sort_stats('tottime').print_stats(15);print(s.getvalue(),flush=True)
             PY
