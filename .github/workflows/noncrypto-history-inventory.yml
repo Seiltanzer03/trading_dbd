@@ -8,41 +8,34 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Read bounded disk allocation and running release
+      - name: Repack only the existing Git cache without pruning objects or reflogs
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 45s
+          command_timeout: 3m
           script: |
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import os,json,subprocess,urllib.request
-            expected='0f9525e66ca17c716c71dadc4b37496cf705d6da'
-            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            assert actual==expected
-            print('EXACT_SHA',actual)
-            print(subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID,ActiveState,SubState,NRestarts','--no-pager'],text=True))
-            s=os.statvfs('/opt/seiltanzer/data');print('DISK_FREE_BYTES',s.f_bavail*s.f_frsize)
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=8) as r:data=json.load(r)
-            worker=data.get('worker') or {};print('WORKER_DISK',json.dumps({k:v for k,v in worker.items() if any(x in k.lower() for x in ('disk','free','resource','admission','guard','paused','pause','status','state','error'))},default=str))
-            for path in ('/opt','/opt/seiltanzer','/var/cache','/root','/usr/local/lib'):
-             try:
-              r=subprocess.run(['du','-x','-d','1','-B','1',path],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
-              print('BOUNDED_DISK_ALLOCATION',r.stdout)
-             except subprocess.TimeoutExpired:print('ALLOCATION_TIMEOUT',path)
-            for folder in ('/opt/seiltanzer','/opt','/root'):
-             rows=[]
-             try:
-              with os.scandir(folder) as entries:
-               for e in entries:
-                if e.is_file(follow_symlinks=False):
-                 s=e.stat(follow_symlinks=False)
-                 if s.st_size>=10000000:rows.append(dict(name=e.name,size=s.st_size,mtime=s.st_mtime,nlink=s.st_nlink))
-              print('LARGE_DIRECT_FILES',folder,json.dumps(sorted(rows,key=lambda x:-x['size'])[:15]))
-             except OSError:pass
-            print('READONLY_NO_DB_OPEN_NO_MUTATION')
-            PY
+            set -euo pipefail
+            cd /opt/seiltanzer
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
+            test "$(git rev-parse HEAD)" = 0f9525e66ca17c716c71dadc4b37496cf705d6da
+            test "$(systemctl show seiltanzer -p MainPID --value)" = 4095659
+            test "$(systemctl is-active seiltanzer)" = active
+            test ! -e /opt/seiltanzer/data/cutover.active
+            before_refs="$(git show-ref --head | sha256sum | cut -d' ' -f1)"
+            git fsck --connectivity-only --no-dangling
+            git count-objects -vH
+            /opt/seiltanzer/.venv/bin/python -c 'import os;v=os.statvfs("/opt/seiltanzer/data");print("FREE_BEFORE",v.f_bavail*v.f_frsize);assert v.f_bavail*v.f_frsize>700000000'
+            git -c gc.reflogExpire=never -c gc.reflogExpireUnreachable=never -c pack.threads=1 -c pack.windowMemory=32m -c pack.deltaCacheSize=16m gc --prune=never
+            test "$(git show-ref --head | sha256sum | cut -d' ' -f1)" = "$before_refs"
+            git fsck --connectivity-only --no-dangling
+            git count-objects -vH
+            /opt/seiltanzer/.venv/bin/python -c 'import os;v=os.statvfs("/opt/seiltanzer/data");print("FREE_AFTER",v.f_bavail*v.f_frsize)'
+            test "$(git rev-parse HEAD)" = 0f9525e66ca17c716c71dadc4b37496cf705d6da
+            test "$(systemctl show seiltanzer -p MainPID --value)" = 4095659
+            echo GIT_REPACK_VERIFIED_NO_PRUNE_NO_DB_TOUCH_NO_RESTART
