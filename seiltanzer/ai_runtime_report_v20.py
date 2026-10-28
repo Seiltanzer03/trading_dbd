@@ -30,7 +30,7 @@ from .llm_decision_shadow import (
     record_shadow_decision,
 )
 from .llm_shadow_working_action import build_working_action
-from .ai_provider_contract import (POLICY_SCORE_ORDER, provider_response_format,
+from .ai_provider_contract import (POLICY_SCORE_ORDER, EXPLICIT_OPINION_CONTRACT, provider_response_format,
     normalize_family_wire, normalize_score_wire)
 
 
@@ -49,8 +49,9 @@ You MUST NOT change, execute, or present the shadow policy as the production act
 Return only JSON matching the supplied response schema, without markdown.
 policy must be exactly one canonical action name from the schema, never a joined
 list, an explanation, an unavailable label or a parameterized candidate ID.
-Return policy_scores as exactly12 numbers in this fixed order:
-""" + ', '.join(POLICY_SCORE_ORDER) + """.
+Set opinion_contract to single-explicit-choice-v1 and choose exactly one policy.
+Do not return a global policy_scores vector. This is one categorical preference;
+unselected actions remain unscored, never synthetic negative votes.
 The server writes the displayed report.
 Keep reason_ru under100 characters; use1-2 concise key facts and at most1
 counter-fact/invalidation. Empty evidence lists are allowed when facts are absent.
@@ -66,10 +67,11 @@ Low reliability is not an absolute ban: only the server degraded-manual gate can
 Never assert stress stability when its numeric checks are UNAVAILABLE.
 Correlated metrics from one family are not independent votes. Hard-CVaR eligibility
 is mandatory. Never widen stops, average down, or add to a losing position.
-Return all 12 policy_scores as the ordered array, each from -1 to 1: relative preferences, not
-probabilities or Expected R. Self-confidence never determines ensemble weight.
-Your selected policy must have a highest score among hard-admissible actions.
-Check that policy and policy_scores agree before returning the response.
+Self-confidence never determines ensemble weight. Family preference scores are
+relative affinities, never probabilities, Expected R, CVaR or costs copied from
+the input. Keep the final synthesis consistent with your explicit policy:
+family opinions must not jointly give a different hard-admissible action a higher
+preference. A contradictory overall opinion is rejected, never repaired locally.
 Some policy, candidate and provenance rows use column_groups: each group gives
 columns and rows; zip columns with each row's values. Mapping row keys name the
 policy/feature; sequence row keys are original zero-based indices. Different
@@ -358,7 +360,8 @@ def _decision_weights(snapshot: dict[str, Any], shadow: dict[str, Any]) -> str:
     selected = (gate.get("degraded_authority_overlay") or {}).get("selected") or {}
     llm = shadow.get("policy") or "UNAVAILABLE"
     llm_role = ("структурированный независимый голос для единого ранжирования"
-                if shadow.get("status") == "ok" and shadow.get("policy_scores")
+                if shadow.get("status") == "ok" and (shadow.get("policy_scores")
+                    or shadow.get('opinion_contract') == EXPLICIT_OPINION_CONTRACT)
                 else "недоступный или заблокированный голос; активный вес 0")
     # This section is built before the final ensemble is attached. Inspect the
     # fresh validated preference vector, not an audit from a prior decision.
@@ -409,8 +412,14 @@ def _provider_payload(content: str) -> tuple[str, dict[str, Any]]:
     shadow_raw = payload.get("shadow_decision")
     if not isinstance(shadow_raw, dict):
         raise RuntimeError("combined_provider_missing_shadow")
+    explicit = 'opinion_contract' in shadow_raw
+    if explicit and (shadow_raw['opinion_contract'] != EXPLICIT_OPINION_CONTRACT
+                     or 'policy_scores' in shadow_raw):
+        raise RuntimeError('shadow_invalid_payload')
     shadow = _validate_model_payload(normalize_family_wire(normalize_score_wire(shadow_raw)))
-    if "policy_scores" not in shadow:
+    if explicit:
+        shadow['opinion_contract'] = EXPLICIT_OPINION_CONTRACT
+    elif "policy_scores" not in shadow:
         raise RuntimeError("combined_provider_missing_policy_scores")
     return explanation, shadow
 
@@ -584,7 +593,8 @@ def request_explanation_with_shadow(
             "reason_ru": parsed_shadow["reason_ru"],
             "key_evidence": parsed_shadow["key_evidence"],
             "counter_evidence": parsed_shadow["counter_evidence"],
-            "policy_scores": parsed_shadow["policy_scores"],
+            **({"policy_scores": parsed_shadow["policy_scores"]} if 'policy_scores' in parsed_shadow
+               else {"opinion_contract": parsed_shadow['opinion_contract']}),
             "evidence_families": parsed_shadow["evidence_families"],
             "family_assessments": parsed_shadow.get("family_assessments", {}),
             "family_assessment_rejections": parsed_shadow.get("family_assessment_rejections", {}),
@@ -596,9 +606,10 @@ def request_explanation_with_shadow(
             "input_contract": {
                 "version": "independent-llm-transport-v2",
                 "quant_selection_masked": True,
-                "all_policy_scores_required": True,
-                "policy_score_wire_version": "ordered-vector-v1",
-                "policy_score_order": list(POLICY_SCORE_ORDER),
+                "all_policy_scores_required": 'policy_scores' in parsed_shadow,
+                **({"policy_score_wire_version": "ordered-vector-v1",
+                    "policy_score_order": list(POLICY_SCORE_ORDER)} if 'policy_scores' in parsed_shadow
+                   else {"opinion_contract": parsed_shadow['opinion_contract']}),
                 "input_captured_ts": authority.get("captured_ts"),
                 "frozen_input_json": frozen_input_json,
                 "frozen_input_sha256": hashlib.sha256(frozen_input_json.encode("utf-8")).hexdigest(),
