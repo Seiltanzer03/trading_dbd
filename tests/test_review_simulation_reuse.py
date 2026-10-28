@@ -141,7 +141,6 @@ def test_valid_provider_response_survives_its_budget_without_duplicate_replay(mo
     assert result['model'] == 'offline-model'
     assert result['llm_shadow_decision']['quant_evaluation'] == expected
     assert len(calls) == 4
-    assert guard.DEFAULT_PROVIDER_TIMEOUT_SEC == 6.
 
 
 def test_actual_api_propagates_one_scope_through_both_worker_pools(tmp_path, monkeypatch):

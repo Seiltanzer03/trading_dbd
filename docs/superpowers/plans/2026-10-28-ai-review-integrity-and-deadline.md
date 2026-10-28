@@ -43,3 +43,16 @@ Current limitations remain explicit: calibrated management advantage is not
 proved by four available market forecasts, and source-history deficiencies cannot
 be filled by fabricated observations. Model-risk, delayed/proxy roles, missing
 broker costs, fills and pre-release consensus retain existing honest labels.
+
+## Verification ledger
+
+Eight regressions observed failing before the production correction; focused
+29PASS, owning API/report/guard87PASS52.89s, real6.1s reply included in guard11PASS.
+One independent final review: no Critical/Important/Minor; independent30PASS6.89s.
+First CI40646071100 had5076PASS and three failures: two old tests still required
+the former6s default; update those test assertions only, including preservation
+of an explicit6s operator override. The unrelated restored-mtime/source-mutation
+test also failed in that run; it passed unchanged in the12-test focused follow-up.
+Do not suppress it or change source-integrity gates. Final full CI is required
+on this updated test-only revision. Native transport, WebKit and production
+acceptance remain mandatory; no additional independent review of unchanged code.

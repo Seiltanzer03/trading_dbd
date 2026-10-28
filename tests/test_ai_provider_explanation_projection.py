@@ -114,10 +114,13 @@ def test_provider_projection_is_bounded_non_mutating_and_keeps_action_inputs():
     )
 
 
-def test_provider_timeout_contract_is_unchanged(monkeypatch):
+def test_provider_timeout_uses_existing_cap_and_preserves_operator_override(monkeypatch):
     monkeypatch.delenv("AI_PROVIDER_TIMEOUT_SEC", raising=False)
-    assert provider_timeout_sec() == DEFAULT_PROVIDER_TIMEOUT_SEC == 6.0
+    assert provider_timeout_sec() == DEFAULT_PROVIDER_TIMEOUT_SEC == 8.0
     assert MAX_PROVIDER_TIMEOUT_SEC == 8.0
+
+    monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "6")
+    assert provider_timeout_sec() == 6.0
 
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "99")
     assert provider_timeout_sec() == MAX_PROVIDER_TIMEOUT_SEC
