@@ -9,8 +9,26 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 40
     steps:
+      - name: Wait for successful exact-SHA automatic deployment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = '8518d125ddbe15f2188faae0c98a9fc66667ff93';
+            const deadline = Date.now() + 35*60*1000;
+            while (Date.now() < deadline) {
+              const {data} = await github.rest.actions.listWorkflowRuns({
+                owner:context.repo.owner,repo:context.repo.repo,
+                workflow_id:'deploy.yml',branch:'main',head_sha:sha,per_page:20
+              });
+              const accepted = data.workflow_runs.find(r=>r.head_sha===sha && r.status==='completed' && r.conclusion==='success');
+              if (accepted) { core.info('EXACT_SHA_DEPLOY_ACCEPTED '+accepted.id); return; }
+              const last=data.workflow_runs[0];
+              core.info(last ? 'WAIT_DEPLOY '+last.id+' '+last.status+' '+last.conclusion : 'WAIT_MAIN_CI');
+              await new Promise(r=>setTimeout(r,45000));
+            }
+            throw new Error('exact-SHA deploy acceptance not observed within bound');
       - name: Read exact release research, structured LLM and trace receipts
         uses: appleboy/ssh-action@v1
         with:
@@ -23,9 +41,9 @@ jobs:
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
             import json,sqlite3,time,urllib.request,subprocess,sys,re
             sys.dont_write_bytecode=True;sys.path.insert(0,'/opt/seiltanzer')
-            expected='0f9525e66ca17c716c71dadc4b37496cf705d6da'
+            expected='8518d125ddbe15f2188faae0c98a9fc66667ff93'
             actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('ACCEPTANCE_0f9525e66ca17c716c71dadc4b37496cf705d6da',actual,flush=True);assert actual==expected
+            print('ACCEPTANCE_8518d125ddbe15f2188faae0c98a9fc66667ff93',actual,flush=True);assert actual==expected
             print('ACCEPTANCE_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,NRestarts','--no-pager'],text=True).strip(),flush=True)
             with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=8) as response:status=json.load(response)
             print('SNAPSHOT_STATUS',json.dumps({k:status.get(k) for k in ('ready','building','last_error','snapshot_budget','family_market_forecasts')}),flush=True)
@@ -38,7 +56,7 @@ jobs:
              assert rows
              for index,(id,ts,raw,text) in enumerate(rows):
               s=json.loads(raw);m=s.get('policy_manager') or {};llm=s.get('llm_shadow_decision') or {};a=m.get('unified_edge_ensemble') or {};decision=m.get('management_decision') or {}
-              summary=dict(policy_scores=llm.get('policy_scores'),hard_guard_reasons=llm.get('hard_guard_reasons'),llm_reason=llm.get('reason_ru'),candidate_gates=[{k:x.get(k) for k in ('policy','candidate_id','eligible','hard_risk_pass','blocked_reasons')} for x in a.get('candidates',[])],id=id,ts=ts,runtime_code_sha=s.get('runtime_code_sha'),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in a.get('components',[]) if x.get('component_id')=='current_llm'],decision={k:decision.get(k) for k in ('policy','decision_id','continuity','execution_status','remaining_fraction_before_action','incremental_close_fraction','remaining_fraction_after_action')},previous={k:(decision.get('previous') or {}).get(k) for k in ('policy','decision_id','execution_status')},net_floor=(m.get('risk_constraint') or {}).get('net_cvar_floor_r'),selection_floor=(m.get('selection_rule') or {}).get('cvar_floor_r'),coverage=(s.get('metric_coverage') or {}).get('summary'),metric_n=len((m.get('option_derivative_state') or {}).get('metrics') or {}))
+              summary=dict(opinion_contract=llm.get('opinion_contract'),has_legacy_policy_scores='policy_scores' in llm,hard_guard_reasons=llm.get('hard_guard_reasons'),id=id,ts=ts,runtime_code_sha=s.get('runtime_code_sha'),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in a.get('components',[]) if x.get('component_id')=='current_llm'],decision={k:decision.get(k) for k in ('policy','decision_id','continuity','execution_status','remaining_fraction_before_action','incremental_close_fraction','remaining_fraction_after_action')},previous={k:(decision.get('previous') or {}).get(k) for k in ('policy','decision_id','execution_status')},net_floor=(m.get('risk_constraint') or {}).get('net_cvar_floor_r'),selection_floor=(m.get('selection_rule') or {}).get('cvar_floor_r'),coverage=(s.get('metric_coverage') or {}).get('summary'),metric_n=len((m.get('option_derivative_state') or {}).get('metrics') or {}))
               if index==0:
                contract=llm.get('input_contract') or {}
                proof=None
@@ -48,7 +66,7 @@ jobs:
                  validate_no_future_timestamps({'captured_ts':s['captured_ts'],'llm_shadow_decision':llm},float(s['captured_ts']))
                  proof='FULL_AUDIT_PACKET_ALIASES_CLOCKS_VERIFIED'
                 except Exception as exc:proof='FAILED_'+type(exc).__name__
-               summary.update(provider_contract=contract.get('version'),audit_proof=proof,
+               summary.update(provider_contract=contract.get('version'),audit_proof=proof,provider_wire_bytes=len(str(contract.get('frozen_input_json') or '').encode()),full_audit_bytes=len(str(contract.get('full_input_json') or '').encode()),evidence_aliases_n=len(contract.get('evidence_identity_aliases') or {}),
                 report_metric_rows=len(re.findall(r'^\w+: current=',text,re.M)),
                 has_metric_audit='**FULL METRIC AUDIT**' in text,
                 invalid_legacy_cvar='-1.010R >= -1.000R' in text,
