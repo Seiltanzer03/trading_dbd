@@ -15,7 +15,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const sha = '12b0518db8f32b847ed2aa46a03cbea80f0c70f7';
+            const sha = '7e222a36b7ce6f88abd9136db011cbd431c47298';
             const deadline = Date.now() + 35*60*1000;
             while (Date.now() < deadline) {
               const {data} = await github.rest.actions.listWorkflowRuns({
@@ -41,12 +41,14 @@ jobs:
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
             import json,sqlite3,time,urllib.request,subprocess,sys,re
             sys.dont_write_bytecode=True;sys.path.insert(0,'/opt/seiltanzer')
-            expected='12b0518db8f32b847ed2aa46a03cbea80f0c70f7'
+            expected='7e222a36b7ce6f88abd9136db011cbd431c47298'
             actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('ACCEPTANCE_12b0518db8f32b847ed2aa46a03cbea80f0c70f7',actual,flush=True);assert actual==expected
+            print('ACCEPTANCE_7e222a36b7ce6f88abd9136db011cbd431c47298',actual,flush=True);assert actual==expected
             print('ACCEPTANCE_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,NRestarts','--no-pager'],text=True).strip(),flush=True)
             with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=8) as response:status=json.load(response)
             print('SNAPSHOT_STATUS',json.dumps({k:status.get(k) for k in ('ready','building','last_error','snapshot_budget','family_market_forecasts')}),flush=True)
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/position',timeout=8) as response:position=json.load(response)
+            print('LIVE_RECORDED_PROTECTION',json.dumps({'trade_id':position.get('trade_id'),'active_stop_price':(position.get('position_state') or {}).get('active_stop_price'),'stop_execution_context':position.get('stop_execution_context')},ensure_ascii=False),flush=True)
             trade_id=status.get('current_trade_id');assert trade_id is not None
             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
             try:
@@ -86,6 +88,22 @@ jobs:
                for component in a.get('components',[]):
                 if component.get('reason')=='CURRENT_LLM_POLICY_SCORE_CONTRADICTION':
                  assert component.get('standalone_action_status')=='NOT_ACTIONABLE'
+              if index==0:
+               context=decision.get('stop_execution_context')
+               summary.update(stop_execution_context=context,continued_pending_action=decision.get('continued_pending_action'),first_issued_at=decision.get('first_issued_at'),last_validated_review_id=decision.get('last_validated_review_id'),budget_tradeoffs=[{'policy':r.get('policy'),'ranking_reason':r.get('ranking_reason'),'check':r.get('expected_sacrifice_check')} for r in a.get('candidates',[]) if r.get('ranking_reason')=='EXPECTED_SACRIFICE_EXCEEDS_BUDGET'])
+               pending_count=sum(c.execute('SELECT COUNT(*) FROM '+table+' WHERE trade_id=? AND status=?',(int(trade_id),'pending_execution')).fetchone()[0] for table in ('management_decisions','llm_shadow_manual_actions'))
+               summary['pending_command_count']=pending_count
+               assert pending_count<=1,'multiple pending manual commands'
+               if context:
+                assert context['broker_execution_confirmed'] is False
+                assert context['recorded_stop_price']==s['position_state']['active_stop_price']
+                assert 'исполнение не подтверждено' in text
+               if decision.get('continued_pending_action'):
+                assert decision.get('continuity')=='continue_same_pending_decision'
+                assert (decision.get('previous') or {}).get('decision_id')==decision.get('decision_id')
+                stored=c.execute('SELECT created_ts,review_id,status FROM llm_shadow_manual_actions WHERE action_id=?',(decision['decision_id'],)).fetchone()
+                assert stored and stored[0]==decision['first_issued_at'] and stored[2]=='pending_execution'
+                summary['original_command_receipt']={'created_ts':stored[0],'review_id':stored[1],'status':stored[2]}
               print('SAVED_AI_ACCEPTANCE',json.dumps(summary,ensure_ascii=False),flush=True)
             finally:c.close()
             r=subprocess.run(['journalctl','-u','seiltanzer','--since','-30 minutes','-n','900','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
