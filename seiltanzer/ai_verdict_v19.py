@@ -791,11 +791,31 @@ def _unified_command_sections(lines: list[str], snapshot: dict) -> list[str]:
            f"Авторитет: {decision.get('authority') or '—'}; статус {decision.get('execution_status') or '—'}; decision_id={decision.get('decision_id') or '—'}."]
     from .ai_verdict_v9 import _previous_text
     top.append(_previous_text(decision))
+    protection = decision.get('stop_execution_context') or {}
+    if protection:
+        top.append('Защита у брокера: исполнение не подтверждено. '
+                   f"Записанный стоп {protection.get('recorded_stop_price')}; "
+                   f"предложенный стоп {protection.get('proposed_stop_price')}. "
+                   'Запись терминала не является проверкой текущего состояния у брокера.')
+        distance = _number(protection.get('distance_price'))
+        age = _number(protection.get('pending_age_sec'))
+        if distance is not None:
+            top.append(f'До предложенного стопа на момент снимка: {distance:.3f} / '
+                       f"{_r(protection.get('distance_r'))}; "
+                       f"ожидание подтверждения {age:.0f} сек." if age is not None else
+                       f'До предложенного стопа на момент снимка: {distance:.3f} / '
+                       f"{_r(protection.get('distance_r'))}; время ожидания недоступно.")
+        if protection.get('proposed_stop_crossed') is True:
+            top.append('Предложенный уровень уже достигнут/пересечён: проверить фактический '
+                       'стоп и состояние позиции у брокера; старую установку стопа не повторять.')
     if pending:
         top.append('Это единственная действующая ручная команда. Автоматическое исполнение запрещено.')
         after = ['Подтвердите решение только после фактического исполнения у брокера; повторное подтверждение того же decision_id не создаёт дополнительное закрытие.']
         if decision.get('continuity') == 'continue_same_pending_decision':
-            top.append('Это прежнее действующее решение, а не дополнительное закрытие позиции.')
+            top.append('Это прежнее действующее решение, а не дополнительное закрытие позиции.'
+                       if policy in {'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT'} else
+                       'Это прежняя действующая команда; повторно выполнять её не требуется, '
+                       'если действие уже выполнено у брокера. Нужен фактический результат.')
         after.append('После полного EXIT сопровождение сделки прекращается.' if policy == 'EXIT' else
                      'После действия сопровождать фактический остаток по обновлённому стопу/БУ и лестнице.')
     else:

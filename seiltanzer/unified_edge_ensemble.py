@@ -656,6 +656,13 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
         sacrifice = (best_expected - row['expected_net_r'] if best_expected is not None
                      and row.get('expected_net_r') is not None else None)
         if row["eligible"] and row["policy"] != "HOLD" and best_expected is not None:
+            same_bank = (best_reference and row.get('bank_id')
+                         and row.get('bank_id') == best_reference.get('bank_id')
+                         and row.get('economics_basis') == best_reference.get('economics_basis')
+                         == 'common_frozen_weighted_option_driver_paths')
+            tail_difference = (row['cvar10_net_r'] - best_reference['cvar10_net_r']
+                               if same_bank and row.get('cvar10_net_r') is not None
+                               and best_reference.get('cvar10_net_r') is not None else None)
             row['expected_sacrifice_check'] = {
                 'reference_candidate_id': best_reference['candidate_id'] if best_reference else None,
                 'reference_expected_net_r': best_expected,
@@ -663,6 +670,12 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
                 'sacrifice_r': sacrifice, 'budget_r': band,
                 'pass': sacrifice <= band + 1e-8 if sacrifice is not None else None,
                 'reference_scope': 'BEST_ELIGIBLE_EXPECTED_BEFORE_RANKING_FILTER',
+                'candidate_tail_gain_vs_reference_r': tail_difference,
+                'economic_relation': ('EXPECTED_TAIL_TRADEOFF' if sacrifice is not None
+                    and sacrifice > 1e-8 and tail_difference is not None and tail_difference > 1e-8
+                    else 'REFERENCE_DOMINATES_OR_EQUALS' if tail_difference is not None
+                    and tail_difference <= 0 else 'UNAVAILABLE'),
+                'threshold_basis': 'CONFIGURED_POLICY_NOT_HISTORICAL_CALIBRATION',
             }
             if not benefit['allowed']:
                 row["ranking_eligible"], row["ranking_reason"] = False, "NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT"

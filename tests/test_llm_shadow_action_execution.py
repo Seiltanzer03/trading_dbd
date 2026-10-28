@@ -304,7 +304,7 @@ def test_pending_and_superseded_stop_reference_survives_reload_without_execution
 def test_superseded_stop_can_be_explicitly_declined_without_stale_execution(tmp_path):
     ledger=PositionLedger(str(tmp_path/'reconcile.db')); trade=_trade()
     first=_register(ledger,trade,_shadow('TIGHTEN_STOP',{'stop_price':105.}),review='one')
-    second=_register(ledger,trade,_shadow('TIGHTEN_STOP',{'stop_price':105.}),review='two',captured=2001.)
+    second=_register(ledger,trade,_shadow('TIGHTEN_STOP',{'stop_price':106.}),review='two',captured=2001.)
     with pytest.raises(StaleDecisionError):
         ledger.acknowledge_shadow_action(action_id=first['action_id'],trade=trade,executed=True,execution_price=110.,execution_r=1.)
     ledger.acknowledge_shadow_action(action_id=second['action_id'],trade=trade,executed=False,execution_price=110.,execution_r=1.)

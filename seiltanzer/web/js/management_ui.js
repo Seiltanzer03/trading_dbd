@@ -187,6 +187,8 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
     const check = row.expected_sacrifice_check;
     if (row.ranking_reason === 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET' && check) appendTextLine(detail, 'tiny',
       `${row.policy}: Экономическая плата относительно ${check.reference_candidate_id || '—'} (Expected ${signed(check.reference_expected_net_r, 'R')}): ${signed(check.sacrifice_r, 'R')}; бюджет ${signed(check.budget_r, 'R')}.`);
+    if (row.ranking_reason === 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET' && check?.economic_relation === 'EXPECTED_TAIL_TRADEOFF') appendTextLine(detail, 'tiny',
+      `${row.policy}: компромисс Expected/хвост; преимущество по CVaR10 ${signed(check.candidate_tail_gain_vs_reference_r, 'R')}. Порог — заданная политика, исторически не откалиброван; исключение по бюджету не означает экономического доминирования.`);
     const benefit = row.benefit_assessment;
     const pairedBound = benefit?.sensitivity_basis === 'PAIRED_MODEL_BOUND';
     if (row.policy !== 'HOLD' && finiteNumber(benefit?.expected_test_value_r) !== null) appendTextLine(detail, 'tiny',
@@ -489,9 +491,26 @@ export function mountShadowWorkingAction(container, shadow, post, onApplied = ()
   no.addEventListener('click', () => submit(false));
 }
 
+function mountStopExecutionContext(container, protection) {
+  container.replaceChildren();
+  if (protection) {
+    appendTextLine(container, 'ai-execution-warning',
+      `Защита у брокера: исполнение не подтверждено. Записанный стоп ${protection.recorded_stop_price ?? '—'}; предложенный ${protection.proposed_stop_price ?? '—'}. Запись терминала не проверяет текущее состояние у брокера.`);
+    const distance = finiteNumber(protection.distance_price);
+    const age = finiteNumber(protection.pending_age_sec);
+    appendTextLine(container, 'tiny amber',
+      `На момент снимка: до предложения ${distance === null ? '—' : distance.toFixed(3)} / ${signed(protection.distance_r, 'R')}; ожидание подтверждения ${age === null ? '—' : age.toFixed(0)} сек.`);
+    if (protection.proposed_stop_crossed === true) appendTextLine(container, 'ai-execution-warning',
+      'Предложенный уровень достигнут/пересечён. Проверьте стоп и состояние позиции у брокера; старую установку стопа не повторяйте.');
+  }
+}
+
 // Pure management-decision UI. The backend remains authoritative.
 export function mountManagementDecision(container, decision, post, onApplied = () => {}) {
   container.replaceChildren();
+  const protectionPanel = document.createElement('div');
+  mountStopExecutionContext(protectionPanel, decision?.stop_execution_context);
+  container.appendChild(protectionPanel);
   if (!decision || !decision.manual_execution_required ||
       decision.execution_status !== 'pending_execution') return;
   const title = document.createElement('div');
@@ -555,6 +574,9 @@ export function mountManagementDecision(container, decision, post, onApplied = (
         executed,
         ...(executed && brokerPrice !== null ? { execution_price: brokerPrice } : {}),
       });
+      if (Object.prototype.hasOwnProperty.call(result, 'stop_execution_context')) {
+        mountStopExecutionContext(protectionPanel, result.stop_execution_context);
+      }
       settled = true;
       actions.remove();
       const remaining = Number(result.position_state?.remaining_position_fraction);
