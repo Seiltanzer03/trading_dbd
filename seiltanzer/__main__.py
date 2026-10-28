@@ -168,6 +168,8 @@ def main() -> None:
     # A deterministic calculation failure must not hot-loop every 2 seconds, and
     # an empty journal must preserve the existing fast no_active_trade response.
     install_ai_snapshot_runtime_guard(app, materializer)
+    from .ai_review_jobs import install_ai_review_jobs
+    install_ai_review_jobs(app)
 
     _startup_marker(startup_started, "schema.backup.begin")
     ensure_g1m_schema_backup(storage)

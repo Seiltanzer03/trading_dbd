@@ -150,6 +150,23 @@ def test_unified_replacement_does_not_keep_cancellation_continuity(monkeypatch):
     assert decision['continuity']=='unified_action_replaces_previous_plan'
 
 
+def test_unified_repeated_pending_reduction_keeps_actual_decision_identity(monkeypatch):
+    from seiltanzer.app import _unified_operational_choice
+    s = selected_snapshot('HOLD', 'not_required')
+    s['policy_manager']['management_decision'].update(
+        previous={'policy': 'CLOSE_10', 'execution_status': 'pending_execution',
+                  'decision_id': 'pending-close'})
+    audit = {'selected_policy': 'CLOSE_10', 'selected_candidate_id': 'CLOSE_10',
+             'candidates': [{'policy': 'CLOSE_10', 'candidate_id': 'CLOSE_10', 'eligible': True}]}
+    monkeypatch.setattr('seiltanzer.app._refresh_management_decision', lambda e,s,t:
+        {**s['policy_manager']['management_decision'], 'policy': 'CLOSE_10',
+         'execution_status': 'pending_execution', 'decision_id': 'pending-close',
+         'continuity': 'continue_same_pending_decision'})
+    decision, _ = _unified_operational_choice(SimpleNamespace(), s, {}, audit)
+    assert decision['continuity'] == 'continue_same_pending_decision'
+    assert decision['decision_id'] == 'pending-close'
+
+
 def llm_proposal_snapshot():
     s = selected_snapshot('CLOSE_25')
     s['llm_shadow_decision'] = {'status': 'ok', 'policy': 'MOVE_TO_BE', 'confidence': .8,
