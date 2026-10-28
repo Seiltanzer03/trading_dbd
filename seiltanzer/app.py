@@ -133,6 +133,11 @@ def _extended_manual_decision(base: dict, action: dict) -> dict:
     if (action.get("execution_status") != "pending_execution"
             or action.get("production_authority") is not True):
         return base
+    previous = base.get('previous') or {}
+    pending = previous.get('execution_status') in {
+        'pending_execution', 'not_executed', 'recommended_not_executed'}
+    same_pending = (pending and previous.get('decision_id') == action['action_id']
+                    and previous.get('policy') == action.get('policy'))
     return {
         **action,
         "decision_id": action["action_id"],
@@ -143,7 +148,9 @@ def _extended_manual_decision(base: dict, action: dict) -> dict:
         "remaining_fraction_after_action": base["remaining_fraction_before_action"],
         "quant_baseline_policy": "HOLD",
         "previous": base.get("previous"),
-        "continuity": base.get("continuity"),
+        "continuity": ('continue_same_pending_decision' if same_pending else
+                       'unified_action_replaces_previous_plan' if pending else
+                       'new_unified_action'),
         "manual_execution_required": True,
         "automatic_execution_allowed": False,
     }

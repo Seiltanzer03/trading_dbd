@@ -416,6 +416,15 @@ def collect_components(snapshot, candidates, current_llm=None, excluded_working_
     working = working_family_preferences(evidence.get('families'),
         {**llm, 'policy_scores': scores}, excluded_family=excluded_working_family)
     scores = working['scores']
+    # Family interpretations share this one opinion's budget. They cannot
+    # reverse a nonflat explicit choice after its global vector passed admission.
+    final_chosen_score = scores.get(llm.get('policy'))
+    contradictory = contradictory or (not global_flat_scores
+        and llm.get('policy') in admissible_policies and final_chosen_score is not None
+        and any(value > final_chosen_score for policy, value in scores.items()
+                if policy in admissible_policies))
+    if contradictory:
+        llm = {**llm, 'status': 'unavailable'}
     # An explicitly flat vector contains no relative opinion. Preserve legacy
     # sparse choices and differentiated opinions, regardless of self-confidence.
     flat_scores = len(scores) > 1 and max(scores.values()) == min(scores.values())

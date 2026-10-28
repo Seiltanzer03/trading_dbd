@@ -5,6 +5,7 @@ from .edge_family_adapters import FAMILIES
 from .llm_decision_shadow import VALID_POLICIES
 
 POLICY_SCORE_ORDER = VALID_POLICIES
+EXPLICIT_OPINION_CONTRACT = 'single-explicit-choice-v1'
 
 
 def _object(properties):
@@ -24,20 +25,16 @@ def provider_response_format():
         reason_ru=dict(type='string')))
     strings = lambda: dict(type='array', items=dict(type='string'))
     shadow = _object(dict(
+        opinion_contract=dict(type='string', enum=[EXPLICIT_OPINION_CONTRACT]),
         policy=dict(type='string', enum=actions),
         confidence=dict(type='number'),
-        policy_scores=dict(type='array', minItems=len(POLICY_SCORE_ORDER),
-            maxItems=len(POLICY_SCORE_ORDER),
-            items=dict(type='number', minimum=-1, maximum=1),
-            description='Exactly one score per action in this fixed order: '
-                        + ', '.join(POLICY_SCORE_ORDER)),
         reason_ru=dict(type='string'),
         key_evidence=strings(), counter_evidence=strings(),
         evidence_families=strings(),
         family_assessments=dict(type='array', items=family),
         invalidation_conditions=strings()))
     return dict(type='json_schema', json_schema=dict(
-        name='independent_trade_preferences_v2', strict=True,
+        name='independent_trade_preferences_v3', strict=True,
         schema=_object(dict(shadow_decision=shadow))))
 
 
