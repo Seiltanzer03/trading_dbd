@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read current release fence and bounded capacity
+      - name: Inspect retained log compression candidates and real query plans
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -24,12 +24,19 @@ jobs:
             git rev-parse HEAD
             systemctl show seiltanzer -p MainPID -p NRestarts -p ActiveState
             df -B1 /
+            find /var/log -xdev -maxdepth 2 -type f -size +5M -printf '%s %p\\n' | sort -nr | head -n 20
             journalctl --disk-usage
             du -x -B1 -d1 /var/log /var/cache /root/.cache /opt/seiltanzer/data /opt/seiltanzer/.git 2>/dev/null | sort -n | tail -n 28
             /usr/bin/python3 -u - <<'PY'
             import json,pathlib,subprocess,time
             root=pathlib.Path('/opt/seiltanzer')
             print('ACTIVE_GUARD', (root/'data/cutover.active').exists(),flush=True)
+            import sqlite3
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=1)
+            c.execute('PRAGMA query_only=ON')
+            tables=['archived_rejected_source_index','g1_dataset_membership']
+            print('QUERY_INDEXES',json.dumps(list(c.execute(\"SELECT name,sql FROM sqlite_schema WHERE type='index' AND tbl_name IN (?,?)\",tables))),flush=True)
+            c.close()
             started=time.monotonic()
             r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=10)
             print('FENCE',r.returncode,round(time.monotonic()-started,3),r.stdout.strip(),flush=True)
