@@ -28,13 +28,13 @@ jobs:
             print(subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID,ActiveState,SubState,NRestarts','--no-pager'],text=True))
             s=os.statvfs('/opt/seiltanzer/data');print('DISK_FREE_BYTES',s.f_bavail*s.f_frsize)
             with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=8) as r:data=json.load(r)
-            print('WORKER_DISK',json.dumps({k:v for k,v in data.items() if any(x in k.lower() for x in ('disk','free','resource','admission','guard','paused','pause','status','state','error'))},default=str))
-            for path in ('/var/log','/opt/seiltanzer/.git','/root/.cache','/tmp'):
+            worker=data.get('worker') or {};print('WORKER_DISK',json.dumps({k:v for k,v in worker.items() if any(x in k.lower() for x in ('disk','free','resource','admission','guard','paused','pause','status','state','error'))},default=str))
+            for path in ('/opt','/opt/seiltanzer','/var/cache','/root','/usr/local/lib'):
              try:
               r=subprocess.run(['du','-x','-d','1','-B','1',path],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
               print('BOUNDED_DISK_ALLOCATION',r.stdout)
              except subprocess.TimeoutExpired:print('ALLOCATION_TIMEOUT',path)
-            for folder in ('/var/log','/opt/seiltanzer/data'):
+            for folder in ('/opt/seiltanzer','/opt','/root'):
              rows=[]
              try:
               with os.scandir(folder) as entries:
