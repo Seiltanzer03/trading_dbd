@@ -1,4 +1,4 @@
-name: ai-release-startup-status-20261020
+name: readonly-release-startup-4d35
 on:
   push:
     branches: [ops/history-cutover-status-20261019]
@@ -8,62 +8,28 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
-      - name: Read current deployment, capacity and cached runtime only
-        uses: appleboy/ssh-action@v1
+      - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 60s
+          port: 22
+          command_timeout: 35s
           script: |
             set -euo pipefail
             cd /opt/seiltanzer
-            /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,os,subprocess,time,urllib.request
-            from pathlib import Path
-            def out(**row): print(json.dumps(row,sort_keys=True))
-            sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True,timeout=3).strip()
-            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState','-p','ExecMainStartTimestamp'],text=True,timeout=5)
-            fields=dict(line.split('=',1) for line in props.splitlines() if '=' in line)
-            pid=fields.get('MainPID','0')
-            proc={}
-            if pid!='0':
-                try:
-                    proc={k:v.strip() for k,v in (line.split(':',1) for line in Path('/proc',pid,'status').read_text().splitlines() if ':' in line) if k in ('VmRSS','VmHWM','VmSwap')}
-                except OSError as exc: proc={'error':type(exc).__name__}
-            st=os.statvfs('/'); db=Path('data/trades.db'); wal=Path(str(db)+'-wal')
-            io={}
-            if pid!='0':
-                try: io=dict(line.split(':',1) for line in Path('/proc',pid,'io').read_text().splitlines() if ':' in line)
-                except OSError: pass
-            out(kind='process_io',counters=io)
-            phases=subprocess.check_output(['journalctl','-b','-u','seiltanzer','_PID='+pid,'--grep=^STARTUP_PHASE phase=','-n','5','--no-pager','-o','cat'],text=True,timeout=5)
-            out(kind='startup_phases',phases=[line for line in phases.splitlines() if line.startswith('STARTUP_PHASE phase=')])
-            out(kind='production',observed_ts=time.time(),sha=sha,properties=fields,memory=proc,free_bytes=st.f_bavail*st.f_frsize,db_bytes=db.stat().st_size,wal_bytes=wal.stat().st_size if wal.exists() else 0)
-            for path in ('/api/state','/api/ai/snapshot/status','/api/research/runtime/worker-status'):
-                start=time.monotonic()
-                try:
-                    with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as response: row=json.loads(response.read(2*1024**2))
-                    if path=='/api/state':
-                        tick=row.get('tick') or {}; price=(tick.get('feeds') or {}).get('price') or {}
-                        result={'instrument':tick.get('instrument'),'source':price.get('source'),'status':price.get('status'),'source_ts':price.get('ts'),'tick_ts':tick.get('ts')}
-                    elif path.endswith('worker-status'):
-                        worker=row.get('worker') or {}
-                        result={k:worker.get(k) for k in ('current_phase','core_stage','last_error','memory_pressure','disk_pause_active','acceptance_gate_active','acceptance_gate_run_id')}
-                    else: result={k:row.get(k) for k in ('ready','building','age_sec','build_n','build_ms','last_error')}
-                    out(kind='runtime',path=path,elapsed_ms=round((time.monotonic()-start)*1000,1),fields=result)
-                except Exception as exc: out(kind='runtime_unavailable',path=path,elapsed_ms=round((time.monotonic()-start)*1000,1),error=type(exc).__name__)
-            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
-                p=Path('data/research')/name
-                if not p.is_file():out(kind='published_file',name=name,present=False);continue
-                info={'bytes':p.stat().st_size,'modified_ts':p.stat().st_mtime}
-                if 0 < info['bytes'] <= 2*1024**2:
-                    try:
-                        raw=p.read_bytes(); row=json.loads(raw)
-                        info.update(json_valid=True,nul_bytes=raw.count(b'\x00'),published_for_sha=row.get('published_for_sha'),captured_ts=row.get('captured_ts'),version=row.get('version'),models_produced=row.get('models_produced'))
-                    except Exception as exc: info.update(json_valid=False,error=type(exc).__name__)
-                out(kind='published_file',name=name,**info)
-            out(kind='safety',review_posts=0,provider_calls=0,database_writes=0,signals=0,cleanup_calls=0,restarts=0,acks=0,orders=0)
+            current=$(git rev-parse HEAD)
+            case "$current" in
+              7e222a36b7ce6f88abd9136db011cbd431c47298|4d35f82110007d78b41635f5da3f55e422a081d0) ;;
+              *) echo 'UNEXPECTED_RUNTIME'; exit 1 ;;
+            esac
+            echo "RUNTIME_SHA=$current"
+            systemctl show seiltanzer --property=ActiveState,SubState,MainPID,ControlPID,NRestarts,MemoryCurrent,FreezerState --no-pager
+            journalctl -b -u seiltanzer --grep='^STARTUP_PHASE phase=' -n 4 --no-pager -o cat
+            /usr/bin/python3 -B - <<'PY'
+            import json,shutil,os
+            print('CAPACITY_METADATA',json.dumps(shutil.disk_usage('/opt/seiltanzer')._asdict()))
+            print('READ_ONLY_NO_DB_OPEN_NO_API_NO_PROVIDER_NO_RESTART')
             PY
