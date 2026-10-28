@@ -15,14 +15,14 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const sha = '8d6488e495b2df414b47f8a80eaea7cdc7be03d5';
+            const sha = '12b0518db8f32b847ed2aa46a03cbea80f0c70f7';
             const deadline = Date.now() + 35*60*1000;
             while (Date.now() < deadline) {
               const {data} = await github.rest.actions.listWorkflowRuns({
                 owner:context.repo.owner,repo:context.repo.repo,
-                workflow_id:'noncrypto-history-inventory.yml',branch:'ops/noncrypto-history-inventory-20261026',head_sha:sha,per_page:20
+                workflow_id:'deploy.yml',head_sha:sha,per_page:20
               });
-              const accepted = data.workflow_runs.find(r=>r.head_sha===sha && r.name==='production-acceptance-quiescent-8518d12' && r.status==='completed' && r.conclusion==='success');
+              const accepted = data.workflow_runs.find(r=>r.head_sha===sha && r.status==='completed' && r.conclusion==='success');
               if (accepted) { core.info('EXACT_SHA_DEPLOY_ACCEPTED '+accepted.id); return; }
               const last=data.workflow_runs[0];
               core.info(last ? 'WAIT_DEPLOY '+last.id+' '+last.status+' '+last.conclusion : 'WAIT_MAIN_CI');
@@ -41,9 +41,9 @@ jobs:
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
             import json,sqlite3,time,urllib.request,subprocess,sys,re
             sys.dont_write_bytecode=True;sys.path.insert(0,'/opt/seiltanzer')
-            expected='8518d125ddbe15f2188faae0c98a9fc66667ff93'
+            expected='12b0518db8f32b847ed2aa46a03cbea80f0c70f7'
             actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('ACCEPTANCE_8518d125ddbe15f2188faae0c98a9fc66667ff93',actual,flush=True);assert actual==expected
+            print('ACCEPTANCE_12b0518db8f32b847ed2aa46a03cbea80f0c70f7',actual,flush=True);assert actual==expected
             print('ACCEPTANCE_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,NRestarts','--no-pager'],text=True).strip(),flush=True)
             with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=8) as response:status=json.load(response)
             print('SNAPSHOT_STATUS',json.dumps({k:status.get(k) for k in ('ready','building','last_error','snapshot_budget','family_market_forecasts')}),flush=True)
@@ -74,6 +74,18 @@ jobs:
                 obsolete_ai_arbiter='Арбитр: AI →' in text,
                 risk_report_lines=[line for line in text.splitlines() if 'CVaR10 net:' in line or line.startswith(('Net selection floor:','Gross strategy CVaR floor:','Audit summary:'))])
                assert s.get('runtime_code_sha')==expected,'saved review is not current release'
+              if index==0:
+               winner=next((r for r in a.get('candidates',[]) if r.get('candidate_id')==a.get('ranking_selected_candidate_id')),{})
+               reference=s.get('pending_stop_reference') or {}
+               summary.update(pending_stop_reference=reference,ranking_selected_policy=winner.get('policy'),ranking_reason=winner.get('ranking_reason'),dominated_by=winner.get('dominated_by_candidate_ids'))
+               assert not winner.get('dominated_by_candidate_ids'),'dominated action selected'
+               target=(winner.get('parameters') or {}).get('stop_price')
+               if target is not None and reference.get('stop_price') is not None:
+                sign=1 if s['trade_geometry']['entry']>s['trade_geometry']['original_stop'] else -1
+                assert sign*(target-reference['stop_price'])>=0,'stop proposal weakened'
+               for component in a.get('components',[]):
+                if component.get('reason')=='CURRENT_LLM_POLICY_SCORE_CONTRADICTION':
+                 assert component.get('standalone_action_status')=='NOT_ACTIONABLE'
               print('SAVED_AI_ACCEPTANCE',json.dumps(summary,ensure_ascii=False),flush=True)
             finally:c.close()
             r=subprocess.run(['journalctl','-u','seiltanzer','--since','-30 minutes','-n','900','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
