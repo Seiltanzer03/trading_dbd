@@ -442,13 +442,15 @@ def bounded_provider_call(
     executor: ThreadPoolExecutor | None = None,
 ) -> dict[str, Any]:
     """Call one provider with a hard wall-clock budget and stale-work circuit."""
-    timeout = provider_timeout_sec() if timeout_sec is None else float(timeout_sec)
+    from .ai_review_jobs import detached_provider_timeout
+    detached_timeout = detached_provider_timeout()
+    timeout = (detached_timeout or provider_timeout_sec()) if timeout_sec is None else float(timeout_sec)
     # Optional prose may use only the remaining request time. Preserve the
     # unchanged12s route limit and reserve4s for ensemble, risk revalidation
     # and durable publication after provider success or deterministic fallback.
     from .ai_request_trace import current_trace
     trace=current_trace()
-    if trace is not None:
+    if trace is not None and detached_timeout is None:
         remaining=12.-(time.monotonic()-trace.started)-4.
         if remaining<=0:
             raise RuntimeError('provider_request_budget_exhausted')

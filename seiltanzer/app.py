@@ -186,7 +186,11 @@ def _unified_operational_choice(engine, snapshot: dict, trade: dict,
             audit["operational_guard_reason"] = decision.get("reason") or "OPERATIONAL_GUARD_CHANGED_POLICY"
         elif policy != "HOLD" and previous.get("policy") != policy:
             predecessor = previous.get("previous") or previous
-            decision["continuity"] = (
+            same_pending = (predecessor.get('execution_status') in
+                            {'pending_execution', 'not_executed', 'recommended_not_executed'}
+                            and predecessor.get('decision_id') == decision.get('decision_id')
+                            and predecessor.get('policy') == policy)
+            decision["continuity"] = ('continue_same_pending_decision' if same_pending else
                 "unified_action_replaces_previous_plan"
                 if predecessor.get("execution_status") == "pending_execution" else
                 "new_unified_action")
@@ -217,6 +221,24 @@ def _unified_operational_choice(engine, snapshot: dict, trade: dict,
     return decision, proposal
 
 
+def _assert_unified_review_current(engine, snapshot, trade, audit):
+    """Read-only publication/delivery guard over actual position and live quote."""
+    from .ai_review_jobs import assert_review_deadline
+    assert_review_deadline()
+    with engine.journal._lock, engine.position._lock:
+        active = engine.journal.active_trade()
+        if not active or int(active['id']) != int(trade['id']) or active.get('status') != 'open':
+            raise StaleDecisionError('active trade changed before unified publication')
+        frozen = (snapshot.get('policy_manager') or {}).get('management_decision') or {}
+        current_version = engine.position._geometry_version(active, engine.position.state(active))
+        if frozen.get('geometry_version') != current_version:
+            raise StaleDecisionError('position geometry changed before unified publication')
+        from .ai_snapshot_market_refresh import assert_live_review_compatible
+        winner = next((row for row in audit.get('candidates') or []
+                       if row.get('candidate_id') == audit.get('selected_candidate_id')), None)
+        assert_live_review_compatible(engine, snapshot, candidate=winner, components=audit.get('components'))
+
+
 def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str,
                             trade: dict, audit: dict) -> dict:
     """Publish the exact ranked decision and its frozen audit, or restore pending work."""
@@ -226,14 +248,7 @@ def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str
         active = engine.journal.active_trade()
         if not active or int(active["id"]) != int(trade["id"]) or active.get("status") != "open":
             raise StaleDecisionError("active trade changed before unified publication")
-        frozen = (snapshot.get("policy_manager") or {}).get("management_decision") or {}
-        current_version = engine.position._geometry_version(active, engine.position.state(active))
-        if frozen.get("geometry_version") != current_version:
-            raise StaleDecisionError("position geometry changed before unified publication")
-        from .ai_snapshot_market_refresh import assert_live_review_compatible
-        winner = next((row for row in audit.get('candidates') or []
-                       if row.get('candidate_id') == audit.get('selected_candidate_id')), None)
-        assert_live_review_compatible(engine, snapshot, candidate=winner, components=audit.get('components'))
+        _assert_unified_review_current(engine, snapshot, active, audit)
         decision, proposal = _unified_operational_choice(engine, snapshot, active, audit)
         engine.position.register_decision(snapshot, review_id, active)
         if proposal:
@@ -1246,6 +1261,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/ai/verdict")
     async def api_ai_verdict(request: Request = None):
+        jobs = getattr(app.state, 'ai_review_jobs', None)
+        if request is not None and jobs is not None:
+            # No HTTP request/trace is retained by the detached task. Its own
+            # trace spans the complete review and all polls are read-only.
+            return jobs.start(lambda: api_ai_verdict())
         from .ai_request_trace import AIRequestTrace
         from .ai_review_worker import review_executor, AIReviewWorkerBusy
         from .extended_policy_evaluation import review_evaluation_scope
@@ -1291,6 +1311,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 with trace.span('cached_snapshot'):
                     snapshot = build_snapshot(engine)
             except Exception as exc:
+                from .ai_snapshot_materializer import SnapshotNotReady, _warming_response
+                if isinstance(exc, SnapshotNotReady):
+                    return _warming_response(exc.status)
                 trace.error("snapshot_error", exc)
                 return JSONResponse(
                     status_code=500,
@@ -1503,6 +1526,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body["edge_management"]["unified_edge_ensemble"] = result["unified_edge_ensemble"]
             body["edge_management"]["available"] = True
             body["context_reviews"] = len(snapshot.get("previous_reviews") or [])
+
+            from .ai_review_jobs import bind_delivery_guard
+            bind_delivery_guard(lambda: _assert_unified_review_current(
+                engine, snapshot, active_trade, audit))
 
             return JSONResponse(content=body)
 

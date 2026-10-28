@@ -523,9 +523,10 @@ def request_explanation_with_shadow(
     try:
         with phase('provider_http'):
             from .ai_provider_transport import post_json
+            from .ai_review_jobs import provider_transport_timeout
             response = post_json("https://openrouter.ai/api/v1/chat/completions",
                                  body=body, proxy=proxy,
-                                 headers=_provider._provider_headers(key), timeout=8)
+                                 headers=_provider._provider_headers(key), timeout=provider_transport_timeout())
             response.raise_for_status()
         with phase('provider_decode'):
             try:

@@ -80,3 +80,27 @@ try {
 }
 
 console.log('ai verdict defensive parsing + single-flight ok');
+
+//202 must poll a single opaque same-origin job, never start another inference.
+const requests = [];
+globalThis.fetch = async (url, init) => {
+  requests.push([url, init.method]);
+  if (requests.length === 1) return response(202, 'application/json', JSON.stringify({
+    ok: true, status: 'pending', review_job: {
+      job_id: 'a'.repeat(32), poll_url: '/api/ai/reviews/' + 'a'.repeat(32), retry_after_sec: 1,
+    }}));
+  return response(200, 'application/json', '{"ok":true,"verdict":"COMPLETE","mode":"llm"}');
+};
+try {
+  const [a, b] = await Promise.all([
+    fetchStructured('/api/ai/verdict', {method: 'POST'}),
+    fetchStructured('/api/ai/verdict', {method: 'POST'}),
+  ]);
+  assert.equal(a.verdict, 'COMPLETE');
+  assert.equal(b.verdict, 'COMPLETE');
+  assert.deepEqual(requests, [['/api/ai/verdict', 'POST'], ['/api/ai/reviews/' + 'a'.repeat(32), 'GET']]);
+  globalThis.fetch = async () => response(202, 'application/json', JSON.stringify({
+    ok: true, status: 'pending', review_job: {poll_url: 'https://untrusted.test/private'},
+  }));
+  await assert.rejects(fetchStructured('/api/ai/verdict', {method: 'POST'}), /Некорректный адрес/);
+} finally { globalThis.fetch = originalFetch; }

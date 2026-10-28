@@ -95,12 +95,32 @@ async function fetchAiVerdictUntilMaterialized(url, init = {}) {
   // and returns a fast 503 while it is warming. Poll with separate short HTTP
   // requests so Caddy never holds one request long enough to emit a 504.
   const deadline = Date.now() + 120000;
+  let currentUrl = url;
+  let currentInit = init;
+  let jobUrl = null;
   while (true) {
     try {
-      return await fetchStructuredOnce(url, init);
+      const body = await fetchStructuredOnce(currentUrl, currentInit);
+      if (body.status !== 'pending' || !body.review_job) return body;
+      const poll = body.review_job.poll_url;
+      if (typeof poll !== 'string' || !/^\/api\/ai\/reviews\/[a-f0-9]{32}$/.test(poll)
+          || (jobUrl !== null && poll !== jobUrl)) {
+        throw new Error('Некорректный адрес готовности ИИ-разбора');
+      }
+      if (Date.now() >= deadline) throw new Error('Время ожидания ИИ-разбора истекло');
+      jobUrl = poll;
+      currentUrl = poll;
+      currentInit = {...init, method: 'GET'};
+      delete currentInit.body;
+      await sleep(Math.min(5, Math.max(1, Number(body.review_job.retry_after_sec || 1))) * 1000);
     } catch (error) {
       const warming = error?.status === 503 && error?.code === 'ai_snapshot_warming';
       if (!warming || Date.now() >= deadline) throw error;
+      // This job stopped before provider admission because the frozen cache
+      // changed. A fresh POST may wait for materialization; no inference retry.
+      currentUrl = url;
+      currentInit = init;
+      jobUrl = null;
       const delaySec = Math.min(5, Math.max(1, Number(error?.retryAfterSec || 2)));
       await sleep(delaySec * 1000);
     }

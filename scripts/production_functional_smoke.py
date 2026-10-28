@@ -431,6 +431,28 @@ def verify_trade_settlement_contract() -> None:
             position.close(); journal.close()
 
 
+def request_ai_verdict():
+    """One admitted review, followed by bounded read-only readiness requests."""
+    path, method = '/api/ai/verdict', 'POST'
+    poll_url = None
+    deadline = time.monotonic() + 120.
+    while True:
+        code, body, elapsed = request(path, method=method,
+                                     timeout=AI_VERDICT_TRANSPORT_TIMEOUT_SEC)
+        print(f'{path}: {code} {elapsed:.0f}ms gate<{AI_VERDICT_MAX_MS:.0f}ms')
+        assert elapsed < AI_VERDICT_MAX_MS, (elapsed, AI_VERDICT_MAX_MS, code)
+        if code != 202:
+            return code, body, elapsed
+        import re
+        candidate = ((body or {}).get('review_job') or {}).get('poll_url')
+        assert isinstance(candidate, str) and re.fullmatch('/api/ai/reviews/[a-f0-9]{32}', candidate), body
+        assert poll_url is None or poll_url == candidate, body
+        assert time.monotonic() < deadline, 'AI_REVIEW_JOB_DEADLINE'
+        poll_url = candidate
+        path, method = candidate, 'GET'
+        time.sleep(1.)
+
+
 def verify_ai_verdict() -> None:
     verify_management_ack_guard_contract()
     verify_trade_settlement_contract()
@@ -443,9 +465,8 @@ def verify_ai_verdict() -> None:
     # through a new short request instead of keeping one HTTP request open.
     deadline = time.monotonic() + AI_MATERIALIZER_WAIT_SEC
     while True:
-        code, body, elapsed = request(
-            "/api/ai/verdict", method="POST", timeout=AI_VERDICT_TRANSPORT_TIMEOUT_SEC)
-        print(f"/api/ai/verdict: {code} {elapsed:.0f}ms gate<{AI_VERDICT_MAX_MS:.0f}ms")
+        code, body, elapsed = request_ai_verdict()
+        print(f"AI_REVIEW_RESULT: {code} final_request_ms={elapsed:.0f}")
         assert elapsed < AI_VERDICT_MAX_MS, (elapsed, AI_VERDICT_MAX_MS, code, body)
         assert code != 504, body
         if (code == 503 and isinstance(body, dict)
