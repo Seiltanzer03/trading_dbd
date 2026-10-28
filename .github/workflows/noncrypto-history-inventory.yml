@@ -1,117 +1,40 @@
-name: noncrypto-history-inventory
+name: history-fence-readonly-7e222
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
-  actions: read
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 3
     steps:
-      - name: Wait for successful exact-SHA automatic deployment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const sha = '7e222a36b7ce6f88abd9136db011cbd431c47298';
-            const deadline = Date.now() + 35*60*1000;
-            while (Date.now() < deadline) {
-              const {data} = await github.rest.actions.listWorkflowRuns({
-                owner:context.repo.owner,repo:context.repo.repo,
-                workflow_id:'deploy.yml',head_sha:sha,per_page:20
-              });
-              const accepted = data.workflow_runs.find(r=>r.head_sha===sha && r.status==='completed' && r.conclusion==='success');
-              if (accepted) { core.info('EXACT_SHA_DEPLOY_ACCEPTED '+accepted.id); return; }
-              const last=data.workflow_runs[0];
-              core.info(last ? 'WAIT_DEPLOY '+last.id+' '+last.status+' '+last.conclusion : 'WAIT_MAIN_CI');
-              await new Promise(r=>setTimeout(r,45000));
-            }
-            throw new Error('exact-SHA deploy acceptance not observed within bound');
-      - name: Read exact release research, structured LLM and trace receipts
-        uses: appleboy/ssh-action@v1
+      - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40s
+          command_timeout: 35s
           script: |
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,sqlite3,time,urllib.request,subprocess,sys,re
-            sys.dont_write_bytecode=True;sys.path.insert(0,'/opt/seiltanzer')
-            expected='7e222a36b7ce6f88abd9136db011cbd431c47298'
+            import os,sys,json,time,subprocess,pathlib,urllib.request
+            sys.dont_write_bytecode=True
             actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('ACCEPTANCE_7e222a36b7ce6f88abd9136db011cbd431c47298',actual,flush=True);assert actual==expected
-            print('ACCEPTANCE_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,NRestarts','--no-pager'],text=True).strip(),flush=True)
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=8) as response:status=json.load(response)
-            print('SNAPSHOT_STATUS',json.dumps({k:status.get(k) for k in ('ready','building','last_error','snapshot_budget','family_market_forecasts')}),flush=True)
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/position',timeout=8) as response:position=json.load(response)
-            print('LIVE_RECORDED_PROTECTION',json.dumps({'trade_id':position.get('trade_id'),'active_stop_price':(position.get('position_state') or {}).get('active_stop_price'),'stop_execution_context':position.get('stop_execution_context')},ensure_ascii=False),flush=True)
-            trade_id=status.get('current_trade_id');assert trade_id is not None
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-             rows=c.execute('SELECT id,ts,snapshot_json,verdict FROM ai_verdicts WHERE trade_id=? AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 2',(int(trade_id),)).fetchall()
-             assert rows
-             for index,(id,ts,raw,text) in enumerate(rows):
-              s=json.loads(raw);m=s.get('policy_manager') or {};llm=s.get('llm_shadow_decision') or {};a=m.get('unified_edge_ensemble') or {};decision=m.get('management_decision') or {}
-              summary=dict(opinion_contract=llm.get('opinion_contract'),has_legacy_policy_scores='policy_scores' in llm,hard_guard_reasons=llm.get('hard_guard_reasons'),id=id,ts=ts,runtime_code_sha=s.get('runtime_code_sha'),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in a.get('components',[]) if x.get('component_id')=='current_llm'],decision={k:decision.get(k) for k in ('policy','decision_id','continuity','execution_status','remaining_fraction_before_action','incremental_close_fraction','remaining_fraction_after_action')},previous={k:(decision.get('previous') or {}).get(k) for k in ('policy','decision_id','execution_status')},net_floor=(m.get('risk_constraint') or {}).get('net_cvar_floor_r'),selection_floor=(m.get('selection_rule') or {}).get('cvar_floor_r'),coverage=(s.get('metric_coverage') or {}).get('summary'),metric_n=len((m.get('option_derivative_state') or {}).get('metrics') or {}))
-              if index==0:
-               contract=llm.get('input_contract') or {}
-               proof=None
-               if contract.get('version')=='independent-llm-transport-v2':
-                from seiltanzer.decision_research import validate_no_future_timestamps
-                try:
-                 validate_no_future_timestamps({'captured_ts':s['captured_ts'],'llm_shadow_decision':llm},float(s['captured_ts']))
-                 proof='FULL_AUDIT_PACKET_ALIASES_CLOCKS_VERIFIED'
-                except Exception as exc:proof='FAILED_'+type(exc).__name__
-               summary.update(provider_contract=contract.get('version'),audit_proof=proof,provider_wire_bytes=len(str(contract.get('frozen_input_json') or '').encode()),full_audit_bytes=len(str(contract.get('full_input_json') or '').encode()),evidence_aliases_n=len(contract.get('evidence_identity_aliases') or {}),
-                report_metric_rows=len(re.findall(r'^\w+: current=',text,re.M)),
-                has_metric_audit='**FULL METRIC AUDIT**' in text,
-                invalid_legacy_cvar='-1.010R >= -1.000R' in text,
-                fake_zero_coverage='Покрытие: 0/0' in text,
-                obsolete_ai_arbiter='Арбитр: AI →' in text,
-                risk_report_lines=[line for line in text.splitlines() if 'CVaR10 net:' in line or line.startswith(('Net selection floor:','Gross strategy CVaR floor:','Audit summary:'))])
-               assert s.get('runtime_code_sha')==expected,'saved review is not current release'
-              if index==0:
-               winner=next((r for r in a.get('candidates',[]) if r.get('candidate_id')==a.get('ranking_selected_candidate_id')),{})
-               reference=s.get('pending_stop_reference') or {}
-               summary.update(pending_stop_reference=reference,ranking_selected_policy=winner.get('policy'),ranking_reason=winner.get('ranking_reason'),dominated_by=winner.get('dominated_by_candidate_ids'),comparison=[{k:r.get(k) for k in ('policy','parameters','eligible','ranking_eligible','expected_net_r','cvar10_net_r','ranking_reason')} for r in a.get('candidates',[]) if r.get('policy')=='EXIT' or r.get('candidate_id')==winner.get('candidate_id')])
-               assert not winner.get('dominated_by_candidate_ids'),'dominated action selected'
-               target=(winner.get('parameters') or {}).get('stop_price')
-               if target is not None and reference.get('stop_price') is not None:
-                sign=1 if s['trade_geometry']['entry']>s['trade_geometry']['original_stop'] else -1
-                assert sign*(target-reference['stop_price'])>=0,'stop proposal weakened'
-               for component in a.get('components',[]):
-                if component.get('reason')=='CURRENT_LLM_POLICY_SCORE_CONTRADICTION':
-                 assert component.get('standalone_action_status')=='NOT_ACTIONABLE'
-              if index==0:
-               context=decision.get('stop_execution_context')
-               summary.update(stop_execution_context=context,continued_pending_action=decision.get('continued_pending_action'),first_issued_at=decision.get('first_issued_at'),last_validated_review_id=decision.get('last_validated_review_id'),budget_tradeoffs=[{'policy':r.get('policy'),'ranking_reason':r.get('ranking_reason'),'check':r.get('expected_sacrifice_check')} for r in a.get('candidates',[]) if r.get('ranking_reason')=='EXPECTED_SACRIFICE_EXCEEDS_BUDGET'])
-               pending_count=sum(c.execute('SELECT COUNT(*) FROM '+table+' WHERE trade_id=? AND status=?',(int(trade_id),'pending_execution')).fetchone()[0] for table in ('management_decisions','llm_shadow_manual_actions'))
-               summary['pending_command_count']=pending_count
-               assert pending_count<=1,'multiple pending manual commands'
-               if context:
-                assert context['broker_execution_confirmed'] is False
-                assert context['recorded_stop_price']==s['position_state']['active_stop_price']
-                assert 'исполнение не подтверждено' in text
-               if decision.get('continued_pending_action'):
-                assert decision.get('continuity')=='continue_same_pending_decision'
-                assert (decision.get('previous') or {}).get('decision_id')==decision.get('decision_id')
-                stored=c.execute('SELECT created_ts,review_id,status FROM llm_shadow_manual_actions WHERE action_id=?',(decision['decision_id'],)).fetchone()
-                assert stored and stored[0]==decision['first_issued_at'] and stored[2]=='pending_execution'
-                summary['original_command_receipt']={'created_ts':stored[0],'review_id':stored[1],'status':stored[2]}
-              print('SAVED_AI_ACCEPTANCE',json.dumps(summary,ensure_ascii=False),flush=True)
-            finally:c.close()
-            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-30 minutes','-n','900','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
-            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason','exception_class')
-            for line in r.stdout.splitlines():
-             try:v=json.loads(line[line.index('{'):])
-             except (ValueError,TypeError):continue
-             if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-') and v.get('stage') in ('provider_transport','provider_http','provider_fallback','response'):
-              print('ACCEPTANCE_PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
-            print('READ_ONLY_NO_PROVIDER_CALL_NO_ORDER_NO_FIT_NO_DB_WRITE')
+            print('ACTUAL_RUNTIME',actual,flush=True)
+            assert actual=='12b0518db8f32b847ed2aa46a03cbea80f0c70f7'
+            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,MainPID,NRestarts,FreezerState','--no-pager'],text=True).strip(),flush=True)
+            for name in ('cutover.active','cutover.journal.json'):
+             p=pathlib.Path('/opt/seiltanzer/data')/name
+             print('FENCE_PATH',name,'exists',p.exists(),'symlink',p.is_symlink(),flush=True)
+             if name.endswith('.json') and p.is_file() and not p.is_symlink() and p.stat().st_size<16384:
+              j=json.loads(p.read_text())
+              print('JOURNAL_STATE',json.dumps({k:j.get(k) for k in ('phase','status','service_started','run_id','completed_at')}),flush=True)
+            started=time.monotonic()
+            result=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database','/opt/seiltanzer/data/trades.db','--application-root','/opt/seiltanzer'],capture_output=True,text=True,timeout=9,env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'})
+            print('ORIGINAL_GUARD_READONLY',json.dumps({'returncode':result.returncode,'elapsed':time.monotonic()-started,'stdout':result.stdout[:5000],'stderr':result.stderr[:1500]}),flush=True)
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=5) as r:s=json.load(r)
+            print('SNAPSHOT',json.dumps({k:s.get(k) for k in ('ready','building','last_error')}),flush=True)
+            print('READ_ONLY_NO_RESTART_NO_FIT_NO_PROVIDER_CALL')
             PY
