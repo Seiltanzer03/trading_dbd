@@ -34,6 +34,7 @@ const post=async (url,payload)=>{
   window.__calls.push({url,payload});
   if(url==='/api/ai/shadow-action/ack') return {ok:true,action_id:payload.action_id,execution_status:'executed',position_state:{active_stop_price:107,take:130}};
   return {ok:true,decision_id:payload.decision_id,
+    stop_execution_context:null,
     execution_status:payload.executed?'executed':'recommended_not_executed',
     position_state:{remaining_position_fraction:payload.executed?(payload.decision_id==='decision-repeat-close50'?.25:.75):1}};
 };
@@ -47,7 +48,9 @@ mountManagementDecision(document.querySelector('#repeat'),{...decision,
 mountShadowWorkingAction(document.querySelector('#shadow'),shadow,post);
 const extended={...decision,decision_id:'management-action-e2e',policy:'TIGHTEN_STOP',
   instruction_ru:'Подтянуть стоп к 107',quant_baseline_policy:'HOLD',
-  authority:'AI_RISK_OVERLAY_EXTENDED'};
+  authority:'AI_RISK_OVERLAY_EXTENDED',stop_execution_context:{recorded_stop_price:90,
+    proposed_stop_price:107,distance_price:3,distance_r:.3,pending_age_sec:600,
+    proposed_stop_crossed:false}};
 mountManagementDecision(document.querySelector('#extended-execution'),extended,post);
 mountShadowWorkingAction(document.querySelector('#extended-shadow'),{
   working_action:{...shadow.working_action,action_id:'management-action-e2e'},
@@ -118,7 +121,9 @@ assert.equal(await page.locator('#execution').getByRole('button',{name:'НЕ В�
 await page.locator('#shadow').getByText('РАСШИРЕННЫЙ ВАРИАНТ LLM').waitFor();
 assert.equal(await page.locator('#extended-shadow').getByRole('button').count(),0);
 await page.locator('#extended-execution input').fill('110');
+assert.match(await page.locator('#extended-execution').innerText(),/исполнение не подтверждено/);
 await page.locator('#extended-execution').getByRole('button',{name:'ВЫПОЛНЕНО',exact:true}).tap();
+assert.doesNotMatch(await page.locator('#extended-execution').innerText(),/исполнение не подтверждено|Записанный стоп 90/);
 const extendedCall=await page.evaluate(()=>window.__calls[1]);
 assert.equal(extendedCall.url,'/api/ai/decision/ack');
 assert.equal(extendedCall.payload.decision_id,'management-action-e2e');

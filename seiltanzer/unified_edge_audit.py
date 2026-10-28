@@ -365,6 +365,11 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
                          + _format(sacrifice.get('reference_expected_net_r'), 'R') + "): "
                          + _format(sacrifice.get('sacrifice_r'), 'R') + "; бюджет "
                          + _format(sacrifice.get('budget_r'), 'R') + ". Это сравнение с лучшим допустимым Expected.")
+            if sacrifice.get('economic_relation') == 'EXPECTED_TAIL_TRADEOFF':
+                lines.append('Это компромисс Expected/хвост: преимущество кандидата по CVaR10 '
+                             + _format(sacrifice.get('candidate_tail_gain_vs_reference_r'), 'R')
+                             + '. Порог — заданная политика, исторически не откалиброван; '
+                               'исключение по бюджету не означает экономического доминирования.')
         benefit = row.get('benefit_assessment') or {}
         if row.get('policy') != 'HOLD' and benefit.get('expected_test_value_r') is not None:
             paired_bound = benefit.get('sensitivity_basis') == 'PAIRED_MODEL_BOUND'

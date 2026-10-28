@@ -134,6 +134,13 @@ def _extended_manual_decision(base: dict, action: dict) -> dict:
             or action.get("production_authority") is not True):
         return base
     previous = base.get('previous') or {}
+    if action.get('continued_pending_action') is True and previous.get('decision_id') != action['action_id']:
+        # Reuse keeps original issuance, so newer inactive HOLD ledger rows may
+        # precede it by time. The still-pending command remains the predecessor.
+        previous = {'decision_id': action['action_id'], 'review_id': action.get('review_id'),
+                    'policy': action.get('policy'), 'execution_status': 'pending_execution',
+                    'issued_at': action.get('first_issued_at'),
+                    'authority': 'AI_RISK_OVERLAY_EXTENDED'}
     pending = previous.get('execution_status') in {
         'pending_execution', 'not_executed', 'recommended_not_executed'}
     same_pending = (pending and previous.get('decision_id') == action['action_id']
@@ -147,7 +154,7 @@ def _extended_manual_decision(base: dict, action: dict) -> dict:
         "remaining_fraction_before_action": base["remaining_fraction_before_action"],
         "remaining_fraction_after_action": base["remaining_fraction_before_action"],
         "quant_baseline_policy": "HOLD",
-        "previous": base.get("previous"),
+        "previous": previous or base.get("previous"),
         "continuity": ('continue_same_pending_decision' if same_pending else
                        'unified_action_replaces_previous_plan' if pending else
                        'new_unified_action'),
@@ -271,6 +278,9 @@ def _publish_unified_review(engine, snapshot: dict, result: dict, review_id: str
         # deterministic action. Confidence never becomes its ensemble weight.
         if isinstance(result.get("llm_shadow_decision"), dict):
             snapshot["llm_shadow_decision"] = result["llm_shadow_decision"]
+        decision['stop_execution_context'] = engine.position.stop_execution_context(
+            active, current_price=(snapshot.get('trade_geometry') or {}).get('current'),
+            captured_ts=snapshot.get('captured_ts'))
         snapshot["policy_manager"]["management_decision"] = decision
         snapshot["effective_management_decision"] = decision
         audit["ranking_selected_policy"] = audit.get("selected_policy")
@@ -1616,6 +1626,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 engine.journal.resolve_decision_replays(trade['id'])
             acknowledged.update(trade_closed=True, trade=closed,
                                 journal_result_r=closed['result_r'])
+        acknowledged['stop_execution_context'] = (engine.position.stop_execution_context(
+            closed, captured_ts=time.time()) if closed['status'] == 'open' else None)
         invalidate_live_state()
         return acknowledged
 
@@ -1637,6 +1649,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "position_state": engine.position.state(trade) if trade else None,
             "events": engine.position.events(trade["id"]) if trade else [],
             "shadow_actions": engine.position.shadow_actions(trade["id"]) if trade else [],
+            "stop_execution_context": engine.position.stop_execution_context(
+                trade, captured_ts=time.time()) if trade else None,
         }
 
     # -------------------------------------------------------------------- ws

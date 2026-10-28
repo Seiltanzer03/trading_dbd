@@ -21,6 +21,30 @@ def test_broker_fill_price_supplies_r_when_market_quote_is_absent():
     trade = {"entry": 100.0, "stop": 90.0, "direction": "long"}
     assert _acknowledged_execution(trade, {"feeds": {}, "prob": {}}, 115.0) == (115.0, 1.5)
 
+
+def test_position_endpoint_exposes_unconfirmed_stop_without_changing_actual_state(client):
+    from test_llm_shadow_action_execution import _shadow, _register
+    engine = client.app.state.engine
+    trade = engine.journal.active_trade()
+    target = (trade['entry'] + trade['stop']) / 2
+    action = _register(engine.position, trade, _shadow('TIGHTEN_STOP', {'stop_price': target}),
+                       captured=time.time(), review='pending-reference')
+    body = client.get('/api/position').json()
+    context = body['stop_execution_context']
+    assert context['action_id'] == action['action_id']
+    assert context['recorded_stop_price'] == trade['stop']
+    assert context['proposed_stop_price'] == target
+    assert context['pending_age_sec'] >= 0
+    assert context['broker_execution_confirmed'] is False
+    assert context['distance_r'] is None  # This endpoint does not acquire a quote.
+    assert body['position_state']['active_stop_price'] == trade['stop']
+    acknowledged = client.post('/api/ai/decision/ack', json={
+        'trade_id': trade['id'], 'decision_id': action['action_id'],
+        'executed': True, 'execution_price': trade['entry']})
+    assert acknowledged.status_code == 200
+    assert acknowledged.json()['stop_execution_context'] is None
+    assert client.get('/api/position').json()['stop_execution_context'] is None
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "")

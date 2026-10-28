@@ -3,18 +3,38 @@ import assert from 'node:assert/strict';
 
 // Exercise the real renderer without launching a server or a market worker.
 class Element {
-  constructor(tag = 'div') { this.tag = tag; this.children = []; this.style = {}; this.value = ''; }
+  constructor(tag = 'div') { this.tag = tag; this.children = []; this.style = {}; this.value = ''; this.listeners = {}; }
   set textContent(text) { this.value = String(text); this.children = []; }
   get textContent() { return this.value + this.children.map((child) => child.textContent).join('\n'); }
   set innerHTML(_text) { throw new Error('Audit facts must use textContent'); }
-  appendChild(child) { this.children.push(child); return child; }
-  append(...children) { this.children.push(...children); }
+  appendChild(child) { child.parent = this; this.children.push(child); return child; }
+  append(...children) { children.forEach(child => this.appendChild(child)); }
   replaceChildren(...children) { this.value = ''; this.children = children; }
+  addEventListener(event, handler) { this.listeners[event] = handler; }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
 }
 globalThis.document = {createElement: (tag) => new Element(tag)};
 const source = fs.readFileSync('seiltanzer/web/js/management_ui.js', 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace('mountG1SEvidencePanel();', '');
-const {mountEdgeManagement, mountArchivedManagement} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const {mountEdgeManagement, mountArchivedManagement, mountManagementDecision} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const protectionPanel = new Element();
+mountManagementDecision(protectionPanel, {policy:'HOLD', execution_status:'not_required',
+  stop_execution_context:{recorded_stop_price:3976,proposed_stop_price:4040.41,
+    distance_price:3.325,distance_r:.1108333,pending_age_sec:600,proposed_stop_crossed:false}}, () => {});
+assert.match(protectionPanel.textContent,/3976/);
+assert.match(protectionPanel.textContent,/4040\.41/);
+assert.match(protectionPanel.textContent,/3\.325.*0\.111R/);
+assert.match(protectionPanel.textContent,/600 сек/);
+assert.match(protectionPanel.textContent,/не подтверждено/);
+const pendingPanel = new Element();
+mountManagementDecision(pendingPanel, {policy:'TIGHTEN_STOP',execution_status:'pending_execution',
+  authority:'AI_RISK_OVERLAY_EXTENDED',manual_execution_required:true,decision_id:'stop-one',
+  stop_execution_context:{recorded_stop_price:90,proposed_stop_price:107,distance_r:.3}},
+  async () => ({execution_status:'executed',position_state:{active_stop_price:107},stop_execution_context:null}));
+const descendants = element => [element, ...element.children.flatMap(descendants)];
+descendants(pendingPanel).find(el => el.tag === 'input').value = '110';
+await descendants(pendingPanel).find(el => el.tag === 'button' && el.textContent === 'ВЫПОЛНЕНО').listeners.click();
+assert.doesNotMatch(pendingPanel.textContent,/не подтверждено|Записанный стоп 90/);
 const policies = ['HOLD','CLOSE_10','CLOSE_25','CLOSE_50','EXIT','MOVE_TO_BE',
   'TIGHTEN_STOP','TRAIL_GAMMA_FLIP','EXTEND_TAKE','REDUCE_TAKE','SCALE_OUT_ON_SPIKE','TIME_STOP'];
 const candidates = policies.map((policy) => ({candidate_id:policy,policy,

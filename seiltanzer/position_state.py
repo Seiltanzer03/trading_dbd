@@ -497,7 +497,27 @@ class PositionLedger:
         })
         action_id = "management-action-" + hashlib.sha256(raw.encode()).hexdigest()[:28]
         action_payload["action_id"] = action_id
+        action_payload['first_issued_at'] = captured
+        action_payload['last_validated_review_id'] = str(review_id)
         with self._lock, self._conn:
+            if policy in EXTENDED_STOP_POLICIES:
+                previous = self._conn.execute(
+                    "SELECT * FROM llm_shadow_manual_actions WHERE trade_id=? "
+                    "AND created_ts>=? AND status<>'publication_failed' "
+                    "ORDER BY created_ts DESC,rowid DESC LIMIT 1",
+                    (int(trade['id']), _finite(trade.get('opened_at')) or 0.),
+                ).fetchone()
+                if (previous is not None and previous['status'] == 'pending_execution'
+                        and previous['policy'] == policy
+                        and previous['geometry_version'] == geometry_version
+                        and _finite(json.loads(previous['parameters_json']).get('stop_price'))
+                            == _finite(parameters.get('stop_price'))):
+                    # A fresh economic review of the same protection is not a
+                    # second broker instruction. Keep the original receipt intact.
+                    return {**action_payload, 'action_id': previous['action_id'],
+                            'review_id': previous['review_id'],
+                            'first_issued_at': previous['created_ts'],
+                            'continued_pending_action': True}
             self._conn.execute(
                 "UPDATE llm_shadow_manual_actions SET status='superseded' "
                 "WHERE trade_id=? AND status='pending_execution' AND action_id<>?",
@@ -579,19 +599,55 @@ class PositionLedger:
         order = 'DESC' if _direction(trade) == 'long' else 'ASC'
         with self._lock:
             row = self._conn.execute(
-                "SELECT action_id,parameters_json FROM llm_shadow_manual_actions "
+                "SELECT action_id,parameters_json,created_ts,status FROM llm_shadow_manual_actions "
                 "WHERE trade_id=? AND status IN ('pending_execution','superseded') "
+                "AND created_ts>=? "
                 "AND policy IN ('MOVE_TO_BE','TIGHTEN_STOP','TRAIL_GAMMA_FLIP') "
                 "AND json_valid(parameters_json) "
                 "AND json_type(parameters_json,'$.stop_price') IN ('integer','real') "
                 "AND json_extract(parameters_json,'$.stop_price')>0 "
                 "ORDER BY json_extract(parameters_json,'$.stop_price') " + order +
-                ",created_ts DESC LIMIT 1", (int(trade['id']),)).fetchone()
+                ",created_ts ASC LIMIT 1", (int(trade['id']), _finite(trade.get('opened_at')) or 0.)).fetchone()
         if row is None:
             return None
         return {'stop_price': json.loads(row['parameters_json'])['stop_price'],
                 'action_id': row['action_id'], 'broker_execution_confirmed': False,
+                'first_issued_at': row['created_ts'], 'execution_status': row['status'],
                 'role': 'UNRESOLVED_RECOMMENDATION_NON_WIDENING_BOUND'}
+
+    def stop_execution_context(self, trade: dict, *, current_price=None,
+                               captured_ts=None) -> dict | None:
+        """Recorded protection versus an unresolved proposal, without inferring fills."""
+        reference = self.pending_stop_reference(trade)
+        if reference is None:
+            return None
+        state = self.state(trade)
+        recorded = float(state['active_stop_price'])
+        proposed = float(reference['stop_price'])
+        price, captured = _finite(current_price), _finite(captured_ts)
+        sign = 1. if _direction(trade) == 'long' else -1.
+        if sign * (recorded - proposed) >= 0:
+            # A real receipt already records equal or stronger protection.
+            # Older unresolved recommendations must not resurrect a false gap.
+            return None
+        risk = abs(float(trade['entry']) - float(trade['stop']))
+        distance = sign * (price - proposed) if price is not None and price > 0 else None
+        age = captured - reference['first_issued_at'] if captured is not None else None
+        return {
+            'action_id': reference['action_id'],
+            'execution_status': reference['execution_status'],
+            'recorded_stop_price': recorded, 'proposed_stop_price': proposed,
+            'recorded_stop_source': 'POSITION_LEDGER_NOT_LIVE_BROKER_STATE',
+            'broker_execution_confirmed': False,
+            'first_issued_at': reference['first_issued_at'],
+            'pending_age_sec': age if age is not None and age >= 0 else None,
+            'current_price': price, 'quote_snapshot_ts': captured,
+            'distance_price': distance,
+            'distance_r': distance / risk if distance is not None and risk > 0 else None,
+            'proposed_stop_crossed': distance <= 0 if distance is not None else None,
+            'recorded_stop_at_least_as_protective': sign * (recorded - proposed) >= 0,
+            'required_action': 'VERIFY_BROKER_STOP_AND_RECONCILE_RECEIPT',
+        }
 
     def shadow_actions(self, trade_id: int) -> list[dict]:
         with self._lock:
