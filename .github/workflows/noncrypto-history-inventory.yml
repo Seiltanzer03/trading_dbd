@@ -1,4 +1,4 @@
-name: readonly-cache-metadata-4d35
+name: readonly-generated-artifact-types-4d35
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -21,21 +21,17 @@ jobs:
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 4d35f82110007d78b41635f5da3f55e422a081d0
             /usr/bin/python3 -B -u - <<'PY'
-            import os,stat,json,subprocess,pathlib,shutil
-            for name in ('/var/cache/apt/pkgcache.bin','/var/cache/apt/srcpkgcache.bin','/opt/seiltanzer/data/trades.db-wal','/opt/seiltanzer/cache.db','/opt/seiltanzer/data/cache.db'):
-             p=pathlib.Path(name)
-             try:
-              s=p.lstat();print('CAPACITY_FILE',json.dumps(dict(path=name,regular=stat.S_ISREG(s.st_mode),bytes=s.st_size,allocated=s.st_blocks*512)),flush=True)
-             except FileNotFoundError:pass
-            for root in ('/root/.cache','/var/cache','/tmp','/opt/seiltanzer/.git','/opt/actions-runner/_work/_update'):
-             try:
-              r=subprocess.run(['du','-x','-B1','--max-depth=2',root],capture_output=True,text=True,timeout=8)
-              rows=[]
-              for line in r.stdout.splitlines():
-               n,_,p=line.partition('\t')
-               if n.isdigit():rows.append((int(n),p))
-              print('CACHE_DIRECTORY_METADATA',json.dumps(sorted(rows,reverse=True)[:12]),flush=True)
-             except subprocess.TimeoutExpired:print('CACHE_DIRECTORY_TIMEOUT',root,flush=True)
-            print('FREE_BYTES',shutil.disk_usage('/opt/seiltanzer').free)
-            print('READ_ONLY_METADATA_NO_DELETION_NO_DB_SCAN_NO_PROVIDER')
+            import pathlib,stat,json,subprocess,shutil
+            roots=sorted(pathlib.Path('/tmp').glob('seiltanzer-sqlite-tools-*'))
+            roots+= [pathlib.Path('/var/cache/fwupd'),pathlib.Path('/var/cache/swcatalog/cache')]
+            for root in roots[:16]:
+             if root.is_symlink() or not root.is_dir():continue
+             rows=[]
+             for p in list(root.rglob('*'))[:64]:
+              st=p.lstat()
+              if stat.S_ISREG(st.st_mode):
+               kind=subprocess.run(['file','-b',str(p)],capture_output=True,text=True,timeout=2).stdout.strip()[:160]
+               rows.append({'name':str(p.relative_to(root)),'size':st.st_size,'allocated':st.st_blocks*512,'uid':st.st_uid,'type':kind})
+             print('REPRODUCIBLE_CANDIDATE_METADATA',json.dumps({'root':str(root),'files':rows}),flush=True)
+            print('FREE_BYTES',shutil.disk_usage('/opt/seiltanzer').free,flush=True)
             PY
