@@ -1431,6 +1431,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from .edge_regime import refine_regime_with_events
             with trace.span('regime_management'):
                 refine_regime_with_events(snapshot)
+            snapshot['pending_stop_reference'] = engine.position.pending_stop_reference(active_trade)
             from .active_management import select_active_management
             await trace.to_thread('regime_management', select_active_management, snapshot)
             try:

@@ -142,7 +142,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "admission_reason", "operational_block_reason",
             "expected_net_r", "cvar10_net_r", "delta_expected_r", "score",
             "component_contributions", "component_scores", "intervention_cost_r",
-            "ranking_eligible", "ranking_reason", "delta_cvar_r",
+            "ranking_eligible", "ranking_reason", "dominated_by_candidate_ids", "delta_cvar_r",
             "execution_cost_r", "economics_basis", "source",
             "working_family_contributions",
             'model_family_contributions',
@@ -353,6 +353,10 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
             f"ΔExpected/HOLD {_format(row.get('delta_expected_r'), 'R')}; балл {_format(row.get('score'))}"
             f"{'; ' + str(reason) if reason else ''}."
         )
+        if row.get('dominated_by_candidate_ids'):
+            lines.append('Исключён до голосования: в том же сценарном банке лучше или равны '
+                         'Expected net и CVaR10 net у ' + ', '.join(row['dominated_by_candidate_ids'])
+                         + '; хотя бы одна метрика строго лучше. Это модельное сравнение, не доказанная прибыль.')
         utility = row.get('quant_utility') or {}
         sacrifice = row.get('expected_sacrifice_check') or {}
         if row.get('ranking_reason') == 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET' and sacrifice:

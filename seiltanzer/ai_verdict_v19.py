@@ -727,6 +727,13 @@ def _final_llm_proposal_lines(snapshot: dict) -> list[str]:
     shadow = snapshot.get('llm_shadow_decision')
     if not isinstance(shadow, dict):
         return []
+    admission = next((row for row in ((snapshot.get('policy_manager') or {}).get('unified_edge_ensemble') or {}).get('components', [])
+                      if row.get('component_id') == 'current_llm'), {})
+    if admission.get('reason') == 'CURRENT_LLM_POLICY_SCORE_CONTRADICTION':
+        return ['Независимый LLM: ' + str(shadow.get('policy') or '—')
+                + '; мнение отклонено: CURRENT_LLM_POLICY_SCORE_CONTRADICTION. '
+                  'Его голос равен нулю; отдельное исполнение NOT_ACTIONABLE. '
+                  'Готовность геометрии не означает допуск противоречивого мнения.']
     from .llm_decision_shadow import append_shadow_section
     # The independent opinion never acquires authority from its own flags.
     body = [line.replace('Quant:', 'Базовый quant до ансамбля:', 1) if line.startswith('Quant:') else line

@@ -241,7 +241,7 @@ def test_stale_or_widening_shadow_action_fails_closed(tmp_path):
     )
     with pytest.raises(StaleDecisionError, match="superseded"):
         ledger.acknowledge_shadow_action(
-            action_id=old["action_id"], trade=trade, executed=False,
+            action_id=old["action_id"], trade=trade, executed=True,
             execution_price=110.0, execution_r=1.0,
         )
     ledger.close()
@@ -282,4 +282,34 @@ def test_strategy_break_even_plans_upgrade_of_less_protective_manual_stop(tmp_pa
     assert state["be_confirmation_required"] is True
     assert state["active_stop_type"] == "TIGHTENED"
     assert ledger.events(trade["id"])[-1]["event_type"] == "BE_ARM"
+    ledger.close()
+
+
+def test_pending_and_superseded_stop_reference_survives_reload_without_execution(tmp_path):
+    path=str(tmp_path/'reference.db')
+    ledger=PositionLedger(path); trade=_trade()
+    first=_register(ledger,trade,_shadow('TIGHTEN_STOP',{'stop_price':105.}),review='one')
+    ledger.supersede_other_pending_actions(trade['id'],'another-base-decision')
+    ledger.close(); ledger=PositionLedger(path)
+    reference=ledger.pending_stop_reference(trade)
+    assert reference['stop_price']==105.
+    assert reference['action_id']==first['action_id']
+    assert reference['broker_execution_confirmed'] is False
+    assert ledger.state(trade)['active_stop_price']==90.
+    with pytest.raises(StaleDecisionError,match='unconfirmed stop'):
+        _register(ledger,trade,_shadow('TIGHTEN_STOP',{'stop_price':104.}),review='two',captured=2001.)
+    ledger.close()
+
+
+def test_superseded_stop_can_be_explicitly_declined_without_stale_execution(tmp_path):
+    ledger=PositionLedger(str(tmp_path/'reconcile.db')); trade=_trade()
+    first=_register(ledger,trade,_shadow('TIGHTEN_STOP',{'stop_price':105.}),review='one')
+    second=_register(ledger,trade,_shadow('TIGHTEN_STOP',{'stop_price':105.}),review='two',captured=2001.)
+    with pytest.raises(StaleDecisionError):
+        ledger.acknowledge_shadow_action(action_id=first['action_id'],trade=trade,executed=True,execution_price=110.,execution_r=1.)
+    ledger.acknowledge_shadow_action(action_id=second['action_id'],trade=trade,executed=False,execution_price=110.,execution_r=1.)
+    out=ledger.acknowledge_shadow_action(action_id=first['action_id'],trade=trade,executed=False,execution_price=None,execution_r=None)
+    assert out['execution_status']=='recommended_not_executed'
+    assert ledger.pending_stop_reference(trade) is None
+    assert ledger.state(trade)['active_stop_price']==90.
     ledger.close()

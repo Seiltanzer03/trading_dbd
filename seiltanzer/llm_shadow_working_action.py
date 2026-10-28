@@ -177,6 +177,11 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
     if geometry.get("risk") is None or geometry.get("current") is None:
         return _unavailable(policy, "AUTHORITATIVE_TRADE_GEOMETRY_UNAVAILABLE", confidence)
 
+    reference = _number((snapshot.get('pending_stop_reference') or {}).get('stop_price'))
+    if policy in {'MOVE_TO_BE', 'TIGHTEN_STOP', 'TRAIL_GAMMA_FLIP'} and reference is not None:
+        if geometry['sign'] * (geometry['current'] - reference) <= 0:
+            return _unavailable(policy, 'PENDING_STOP_EXECUTION_RECONCILIATION_REQUIRED', confidence)
+
     params: dict[str, Any] = {}
     instruction = ""
     if policy == "TRAIL_GAMMA_FLIP":
@@ -224,10 +229,15 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
         zero = _price_from_current_distance(
             geometry, _distance(snapshot, "distance_to_zero_gamma"))
         anchors = [("RISK_BUFFER_0_5_R", float(geometry["current"]) - float(geometry["sign"]) * .5 * float(geometry["risk"])), ("ENTRY_PRICE", geometry.get("entry"))]
+        if reference is not None:
+            anchors = [(name, max(value, reference) if geometry['sign'] > 0 else min(value, reference))
+                       for name, value in anchors if value is not None]
         valid = [(name, value) for name, value in anchors if _is_tighter_stop(geometry, value)]
         if not valid:
             return _unavailable(policy, "NO_AUTHORITATIVE_NON_WIDENING_STOP_ANCHOR", confidence)
         name, target = min(valid, key=lambda item: abs(float(geometry["current"]) - float(item[1])))
+        if reference is not None and target == reference:
+            name = "PREVIOUS_UNCONFIRMED_STOP_REFERENCE"
         params = {"stop_price": target, "anchor": name}
         instruction = f"ВРУЧНУЮ ПОДТЯНУТЬ СТОП К {name}: {target:g}"
     elif policy == "REDUCE_TAKE":
@@ -263,6 +273,12 @@ def build_working_action(snapshot: dict[str, Any], shadow: dict[str, Any]) -> di
         instruction = f"ВРУЧНУЮ ПЕРЕНЕСТИ TAKE К ОПЦИОННОЙ СТЕНЕ: {target:g}"
     else:
         return _unavailable(policy, "UNSUPPORTED_DYNAMIC_POLICY", confidence)
+
+    if reference is not None and 'stop_price' in params and geometry['sign'] * (params['stop_price'] - reference) < 0:
+        return _unavailable(policy, 'STOP_WEAKER_THAN_UNCONFIRMED_RECOMMENDATION', confidence)
+
+    if reference is not None and "stop_price" in params:
+        instruction += "; не ослаблять фактический стоп у брокера; прежнее предложение не подтверждено как исполненное"
 
     return {
         "contract_version": CONTRACT_VERSION,
