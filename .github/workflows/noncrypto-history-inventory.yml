@@ -1,4 +1,4 @@
-name: readonly-release-capacity-4d35
+name: readonly-cache-metadata-4d35
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -16,21 +16,26 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40s
+          command_timeout: 60s
           script: |
             set -euo pipefail
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 4d35f82110007d78b41635f5da3f55e422a081d0
-            systemctl show seiltanzer --property=ActiveState,MainPID,NRestarts --no-pager
-            /opt/seiltanzer/.venv/bin/python -B -u - <<'PY'
-            import json,shutil,sqlite3,time,os
-            root='/opt/seiltanzer/data'
-            print('CURRENT_DISK',json.dumps(shutil.disk_usage(root)._asdict()),flush=True)
-            c=sqlite3.connect('file:'+root+'/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-             page=c.execute('PRAGMA page_size').fetchone()[0];count=c.execute('PRAGMA page_count').fetchone()[0];free=c.execute('PRAGMA freelist_count').fetchone()[0]
-             print('SQLITE_CAPACITY_HEADER',json.dumps({'page_size':page,'page_count':count,'freelist_count':free,'logical_bytes':page*count,'used_page_bytes':page*(count-free),'reclaimable_bytes':page*free}),flush=True)
-            finally:c.close()
-            print('READ_ONLY_CONSTANT_HEADER_NO_SCAN_NO_PROVIDER_NO_RESTART')
+            /usr/bin/python3 -B -u - <<'PY'
+            import os,stat,json,subprocess,pathlib,shutil
+            for name in ('/var/cache/apt/pkgcache.bin','/var/cache/apt/srcpkgcache.bin','/opt/seiltanzer/data/trades.db-wal','/opt/seiltanzer/cache.db','/opt/seiltanzer/data/cache.db'):
+             p=pathlib.Path(name)
+             try:
+              s=p.lstat();print('CAPACITY_FILE',json.dumps(dict(path=name,regular=stat.S_ISREG(s.st_mode),bytes=s.st_size,allocated=s.st_blocks*512)),flush=True)
+             except FileNotFoundError:pass
+            for root in ('/root/.cache','/var/cache','/tmp','/opt/seiltanzer/.git','/opt/actions-runner/_work/_update'):
+             try:
+              r=subprocess.run(['du','-x','-B1','--max-depth=2',root],capture_output=True,text=True,timeout=8)
+              rows=[]
+              for line in r.stdout.splitlines():
+               n,_,p=line.partition('\t')
+               if n.isdigit():rows.append((int(n),p))
+              print('CACHE_DIRECTORY_METADATA',json.dumps(sorted(rows,reverse=True)[:12]),flush=True)
+             except subprocess.TimeoutExpired:print('CACHE_DIRECTORY_TIMEOUT',root,flush=True)
+            print('FREE_BYTES',shutil.disk_usage('/opt/seiltanzer').free)
+            print('READ_ONLY_METADATA_NO_DELETION_NO_DB_SCAN_NO_PROVIDER')
             PY
