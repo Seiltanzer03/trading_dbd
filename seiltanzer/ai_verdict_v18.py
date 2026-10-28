@@ -591,6 +591,16 @@ def render_policy_report(snapshot: dict) -> str:
     unified = render_unified_ensemble_lines(manager.get("unified_edge_ensemble"))
     if unified and "**ЕДИНЫЙ ВЫБОР ДЕЙСТВИЯ**" not in text:
         lines.extend(["", *unified])
+    filters = (snapshot.get('strategy') or {}).get('required_filter_context') or []
+    if filters:
+        states = {'pass': 'порог пройден', 'block': 'порог не пройден',
+                  'manual': 'проверь вручную'}
+        details = '; '.join(
+            f"{row['label']}: {row.get('value') if row.get('value') is not None else 'нет данных'} "
+            f"({states.get(row.get('state'), 'нет подтверждения')}, {row.get('status_feed')})"
+            for row in filters)
+        lines[1:1] = ['', f"Фильтры сетапа: {details}. "
+                      "Это контекст фида; полное подтверждение структуры сетапа требуется вручную."]
     return "\n".join(lines).strip()
 
 

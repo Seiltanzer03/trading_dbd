@@ -177,15 +177,34 @@ def _time_context(tick: dict, trade: dict, previous_reviews: list[dict]) -> dict
     }
 
 
-def _strategy(engine, trade: dict) -> dict:
+def _strategy(engine, trade: dict, *, tick: dict | None = None) -> dict:
     from .config import SETUPS
     cfg = SETUPS.get(int(trade.get("setup") or 0))
     if not cfg:
         return {}
     stats = engine.journal.setup_stats(cfg.num, engine.settings.journal_min_trades)
+    tick = tick or {}
+    chips = {row['key']: row for row in tick.get('filters') or []
+             if isinstance(row, dict) and isinstance(row.get('key'), str)}
+    required_filters = []
+    for filter_code in cfg.filters:
+        key = filter_code.split('_', 1)[0]
+        chip = chips.get(key) or {}
+        required_filters.append({
+            'key': key, 'filter_code': filter_code, 'required': True,
+            'label': chip.get('label') or filter_code,
+            'value': chip.get('value'), 'state': chip.get('state') or 'manual',
+            'status_feed': chip.get('status_feed') or 'no_data',
+            'source': chip.get('source'), 'source_ts': chip.get('source_ts'),
+            'timeframe': chip.get('timeframe'), 'detail': chip.get('detail'),
+            'decision_weight': chip.get('decision_weight') is True,
+            # These feed chips never prove the complete multi-timeframe setup.
+            'complete_setup_confirmation': False,
+        })
     return {
         "setup": cfg.num, "name": cfg.name, "instrument": cfg.instrument,
         "direction": trade.get("direction"), "playbook": SETUP_PLAYBOOKS.get(cfg.num, {}),
+        "required_filter_context": required_filters,
         "stats": stats.__dict__,
         "management": {
             "rungs_r": [1.0, 1.25, 1.5, 1.75, 2.0, 2.2],
@@ -300,7 +319,7 @@ def build_snapshot(engine) -> dict:
     }
     snapshot = {
         "captured_ts": captured_ts, "trade_id": trade_id,
-        "strategy": _strategy(engine, trade),
+        "strategy": _strategy(engine, trade, tick=tick),
         "position_state": position_state,
         "trade_geometry": geometry,
         "time_context": _time_context(tick, trade, previous_reviews),

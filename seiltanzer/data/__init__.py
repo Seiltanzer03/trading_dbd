@@ -12,3 +12,7 @@ from . import feeds as _feeds  # noqa: E402
 from .adaptive_chain import install as _install_adaptive_chain  # noqa: E402
 
 _install_adaptive_chain(_feeds)
+
+from .instrument_refresh import install_instrument_refresh_isolation as _isolate_refresh
+
+_isolate_refresh(_feeds.MarketData)

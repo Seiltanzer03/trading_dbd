@@ -76,6 +76,10 @@ def capture_market_inputs(engine):
             market.family_reference_series = _bounded_copy(getattr(feed,'family_reference_series',None))
         except (ValueError,TypeError,RecursionError):
             market.reference_freeze_reason='REFERENCE_INPUT_FREEZE_BOUND'
+        try:
+            market.chain = _bounded_copy(getattr(feed, "chain", None))
+        except (ValueError, TypeError, RecursionError):
+            market.option_freeze_reason = "OPTION_INPUT_FREEZE_BOUND"
         market.frozen_inputs_captured_ts=time.time()
     except (ValueError, TypeError, RecursionError):
         market.intraday_ohlcv = []
@@ -99,11 +103,6 @@ def capture_market_inputs(engine):
     except Exception as exc:
         # An optional parent cannot erase the independently frozen price lane.
         market.treasury_freeze_reason = 'TREASURY_INPUT_FREEZE_UNAVAILABLE:'+type(exc).__name__
-    try:
-        market.chain = _bounded_copy(getattr(feed, "chain", None))
-    except (ValueError, TypeError, RecursionError):
-        market.chain = None
-        market.option_freeze_reason = "OPTION_INPUT_FREEZE_BOUND"
     return _EngineInputView(engine, market)
 
 

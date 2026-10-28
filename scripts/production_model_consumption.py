@@ -37,6 +37,47 @@ def verify_report(report, *, expected_sha, captured_ts):
         trained_models=declared,working_supported_models=summary.get('working_supported_models'))
 
 
+def verify_setup_coverage(report, *, expected_sha, captured_ts):
+    """Verify every configured noncrypto cell without claiming live readiness."""
+    from seiltanzer.config import INSTRUMENTS, SETUPS, CRYPTO_INSTRUMENTS
+    from seiltanzer.edge_family_market import FAMILIES
+    verify_report(report, expected_sha=expected_sha, captured_ts=captured_ts)
+    setups = {str(number): setup.instrument for number, setup in SETUPS.items()
+              if setup.instrument not in CRYPTO_INSTRUMENTS}
+    if not setups or not set(setups.values()) <= set(INSTRUMENTS):
+        raise ValueError('CONFIGURED_SETUP_INSTRUMENT_INVALID')
+    instruments = {}
+    for code in dict.fromkeys(setups.values()):
+        rows = report['family_market_models'].get(code)
+        if not isinstance(rows, dict) or set(rows) != set(FAMILIES):
+            raise ValueError('CONFIGURED_SETUP_MODEL_COVERAGE_MISSING:'+code)
+        families = {}; trained = []; supported = []
+        for family in FAMILIES:
+            row = rows[family]
+            status = row.get('status') if isinstance(row, dict) else None
+            reason = row.get('reason') if isinstance(row, dict) else None
+            if not isinstance(status, str) or not status.strip():
+                raise ValueError('CONFIGURED_SETUP_MODEL_STATUS_MISSING:'+code+':'+family)
+            if status == 'TRAINED':
+                trained.append(family)
+                if any(head.get('working_supported') is True for head in row['heads'].values()):
+                    supported.append(family)
+                reason = 'VALIDATED_HISTORICAL_MARKET_MODEL_NOT_LIVE_INPUT_RECEIPT'
+            elif not isinstance(reason, str) or not reason.strip():
+                raise ValueError('CONFIGURED_SETUP_MODEL_REASON_MISSING:'+code+':'+family)
+            source = row.get('source') or {}
+            families[family] = dict(status=status, reason=reason,
+                target_provider=source.get('provider'), target_symbol=source.get('ticker'))
+        instruments[code] = dict(setups=[int(n) for n,c in setups.items() if c == code],
+            trained_families=trained, historically_supported_families=supported, families=families)
+    return dict(state='ALL_NONCRYPTO_SETUP_MODEL_COVERAGE_VERIFIED', published_for_sha=expected_sha,
+        scope='CONFIGURED_MODELS_NOT_CURRENT_SETUP_RECOMMENDATIONS', current_inputs_verified=False,
+        setup_count=len(setups), instrument_count=len(instruments), setup_instruments=setups,
+        trained_noncrypto_families=sum(len(r['trained_families']) for r in instruments.values()),
+        historically_supported_noncrypto_families=sum(len(r['historically_supported_families']) for r in instruments.values()),
+        instruments=instruments)
+
+
 def verify_family_runtime(status,report,*,expected_sha,captured_ts):
     from seiltanzer.reference_market_series import PROVIDER,SYMBOLS,number
     from seiltanzer.config import ALL_INSTRUMENTS,CRYPTO_INSTRUMENTS
@@ -93,6 +134,8 @@ def verify_local(expected_sha,*,family_runtime=False):
     report=json.loads(raw)
     result=verify_report(report,expected_sha=expected_sha,captured_ts=time.time())
     print('LIVE_MODEL_CONSUMPTION_VERIFIED='+json.dumps(result),flush=True)
+    setup_coverage=verify_setup_coverage(report,expected_sha=expected_sha,captured_ts=time.time())
+    print('ALL_SETUP_MODEL_COVERAGE='+json.dumps(setup_coverage),flush=True)
     if family_runtime:
         deadline=time.monotonic()+300;last_reason='SNAPSHOT_WARMING';last_print=0.
         while time.monotonic()<deadline:
