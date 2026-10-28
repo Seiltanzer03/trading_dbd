@@ -1,4 +1,4 @@
-name: release-cache-maintenance-4d35
+name: readonly-release-capacity-4d35
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -16,53 +16,21 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 3m
+          command_timeout: 40s
           script: |
             set -euo pipefail
-            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
-            flock -w 15 9
+            test "$(git -C /opt/seiltanzer rev-parse HEAD)" = 4d35f82110007d78b41635f5da3f55e422a081d0
+            systemctl show seiltanzer --property=ActiveState,MainPID,NRestarts --no-pager
             /opt/seiltanzer/.venv/bin/python -B -u - <<'PY'
-            import json,pathlib,shutil,subprocess,sys,os,hashlib,time
-            sys.dont_write_bytecode=True
-            root=pathlib.Path('/opt/seiltanzer')
-            def git(*args):return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
-            def service():return subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-            assert git('rev-parse','HEAD')=='4d35f82110007d78b41635f5da3f55e422a081d0'
-            assert service()=='4134570'
-            assert subprocess.check_output(['systemctl','is-active','seiltanzer'],text=True).strip()=='active'
-            assert not os.path.lexists(root/'data/cutover.active')
-            before=shutil.disk_usage(root).free
-            heads=git('show-ref');head=git('rev-parse','HEAD')
-            reflogs=git('reflog','show','--all','--format=%H %gD')
-            roots=[root/'.venv/lib/python3.12/site-packages',root/'seiltanzer',root/'scripts',pathlib.Path('/usr/lib/python3.12')]
-            files=[]
-            for folder in roots:
-             if not folder.is_dir() or folder.is_symlink():continue
-             for cache in folder.rglob('*.pyc'):
-              if cache.is_symlink() or not cache.is_file():continue
-              if not cache.resolve().is_relative_to(folder.resolve()):continue
-              source=cache.parent.parent/(cache.name.split('.')[0]+'.py') if cache.parent.name=='__pycache__' else cache.with_suffix('.py')
-              if source.is_file() and not source.is_symlink():
-               st=cache.stat();files.append((cache,st.st_size))
-            assert len(files)<=15000 and sum(n for _,n in files)<=256*1024**2
-            removed=removed_bytes=0
-            for cache,size in files:
-             try:cache.unlink();removed+=1;removed_bytes+=size
-             except FileNotFoundError:pass
-            print('SOURCE_BACKED_BYTECODE_REMOVED',json.dumps({'files':removed,'bytes':removed_bytes}),flush=True)
-            stats=dict(line.split(': ',1) for line in git('count-objects','-v').splitlines())
-            pack_bytes=int(stats.get('size-pack',0))*1024
-            mem=dict(line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines())
-            available=int(mem['MemAvailable'].strip().split()[0])*1024
-            if pack_bytes<=128*1024**2 and available>=256*1024**2 and shutil.disk_usage(root).free>4*pack_bytes:
-             subprocess.run(['git','-C',str(root),'-c','pack.threads=1','-c','pack.windowMemory=16m','-c','pack.deltaCacheSize=8m','repack','-a','-d','--keep-unreachable'],check=True,timeout=90)
-             print('LOSSLESS_GIT_REPACK_DONE',flush=True)
-            else:print('LOSSLESS_GIT_REPACK_SKIPPED_RESOURCE_BOUND',flush=True)
-            assert git('show-ref')==heads and git('rev-parse','HEAD')==head
-            assert git('reflog','show','--all','--format=%H %gD')==reflogs
-            subprocess.run(['git','-C',str(root),'fsck','--connectivity-only','--no-dangling'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=30)
-            assert service()=='4134570'
-            after=shutil.disk_usage(root).free
-            print('CAPACITY_RECOVERY',json.dumps({'before_bytes':before,'after_bytes':after,'minimum_bytes':1107296256,'safe_resume_bytes':1107296256+32*1024**2,'pid_unchanged':True,'refs_and_reflogs_unchanged':True,'runtime_sha':head}),flush=True)
-            print('NO_DATABASE_EVIDENCE_BACKUP_LOG_OR_USER_FILE_DELETION_NO_RESTART_NO_PROVIDER_CALL')
+            import json,shutil,sqlite3,time,os
+            root='/opt/seiltanzer/data'
+            print('CURRENT_DISK',json.dumps(shutil.disk_usage(root)._asdict()),flush=True)
+            c=sqlite3.connect('file:'+root+'/trades.db?mode=ro',uri=True,timeout=.5)
+            try:
+             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
+             deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+             page=c.execute('PRAGMA page_size').fetchone()[0];count=c.execute('PRAGMA page_count').fetchone()[0];free=c.execute('PRAGMA freelist_count').fetchone()[0]
+             print('SQLITE_CAPACITY_HEADER',json.dumps({'page_size':page,'page_count':count,'freelist_count':free,'logical_bytes':page*count,'used_page_bytes':page*(count-free),'reclaimable_bytes':page*free}),flush=True)
+            finally:c.close()
+            print('READ_ONLY_CONSTANT_HEADER_NO_SCAN_NO_PROVIDER_NO_RESTART')
             PY
