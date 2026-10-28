@@ -5,12 +5,13 @@ on:
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
+  actions: read
 jobs:
   inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Identify bounded fence interruption and disposable capacity
+      - name: Read exact fence query boundary and reproducible bytecode footprint
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -20,28 +21,26 @@ jobs:
           command_timeout: 45s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,pathlib,runpy,sqlite3,subprocess,time
-            root=pathlib.Path('/opt/seiltanzer')
+            import json,pathlib,runpy,sqlite3,time,urllib.request
+            root=pathlib.Path('/opt/seiltanzer');events=[]
             ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_diagnostic')
-            metrics={'progress_deadline_fired':False}
-            class Connection(sqlite3.Connection):
-             def set_progress_handler(self,callback,n):
-              if callback is None:return super().set_progress_handler(callback,n)
-              def measured():
-               value=callback()
-               if value:metrics['progress_deadline_fired']=True
-               return value
-              return super().set_progress_handler(measured,n)
             connect=sqlite3.connect
             def traced(*args,**kwargs):
-             kwargs['factory']=Connection
-             return connect(*args,**kwargs)
+             c=connect(*args,**kwargs)
+             def event(sql):
+              now=time.monotonic()
+              if events:events[-1]['duration']=round(now-events[-1].pop('start'),4)
+              tables=[name for name in ('hot_history_storage_state','passive_market_observations','g1_dataset_membership','archived_rejected_source_index','archived_passive_rollups') if name in sql]
+              events.append({'kind':sql.split()[0],'tables':tables,'join':'JOIN' in sql.upper(),'start':now})
+             c.set_trace_callback(event)
+             return c
             sqlite3.connect=traced
-            t=time.monotonic();result=ns['check_start'](root/'data/trades.db',root)
-            print('EXACT_UNCHANGED_FENCE',json.dumps(result),json.dumps(metrics),'seconds',round(time.monotonic()-t,3),flush=True)
-            print('GIT_OBJECTS',subprocess.check_output(['git','-C',str(root),'count-objects','-v'],text=True).strip(),flush=True)
-            for p in ('/root/.cache','/root/.npm/_cacache','/root/wheels'):
-             r=subprocess.run(['du','-sb',p],capture_output=True,text=True,timeout=5)
-             print('DISPOSABLE_CACHE_BYTES',p,r.stdout.split()[0] if r.returncode==0 else 'absent',flush=True)
-            print('LOADAVG',pathlib.Path('/proc/loadavg').read_text().strip(),flush=True)
+            started=time.monotonic();result=ns['check_start'](root/'data/trades.db',root)
+            if events:events[-1]['duration']=round(time.monotonic()-events[-1].pop('start'),4)
+            print('FENCE_QUERY_BOUNDARY',json.dumps(result),round(time.monotonic()-started,4),json.dumps(events[-12:]),flush=True)
+            for directory in (root/'.venv',root/'seiltanzer'):
+             files=[p for p in directory.rglob('*.pyc') if p.is_file() and not p.is_symlink()]
+             print('REPRODUCIBLE_BYTECODE',str(directory),len(files),sum(p.stat().st_blocks*512 for p in files),flush=True)
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=8) as response:s=json.load(response)
+            print('SNAPSHOT_BUILD_STATE',json.dumps({k:s.get(k) for k in ('ready','building','build_ms','last_error')}),flush=True)
             PY
