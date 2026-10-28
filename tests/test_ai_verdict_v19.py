@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from seiltanzer import ai_verdict_v19 as v19
 
 
@@ -235,6 +237,39 @@ def test_v19_metric_audit_keeps_current_value_when_derivative_is_unavailable():
     assert "p_take: current=0.3415 probability; slope=UNAVAILABLE" in report
     assert "N=1; span=0.0m; confidence=0.0%; source_quality=85.0%." in report
     assert "barrier_ev: current=-0.004117 R; slope=UNAVAILABLE" in report
+
+
+@pytest.mark.parametrize('coverage', [None, {}, {'summary': {}}])
+def test_compacted_live_review_still_repairs_net_risk_and_restores_metric_audit(coverage):
+    snapshot = _snapshot()
+    snapshot.pop('metric_coverage')
+    if coverage is not None:
+        snapshot['metric_coverage'] = coverage
+    manager = snapshot['policy_manager']
+    manager['management_decision'].update(policy='CLOSE_10', authority='UNIFIED_EDGE_ENSEMBLE',
+        execution_status='pending_execution', manual_execution_required=True,
+        continuity='continue_same_pending_decision')
+    manager['unified_edge_ensemble'] = {'available': True, 'applied': True,
+        'selected_policy': 'CLOSE_10', 'components': [], 'candidates': []}
+    report = v19.normalize_final_report(_legacy_text().replace(
+        '**ДЕЙСТВИЕ СЕЙЧАС** — HOLD ПОДТВЕРЖДЁН.',
+        '**ДЕЙСТВУЮЩЕЕ РЕШЕНИЕ ИИ** — CLOSE_10.\nАрбитр: AI → CLOSE_10; AI priority bonus +0.015R.'), snapshot)
+    assert 'HOLD CVaR10 net: -1.010R >= -1.010R → ELIGIBLE.' in report
+    assert '-1.010R >= -1.000R' not in report
+    assert 'Покрытие: 0/0' not in report
+    assert 'decision metrics: UNAVAILABLE' in report
+    assert 'p_take: current=0.3415 probability; slope=UNAVAILABLE' in report
+    assert 'Арбитр: AI →' not in report
+    assert 'Авторитет: UNIFIED_EDGE_ENSEMBLE' in report
+    assert 'не дополнительное закрытие' in report
+
+
+def test_full_metric_audit_includes_retained_tail_log_ratio():
+    snapshot = _snapshot()
+    snapshot['policy_manager']['option_derivative_state']['metrics']['tail_log_ratio'] = {
+        'value': -.42, 'value_units': 'log_ratio', 'slope': None, 'confidence': .1}
+    report = v19.normalize_final_report(_legacy_text(), snapshot)
+    assert 'tail_log_ratio: current=-0.42 log_ratio; slope=UNAVAILABLE' in report
 
 
 def test_early_ede_context_reaches_verdict_without_action_authority():

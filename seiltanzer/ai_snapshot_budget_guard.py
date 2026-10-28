@@ -189,7 +189,12 @@ def _emergency_authoritative_compaction(snapshot: dict[str, Any], ai_verdict: An
     only when the normal and strict compaction still exceed the byte ceiling.
     """
     compact_operational_edges(snapshot)
-    for key in ("validation", "market_state", "data_quality", "metric_coverage"):
+    coverage = snapshot.get('metric_coverage')
+    if isinstance(coverage, dict):
+        summary = coverage.get('summary') or coverage
+        snapshot['metric_coverage'] = {'summary': _compact_scalars(summary, (
+            'available_groups', 'total_groups', 'coverage_ratio', 'coverage_label'))}
+    for key in ("validation", "market_state", "data_quality"):
         snapshot.pop(key, None)
     manager = snapshot.get("policy_manager") or {}
     lineage = compact_evidence_lineage(manager.get("evidence"))

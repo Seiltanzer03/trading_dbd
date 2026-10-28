@@ -51,8 +51,13 @@ def test_fallback_returns_structured_management_decision(client):
     assert edge["automatic_execution_allowed"] is False
 
 
-def test_provider_timeout_is_retained_in_frozen_review_without_claiming_llm_opinion(client, monkeypatch):
-    def timeout(_snapshot):
+@pytest.mark.parametrize('coverage_compacted', [False, True])
+def test_provider_timeout_is_retained_in_frozen_review_without_claiming_llm_opinion(client, monkeypatch, coverage_compacted):
+    def timeout(snapshot):
+        if coverage_compacted:
+            # The live emergency compactor drops this presentation field; the
+            # installed route must still normalize risk, authority and audit.
+            snapshot.pop('metric_coverage', None)
         raise RuntimeError('provider_timeout_after_6.0s')
     monkeypatch.setattr('seiltanzer.app.request_verdict', timeout)
     response = client.post('/api/ai/verdict')
@@ -71,6 +76,11 @@ def test_provider_timeout_is_retained_in_frozen_review_without_claiming_llm_opin
                    if row['component_id'] == 'current_llm')
     assert current['effective_weight'] == 0
     assert body['management_decision']['automatic_execution_allowed'] is False
+    assert 'FULL METRIC AUDIT' in body['verdict']
+    assert 'Net selection floor:' in body['verdict']
+    assert 'Покрытие: 0/0' not in body['verdict']
+    assert 'HOLD проходит hard CVaR:' not in body['verdict']
+    assert 'Арбитр: AI →' not in body['verdict']
 
 
 def test_prospective_reaction_unavailability_is_frozen_before_provider_review_identity(client, monkeypatch):

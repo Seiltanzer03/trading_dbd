@@ -19,7 +19,10 @@ from contextvars import copy_context
 from typing import Any, Callable
 
 
-DEFAULT_PROVIDER_TIMEOUT_SEC = 6.0
+# Use the existing transport allowance. The caller still reserves four seconds
+# inside the unchanged12s route ceiling; a valid6.2s response must not be thrown
+# away by an unrelated six-second default when that remaining budget exists.
+DEFAULT_PROVIDER_TIMEOUT_SEC = 8.0
 MIN_PROVIDER_TIMEOUT_SEC = 3.0
 MAX_PROVIDER_TIMEOUT_SEC = 8.0
 DEFAULT_PROVIDER_CIRCUIT_SEC = 50.0

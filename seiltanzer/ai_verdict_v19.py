@@ -1,7 +1,7 @@
 """Verdict v19: structured report integrity over the established v18 decision.
 
 V19 changes presentation only. It activates only for the current structured
-snapshot contract (root metric coverage + trade geometry + net CVaR floor), so
+snapshot contract (trade geometry + net CVaR floor), so
 legacy snapshots and LLM-only responses retain their established contract.
 """
 from __future__ import annotations
@@ -84,12 +84,12 @@ def _prob(value: Any, count: Any, total: Any) -> str:
 
 def _structured_contract(snapshot: dict) -> bool:
     manager = snapshot.get("policy_manager") or {}
-    root_coverage = snapshot.get("metric_coverage") or {}
     risk = manager.get("risk_constraint") or {}
+    # Byte-budget compaction can omit presentation coverage while retaining all
+    # decision/risk facts. It must never reactivate the legacy gross/net prose
+    # or suppress the surviving derivative audit and final decision authority.
     return bool(
-        isinstance(root_coverage, dict)
-        and (root_coverage.get("summary") or {}).get("total_groups")
-        and isinstance(snapshot.get("trade_geometry"), dict)
+        isinstance(snapshot.get("trade_geometry"), dict)
         and snapshot.get("trade_geometry")
         and risk.get("net_cvar_floor_r") is not None
     )
@@ -494,7 +494,7 @@ def _risk_lines(snapshot: dict) -> list[str]:
 
 def _quality_lines(snapshot: dict) -> list[str]:
     manager = snapshot.get("policy_manager") or {}
-    root = snapshot.get("metric_coverage") or {}
+    root = snapshot.get("metric_coverage") or manager.get("metric_coverage") or {}
     coverage = root.get("summary") or root
     available_value = _number(coverage.get("available_groups"))
     total_value = _number(coverage.get("total_groups"))
@@ -553,7 +553,7 @@ def _material_change_lines(manager: dict, key: str) -> list[str]:
 
 def _metric_audit_lines(snapshot: dict) -> list[str]:
     manager = snapshot.get("policy_manager") or {}; evidence = manager.get("evidence") or {}; state = manager.get("option_derivative_state") or evidence.get("option_derivative_state") or {}; metrics = state.get("metrics") or {}
-    order = ("p_take", "p_stop", "p_no_touch", "barrier_ev", "bop", "q10", "q50", "q90", "width", "h_take", "h_stop", "hazard_log_ratio", "iv", "rv", "vrp", "skew", "term_slope", "gex_force", "gex_stiffness", "distance_to_zero_gamma")
+    order = ("p_take", "p_stop", "p_no_touch", "barrier_ev", "bop", "q10", "q50", "q90", "width", "tail_log_ratio", "h_take", "h_stop", "hazard_log_ratio", "iv", "rv", "vrp", "skew", "term_slope", "gex_force", "gex_stiffness", "distance_to_zero_gamma")
     lines = ["Текущие значения и производные разделены: отсутствующее значение не приравнивается к нулю; fallback/proxy должен быть явно помечен источником и качеством."]
     for name in order:
         row = metrics.get(name)

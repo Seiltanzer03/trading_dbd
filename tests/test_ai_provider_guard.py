@@ -16,7 +16,7 @@ def test_provider_timeout_configuration_is_bounded(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER_TIMEOUT_SEC", "bad")
     assert ai_provider_guard.provider_timeout_sec() == ai_provider_guard.DEFAULT_PROVIDER_TIMEOUT_SEC
     monkeypatch.delenv("AI_PROVIDER_TIMEOUT_SEC", raising=False)
-    assert ai_provider_guard.provider_timeout_sec() == 6.0
+    assert ai_provider_guard.provider_timeout_sec() == 8.0
 
 
 def test_bounded_provider_call_returns_fast_result():
@@ -28,6 +28,20 @@ def test_bounded_provider_call_returns_fast_result():
             executor=executor,
         )
     assert result == {"verdict": "ok"}
+
+
+def test_complete_provider_reply_after_six_seconds_uses_available_request_budget(monkeypatch):
+    from seiltanzer.ai_request_trace import AIRequestTrace
+    monkeypatch.delenv('AI_PROVIDER_TIMEOUT_SEC', raising=False)
+    trace = AIRequestTrace()
+    trace.started -= .634
+    def provider(_snapshot):
+        time.sleep(6.1)
+        return {'verdict': 'complete independent opinion'}
+    with ThreadPoolExecutor(max_workers=1) as executor, trace.activate():
+        result = ai_provider_guard.bounded_provider_call(provider, {}, executor=executor)
+    assert result == {'verdict': 'complete independent opinion'}
+    assert time.monotonic() - trace.started < 8.
 
 
 def test_provider_worker_preserves_request_trace_without_leaking_to_next_call():
@@ -87,7 +101,7 @@ def test_production_timeout_opens_circuit_and_next_call_fails_fast(monkeypatch):
         executor.shutdown(wait=True)
         ai_provider_guard._close_circuit()
 
-@pytest.mark.parametrize('elapsed,expected',[(0.,6.),(3.86,4.14),(7.,1.)])
+@pytest.mark.parametrize('elapsed,expected',[(0.,8.),(.634,7.366),(3.86,4.14),(7.,1.)])
 def test_provider_reserves_four_seconds_for_authoritative_completion(monkeypatch,elapsed,expected):
     from seiltanzer.ai_request_trace import AIRequestTrace
     from concurrent.futures import Future
