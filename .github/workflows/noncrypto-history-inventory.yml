@@ -5,83 +5,44 @@ on:
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
-  actions: read
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 3
     steps:
-      - name: Wait for successful exact-SHA automatic deployment
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python -u - <<'PY'
-          import json,os,time,urllib.request
-          expected='0f9525e66ca17c716c71dadc4b37496cf705d6da';deadline=time.monotonic()+2100;last=None
-          url='https://api.github.com/repos/Seiltanzer03/trading_dbd/actions/runs?head_sha='+expected+'&per_page=40'
-          while time.monotonic()<deadline:
-           request=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
-           with urllib.request.urlopen(request,timeout=20) as response:data=json.load(response)
-           runs=[r for r in data.get('workflow_runs',[]) if r.get('name')=='deploy' and r.get('head_sha')==expected]
-           state=[(r['id'],r['status'],r.get('conclusion'),r.get('run_attempt')) for r in runs]
-           if state!=last:print('EXACT_RELEASE_WAIT',state,flush=True);last=state
-           if any(r['status']=='completed' and r.get('conclusion')=='success' for r in runs):break
-           time.sleep(30)
-          else:raise RuntimeError('exact-SHA automatic deployment not successful before readonly receipt deadline')
-          PY
-      - name: Read exact release research, structured LLM and trace receipts
+      - name: Read bounded disk allocation and running release
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40s
+          command_timeout: 45s
           script: |
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,sqlite3,time,urllib.request,subprocess,sys,re
-            sys.dont_write_bytecode=True;sys.path.insert(0,'/opt/seiltanzer')
+            import os,json,subprocess,urllib.request
             expected='0f9525e66ca17c716c71dadc4b37496cf705d6da'
             actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('ACCEPTANCE_0f9525e66ca17c716c71dadc4b37496cf705d6da',actual,flush=True);assert actual==expected
-            print('ACCEPTANCE_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,NRestarts','--no-pager'],text=True).strip(),flush=True)
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status',timeout=8) as response:status=json.load(response)
-            print('SNAPSHOT_STATUS',json.dumps({k:status.get(k) for k in ('ready','building','last_error','snapshot_budget','family_market_forecasts')}),flush=True)
-            trade_id=status.get('current_trade_id');assert trade_id is not None
-            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-             c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-             deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-             rows=c.execute('SELECT id,ts,snapshot_json,verdict FROM ai_verdicts WHERE trade_id=? AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 2',(int(trade_id),)).fetchall()
-             assert rows
-             for index,(id,ts,raw,text) in enumerate(rows):
-              s=json.loads(raw);m=s.get('policy_manager') or {};llm=s.get('llm_shadow_decision') or {};a=m.get('unified_edge_ensemble') or {};decision=m.get('management_decision') or {}
-              summary=dict(id=id,ts=ts,runtime_code_sha=s.get('runtime_code_sha'),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in a.get('components',[]) if x.get('component_id')=='current_llm'],decision={k:decision.get(k) for k in ('policy','decision_id','continuity','execution_status','remaining_fraction_before_action','incremental_close_fraction','remaining_fraction_after_action')},previous={k:(decision.get('previous') or {}).get(k) for k in ('policy','decision_id','execution_status')},net_floor=(m.get('risk_constraint') or {}).get('net_cvar_floor_r'),selection_floor=(m.get('selection_rule') or {}).get('cvar_floor_r'),coverage=(s.get('metric_coverage') or {}).get('summary'),metric_n=len((m.get('option_derivative_state') or {}).get('metrics') or {}))
-              if index==0:
-               contract=llm.get('input_contract') or {}
-               proof=None
-               if contract.get('version')=='independent-llm-transport-v2':
-                from seiltanzer.decision_research import validate_no_future_timestamps
-                try:
-                 validate_no_future_timestamps({'captured_ts':s['captured_ts'],'llm_shadow_decision':llm},float(s['captured_ts']))
-                 proof='FULL_AUDIT_PACKET_ALIASES_CLOCKS_VERIFIED'
-                except Exception as exc:proof='FAILED_'+type(exc).__name__
-               summary.update(provider_contract=contract.get('version'),audit_proof=proof,
-                report_metric_rows=len(re.findall(r'^\w+: current=',text,re.M)),
-                has_metric_audit='**FULL METRIC AUDIT**' in text,
-                invalid_legacy_cvar='-1.010R >= -1.000R' in text,
-                fake_zero_coverage='Покрытие: 0/0' in text,
-                obsolete_ai_arbiter='Арбитр: AI →' in text,
-                risk_report_lines=[line for line in text.splitlines() if 'CVaR10 net:' in line or line.startswith(('Net selection floor:','Gross strategy CVaR floor:','Audit summary:'))])
-               assert s.get('runtime_code_sha')==expected,'saved review is not current release'
-              print('SAVED_AI_ACCEPTANCE',json.dumps(summary,ensure_ascii=False),flush=True)
-            finally:c.close()
-            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-30 minutes','-n','900','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
-            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason','exception_class')
-            for line in r.stdout.splitlines():
-             try:v=json.loads(line[line.index('{'):])
-             except (ValueError,TypeError):continue
-             if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-') and v.get('stage') in ('provider_transport','provider_http','provider_fallback','response'):
-              print('ACCEPTANCE_PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
-            print('READ_ONLY_NO_PROVIDER_CALL_NO_ORDER_NO_FIT_NO_DB_WRITE')
+            assert actual==expected
+            print('EXACT_SHA',actual)
+            print(subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID,ActiveState,SubState,NRestarts','--no-pager'],text=True))
+            s=os.statvfs('/opt/seiltanzer/data');print('DISK_FREE_BYTES',s.f_bavail*s.f_frsize)
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=8) as r:data=json.load(r)
+            print('WORKER_DISK',json.dumps({k:v for k,v in data.items() if any(x in k.lower() for x in ('disk','free','resource','admission','guard','paused','pause','status','state','error'))},default=str))
+            for path in ('/var/log','/opt/seiltanzer/.git','/root/.cache','/tmp'):
+             try:
+              r=subprocess.run(['du','-x','-d','1','-B','1',path],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
+              print('BOUNDED_DISK_ALLOCATION',r.stdout)
+             except subprocess.TimeoutExpired:print('ALLOCATION_TIMEOUT',path)
+            for folder in ('/var/log','/opt/seiltanzer/data'):
+             rows=[]
+             try:
+              with os.scandir(folder) as entries:
+               for e in entries:
+                if e.is_file(follow_symlinks=False):
+                 s=e.stat(follow_symlinks=False)
+                 if s.st_size>=10000000:rows.append(dict(name=e.name,size=s.st_size,mtime=s.st_mtime,nlink=s.st_nlink))
+              print('LARGE_DIRECT_FILES',folder,json.dumps(sorted(rows,key=lambda x:-x['size'])[:15]))
+             except OSError:pass
+            print('READONLY_NO_DB_OPEN_NO_MUTATION')
             PY
