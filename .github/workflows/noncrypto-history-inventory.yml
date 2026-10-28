@@ -10,26 +10,38 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - name: Read actual cutover fence reason without mutation
+      - name: Identify bounded fence interruption and disposable capacity
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40s
+          command_timeout: 45s
           script: |
             /usr/bin/python3 -u - <<'PY'
-            import json,os,pathlib,shutil,subprocess,time
+            import json,pathlib,runpy,sqlite3,subprocess,time
             root=pathlib.Path('/opt/seiltanzer')
-            print('RUNTIME_SHA',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('ACTIVE_GUARD_PRESENT',os.path.lexists(root/'data/cutover.active'),flush=True)
-            p=root/'data/cutover.journal.json'
-            if p.exists():
-             j=json.loads(p.read_text());print('CUTOVER_JOURNAL',json.dumps({k:j.get(k) for k in ('phase','service_started','run_id')}),flush=True)
-            started=time.monotonic()
-            r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=12)
-            print('FENCE_CHECK',r.returncode,round(time.monotonic()-started,3),r.stdout.strip(),flush=True)
-            print('DISK_FREE_BYTES',shutil.disk_usage(root).free,flush=True)
-            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,MainPID,NRestarts','--no-pager'],text=True).strip(),flush=True)
+            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='readonly_diagnostic')
+            metrics={'progress_deadline_fired':False}
+            class Connection(sqlite3.Connection):
+             def set_progress_handler(self,callback,n):
+              if callback is None:return super().set_progress_handler(callback,n)
+              def measured():
+               value=callback()
+               if value:metrics['progress_deadline_fired']=True
+               return value
+              return super().set_progress_handler(measured,n)
+            connect=sqlite3.connect
+            def traced(*args,**kwargs):
+             kwargs['factory']=Connection
+             return connect(*args,**kwargs)
+            sqlite3.connect=traced
+            t=time.monotonic();result=ns['check_start'](root/'data/trades.db',root)
+            print('EXACT_UNCHANGED_FENCE',json.dumps(result),json.dumps(metrics),'seconds',round(time.monotonic()-t,3),flush=True)
+            print('GIT_OBJECTS',subprocess.check_output(['git','-C',str(root),'count-objects','-v'],text=True).strip(),flush=True)
+            for p in ('/root/.cache','/root/.npm/_cacache','/root/wheels'):
+             r=subprocess.run(['du','-sb',p],capture_output=True,text=True,timeout=5)
+             print('DISPOSABLE_CACHE_BYTES',p,r.stdout.split()[0] if r.returncode==0 else 'absent',flush=True)
+            print('LOADAVG',pathlib.Path('/proc/loadavg').read_text().strip(),flush=True)
             PY
