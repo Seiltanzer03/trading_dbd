@@ -21,52 +21,30 @@ jobs:
           command_timeout: 40s
           script: |
             /opt/seiltanzer/.venv/bin/python -u - <<'PY'
-            import json,sqlite3,time,urllib.request,subprocess,sys,hashlib
+            import json,sqlite3,time,subprocess,pathlib,sys,os
             sys.dont_write_bytecode=True
-            sys.path.insert(0,'/opt/seiltanzer')
-            expected='255813b72bcaa9d8835da7ffe27e8237668d14f8'
-            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            print('FINAL_RELEASE_SHA',actual,flush=True);assert actual==expected,'wrong release generation'
-            print('FINAL_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','--property=ActiveState,SubState,NRestarts','--no-pager'],text=True).strip(),flush=True)
-            trade_id=None
-            for path in ('/api/ai/snapshot/status','/api/research/g1/management/local-status'):
-             try:
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:r=json.load(response)
-              if path.endswith('snapshot/status'):
-               trade_id=r.get('current_trade_id');f=r.get('family_market_forecasts') or {}
-               out={k:r.get(k) for k in ('ready','building','last_error','snapshot_budget','current_trade_id')}
-               out['forecasts']={k:f.get(k) for k in ('captured_ts','market_observation_ts','published_for_sha','available_forecasts_at_capture','qualified_preferences_at_capture')}
-               out['families']={name:{k:v.get(k) for k in ('forecast_available_at_capture','preference_available_at_capture','reason')} for name,v in (f.get('families') or {}).items()}
-              else:out={k:r.get(k) for k in ('resolved','eligible_resolved','last_error','status_materialization')}
-              print('FINAL_LIVE_STATUS',path,json.dumps(out),flush=True)
-             except Exception as exc:print('STATUS_ERROR',path,type(exc).__name__,flush=True)
-            if trade_id is not None:
-             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-             try:
-              c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
-              deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
-              row=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE trade_id=? AND length(snapshot_json)<=2000000 ORDER BY ts DESC,id DESC LIMIT 1',(int(trade_id),)).fetchone()
-              if row:
-               s=json.loads(row[2]);ctx=s.get('research_working_context') or {};source=ctx.get('source_provenance') or {};llm=s.get('llm_shadow_decision') or {};manager=s.get('policy_manager') or {};audit=manager.get('unified_edge_ensemble') or {}
-               contract=llm.get('input_contract') or {};wire=contract.get('frozen_input_json')
-               decoded=json.loads(wire) if isinstance(wire,str) and len(wire)<=60000 else {}
-               audit_proof=None
-               if contract.get('version')=='independent-llm-transport-v2':
-                from seiltanzer.decision_research import validate_no_future_timestamps
-                try:
-                 validate_no_future_timestamps({'captured_ts':s['captured_ts'],'llm_shadow_decision':llm},float(s['captured_ts']))
-                 audit_proof='FULL_AUDIT_PACKET_ALIASES_CLOCKS_VERIFIED'
-                except Exception as exc:audit_proof='FAILED_'+type(exc).__name__
-               full=contract.get('full_input_json')
-               out=dict(id=row[0],ts=row[1],runtime_code_sha=s.get('runtime_code_sha'),captured_ts=s.get('captured_ts'),research={k:ctx.get(k) for k in ('available','reason','market_observation_ts','market_input_capture_ts','observed_ts','historical_profit_proven','automatic_execution_allowed')},source={k:source.get(k) for k in ('provider','source_symbol','target_instrument','observed_ts','available_at','derived')},estimators=ctx.get('price_estimators'),source_proof_present=isinstance(source.get('reference_proof'),dict),llm={k:llm.get(k) for k in ('status','policy','reason_code','confidence')},provider_status=s.get('ai_provider_status'),provider_wire_bytes=len(wire.encode()) if isinstance(wire,str) else None,provider_contract=contract.get('version'),decision_packet_version=contract.get('decision_packet_version'),full_audit_bytes=len(full.encode()) if isinstance(full,str) else None,evidence_aliases_n=len(contract.get('evidence_identity_aliases') or {}),audit_proof=audit_proof,shared_provenance_n=len(decoded.get('feature_provenance_table') or {}),shared_defaults_families=sorted(decoded.get('feature_provenance_defaults') or {}),current_llm=[{k:x.get(k) for k in ('effective_weight','reason')} for x in audit.get('components',[]) if x.get('component_id')=='current_llm'],selected_policy=audit.get('selected_policy'),excluded_roots=(s.get('edge_family_budget_status') or {}).get('excluded_roots'))
-               print('FINAL_SAVED_RESEARCH_RECEIPT',json.dumps(out,allow_nan=False),flush=True)
-             finally:c.close()
-            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-15 minutes','-n','400','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
-            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason')
+            sha=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
+            print('DIAG_SHA',sha,flush=True)
+            assert sha=='255813b72bcaa9d8835da7ffe27e8237668d14f8'
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','--property=MainPID','--value'],text=True).strip()
+            entries=pathlib.Path('/proc/'+pid+'/environ').read_bytes().split(b'\0')
+            env=dict(e.decode().split('=',1) for e in entries if b'=' in e)
+            print('PROVIDER_CONFIG',json.dumps({k:env.get(k) for k in ('OPENROUTER_MODEL','OPENROUTER_SHADOW_MODEL','AI_PROVIDER_TIMEOUT_SEC')}),flush=True)
+            c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
+            c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF')
+            deadline=time.monotonic()+4;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+            try:
+             rows=c.execute('SELECT id,ts,snapshot_json FROM ai_verdicts WHERE length(snapshot_json)<=2000000 ORDER BY id DESC LIMIT 2').fetchall()
+             for id,ts,raw in rows:
+              s=json.loads(raw);m=s.get('policy_manager') or {};d=m.get('option_derivative_state') or {};q=s.get('metric_coverage') or {}
+              print('REPORT_SHAPE',json.dumps(dict(id=id,ts=ts,root_keys=sorted(s),root_coverage=q.get('summary'),manager_coverage=(m.get('metric_coverage') or {}).get('summary'),geometry_keys=sorted(s.get('trade_geometry') or {}),risk=m.get('risk_constraint'),selection=m.get('selection_rule'),derivative_keys=sorted(d),metric_n=len(d.get('metrics') or {}),evidence_metric_n=len(((m.get('evidence') or {}).get('option_derivative_state') or {}).get('metrics') or {}),snapshot_budget=s.get('snapshot_budget'),edge_budget=s.get('edge_family_budget_status'),runtime_sha=s.get('runtime_code_sha'))),flush=True)
+            finally:c.close()
+            r=subprocess.run(['journalctl','-u','seiltanzer','--since','-3 hours','-n','1400','--no-pager','-o','cat'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
+            keys=('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','response_bytes','completion_tokens','prompt_tokens','finish_reason','exception_class')
             for line in r.stdout.splitlines():
              try:v=json.loads(line[line.index('{'):])
              except (ValueError,TypeError):continue
              if isinstance(v,dict) and str(v.get('request_id','')).startswith('ai-') and v.get('stage') in ('provider_transport','provider_http','provider_fallback','response'):
-              print('FINAL_EXISTING_PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
-            print('READ_ONLY_EXISTING_DATA_NO_LLM_CALL_NO_FETCH_NO_FIT_NO_ORDER')
+              print('PROVIDER_TIMING',json.dumps({k:v[k] for k in keys if k in v}),flush=True)
+            print('READ_ONLY_NO_PROVIDER_CALL_NO_ORDER')
             PY
