@@ -10,27 +10,8 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 4
     steps:
-      - name: Wait for exact-SHA canonical core acceptance
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const sha = '4d35f82110007d78b41635f5da3f55e422a081d0';
-            const required = ['ci/full-webkit','production/seiltanzer','g1e/storage-intelligence','g1m/management-edge','g1s/short-horizon','g1m/local-feedback','production/functional-smoke'];
-            const deadline = Date.now() + 35*60*1000;
-            while (Date.now() < deadline) {
-              const {data} = await github.rest.repos.getCombinedStatusForRef({owner:context.repo.owner,repo:context.repo.repo,ref:sha,per_page:100});
-              const states = new Map(data.statuses.map(s=>[s.context,s]));
-              const production = required.slice(1).map(k=>states.get(k));
-              const targets = new Set(production.map(s=>s?.target_url));
-              if(data.sha===sha && required.every(k=>states.get(k)?.state==='success') && targets.size===1 && production[0]?.target_url?.includes('/actions/runs/')) {
-                core.info('EXACT_SHA_ALL_CORE_ACCEPTED '+sha+' '+production[0].target_url); return;
-              }
-              core.info('WAIT_CORE '+required.map(k=>k+'='+states.get(k)?.state).join(' '));
-              await new Promise(r=>setTimeout(r,45000));
-            }
-            throw new Error('exact-SHA canonical core acceptance not observed within bound');
       - name: Read exact release research, structured LLM and trace receipts
         uses: appleboy/ssh-action@v1
         with:
@@ -38,7 +19,7 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 40s
+          command_timeout: 90s
           script: |
             /opt/seiltanzer/.venv/bin/python -B -u - <<'PY'
             import json,sqlite3,time,urllib.request,subprocess,sys,re
@@ -51,6 +32,13 @@ jobs:
             print('SNAPSHOT_STATUS',json.dumps({k:status.get(k) for k in ('ready','building','last_error','snapshot_budget','family_market_forecasts')}),flush=True)
             with urllib.request.urlopen('http://127.0.0.1:8790/api/position',timeout=8) as response:position=json.load(response)
             print('LIVE_RECORDED_PROTECTION',json.dumps({'trade_id':position.get('trade_id'),'active_stop_price':(position.get('position_state') or {}).get('active_stop_price'),'stop_execution_context':position.get('stop_execution_context')},ensure_ascii=False),flush=True)
+            import shutil
+            print('DISK_FREE_BYTES',shutil.disk_usage('/opt/seiltanzer/data').free,flush=True)
+            for path in ('/api/research/macro/numeric/status','/api/research/runtime/worker-status'):
+             try:
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response: body=json.load(response)
+              print('CURRENT_RUNTIME_STATUS',path,json.dumps(body,ensure_ascii=False)[:18000],flush=True)
+             except Exception as exc:print('CURRENT_RUNTIME_ERROR',path,type(exc).__name__,str(exc)[:300],flush=True)
             trade_id=status.get('current_trade_id');assert trade_id is not None
             c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
             try:
