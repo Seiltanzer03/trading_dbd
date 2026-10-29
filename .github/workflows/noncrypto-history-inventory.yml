@@ -1,4 +1,4 @@
-name: json-history-compression-readonly-sample
+name: json-release-guard-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -18,23 +18,24 @@ jobs:
           command_timeout: 50s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import sqlite3,pathlib,time,zlib,base64,hashlib,json,shutil
-            p=pathlib.Path('/opt/seiltanzer/data/trades.db')
-            c=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=1)
-            c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF');c.execute('PRAGMA cache_size=-2048')
-            deadline=time.monotonic()+12;c.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-            for table,col in [('passive_market_observations','features_json'),('g1s_observations','frozen_features_json')]:
-              for direction in ['ASC','DESC']:
-                rows=c.execute('SELECT '+col+' FROM '+table+' ORDER BY rowid '+direction+' LIMIT 8').fetchall()
-                raw_n=packed_n=0;hashes=[]
-                for (text,) in rows:
-                  b=text.encode('utf8')
-                  if len(b)>2*1024**2:raise ValueError('Sample field exceeds bound')
-                  packed=zlib.compress(b,1)
-                  assert zlib.decompress(packed)==b
-                  raw_n+=len(b);packed_n+=len(base64.b64encode(packed))+128
-                  hashes.append(hashlib.sha256(b).hexdigest())
-                print('EXACT_COMPRESSION_SAMPLE',json.dumps({'table':table,'direction':direction,'rows':len(rows),'raw_bytes':raw_n,'encoded_bytes_with_128B_envelope_each':packed_n,'distinct_payloads':len(set(hashes)),'exact_byte_roundtrip':True}),flush=True)
-            c.close()
-            print('SPACE_BYTES',shutil.disk_usage('/').free,flush=True)
+            import json,os,pathlib,subprocess,time,urllib.request,shutil,stat
+            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
+            print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
+            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','MainPID','-p','NRestarts'],text=True).strip(),flush=True)
+            for name in ['cutover.active','cutover.journal.json','cutover.preparation.json','json-history.epoch.json']:
+              p=data/name
+              if not os.path.lexists(p):print('STATE_META',name,'ABSENT',flush=True);continue
+              info=p.lstat();row={'regular':stat.S_ISREG(info.st_mode),'size':info.st_size,'mode':oct(stat.S_IMODE(info.st_mode))}
+              if stat.S_ISREG(info.st_mode) and 0<info.st_size<=65536:
+                obj=json.loads(p.read_bytes());row.update({k:obj.get(k) for k in ['contract','run_id','application_sha','phase','service_started']})
+              print('STATE_META',name,json.dumps(row),flush=True)
+            started=time.monotonic()
+            try:
+              r=subprocess.run(['/usr/bin/python3','-B','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=12)
+              v=json.loads(r.stdout);print('ACTUAL_START_GUARD',json.dumps({'rc':r.returncode,'elapsed_sec':round(time.monotonic()-started,3),**{k:v.get(k) for k in ['contract','start_allowed','reason','hot_history_present']}}),flush=True)
+            except Exception as e:print('ACTUAL_START_GUARD_FAILURE',type(e).__name__,flush=True)
+            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
+            try:
+              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
+            except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
             PY
