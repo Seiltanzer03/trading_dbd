@@ -17,47 +17,19 @@ jobs:
           password: ${{ secrets.SSH_PASSWORD }}
           command_timeout: 100s
           script: |
-            /opt/seiltanzer/.venv/bin/python -B -u - <<'PY'
-            import json,os,subprocess,time,shutil,sys,pathlib,urllib.request
-            sys.path.insert(0,'/opt/seiltanzer');sys.dont_write_bytecode=True
-            def out(kind,**row):print(kind,json.dumps(row,ensure_ascii=False),flush=True)
-            def run(args,timeout=12):
-             try:
-              p=subprocess.run(args,capture_output=True,text=True,timeout=timeout);return {'code':p.returncode,'output':p.stdout[-12000:]}
-             except subprocess.TimeoutExpired:return {'error':'TIMEOUT'}
-            head=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
-            assert head=='4d35f82110007d78b41635f5da3f55e422a081d0'
-            out('DISK_META',free=shutil.disk_usage('/').free,inventory=run(['du','-x','-B1','--max-depth=2','/opt','/var','/tmp','/root/.cache'],20))
-            for root in ('/opt/seiltanzer/data','/opt/seiltanzer/data/research','/var/log','/tmp','/opt/actions-runner/_diag'):
-             p=pathlib.Path(root)
-             items=[]
-             try:
-              for f in p.iterdir():
-               st=f.lstat()
-               if f.is_file() and not f.is_symlink():items.append({'name':f.name,'bytes':st.st_size,'allocated_bytes':st.st_blocks*512,'mtime':st.st_mtime})
-              out('FILE_META',root=root,largest=sorted(items,key=lambda x:x['allocated_bytes'],reverse=True)[:16])
-             except OSError as e:out('META_ERROR',type=type(e).__name__)
-            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-            env={}
-            for raw in pathlib.Path('/proc',pid,'environ').read_bytes().split(b'\0'):
-             k,sep,v=raw.partition(b'=')
-             if k in (b'OPENROUTER_API_KEY',b'OPENROUTER_PROXY'):env[k.decode()]=v.decode()
-            import httpx
-            start=time.monotonic()
-            try:
-             with httpx.Client(proxy=env.get('OPENROUTER_PROXY') or None,timeout=10,trust_env=False) as client:
-              r=client.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer '+env.get('OPENROUTER_API_KEY','')})
-             out('FREE_AUTH_ROUTE',http_code=r.status_code,elapsed_ms=round((time.monotonic()-start)*1000,1),completion_calls=0)
-            except Exception as e:out('FREE_AUTH_ROUTE',error_type=type(e).__name__,elapsed_ms=round((time.monotonic()-start)*1000,1),completion_calls=0)
-            for path in ('/api/state','/api/research/mathematical-edge'):
-             try:
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:body=json.load(response)
-              if path.endswith('mathematical-edge'):
-               from scripts.production_model_consumption import verify_setup_coverage
-               out('ALL_SETUP_CURRENT_MODELS',receipt=verify_setup_coverage(body,expected_sha=head,captured_ts=time.time()))
-              else:
-               tick=body.get('tick') or {}
-               out('LIVE_PRICE_STATUS',instrument=tick.get('instrument'),feeds={k:{f:v.get(f) for f in ('value','status','source','ts','error')} for k,v in (tick.get('feeds') or {}).items() if k=='price' and isinstance(v,dict)})
-             except Exception as e:out('CURRENT_STATUS_ERROR',path=path,error_type=type(e).__name__,reason=str(e)[:160] if isinstance(e,ValueError) else None)
-            out('READ_ONLY_DONE',provider_completions=0,db_writes=0,orders=0,restarts=0)
+            /usr/bin/python3 -B -u - <<'PY'
+            import json,subprocess,os,shutil,pathlib
+            def out(kind,**row):print(kind,json.dumps(row),flush=True)
+            root=subprocess.check_output(['findmnt','-n','-o','SOURCE,FSTYPE','/'],text=True).strip()
+            out('ROOT_FILESYSTEM',description=root)
+            parts=root.split()
+            if len(parts)==2 and parts[1]=='ext4':
+             r=subprocess.run(['tune2fs','-l',parts[0]],text=True,capture_output=True,timeout=6,check=True)
+             keep=('Block count:','Reserved block count:','Free blocks:','Block size:','Filesystem state:','Reserved blocks uid:','Reserved blocks gid:')
+             out('EXT4_CAPACITY',fields=[s for s in r.stdout.splitlines() if s.startswith(keep)])
+            st=os.statvfs('/');out('AVAILABLE_CAPACITY',block_size=st.f_frsize,total_blocks=st.f_blocks,free_blocks=st.f_bfree,available_blocks=st.f_bavail,free_bytes=shutil.disk_usage('/').free)
+            p=pathlib.Path('/opt/seiltanzer/data/research/official_macro_offhost_latest.json')
+            if p.exists():
+             b=json.loads(p.read_bytes());out('MACRO_OFFHOST_RECEIPT',fields={k:b.get(k) for k in ('expected_sha','acceptance_run_id','created_ts','fetched_at','valid_until_ts')})
+            out('READ_ONLY_FILESYSTEM_METADATA',mutations=0)
             PY
