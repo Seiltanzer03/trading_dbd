@@ -18,14 +18,13 @@ jobs:
           command_timeout: 100s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import pathlib,subprocess,json
-            r=subprocess.run(['du','-x','-B1','--max-depth=2','/root'],capture_output=True,text=True,timeout=15)
-            print('ROOT_DIRECTORY_CAPACITY',json.dumps({'code':r.returncode,'rows':r.stdout.splitlines()}),flush=True)
+            import json,pathlib,subprocess,shutil
             items=[]
-            for p in pathlib.Path('/root').iterdir():
-             try:
-              s=p.lstat()
-              if p.is_file() and not p.is_symlink() and s.st_size>5*1024**2:items.append({'name':p.name,'bytes':s.st_size,'allocated_bytes':s.st_blocks*512,'mtime':s.st_mtime})
-             except OSError:pass
-            print('ROOT_LARGE_TOP_FILES',json.dumps(items),flush=True)
+            for p in pathlib.Path('/').iterdir():
+             s=p.lstat()
+             if p.is_file() and not p.is_symlink():items.append({'name':p.name,'bytes':s.st_size,'allocated_bytes':s.st_blocks*512,'mtime':s.st_mtime})
+            print('ROOT_FILES_METADATA',json.dumps(items),flush=True)
+            print('CURRENT_SWAP_METADATA',pathlib.Path('/proc/swaps').read_text(),flush=True)
+            print('CURRENT_MEMORY_METADATA',json.dumps([s for s in pathlib.Path('/proc/meminfo').read_text().splitlines() if s.startswith(('MemTotal:','MemAvailable:','SwapTotal:','SwapFree:'))]),flush=True)
+            print('SPACE_BYTES',shutil.disk_usage('/').free,flush=True)
             PY
