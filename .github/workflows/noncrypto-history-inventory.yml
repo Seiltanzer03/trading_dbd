@@ -1,4 +1,4 @@
-name: active-storage-readonly-diagnostic
+name: active-storage-packing-diagnostic
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -60,11 +60,13 @@ jobs:
                print('RECENT_PAYLOAD_LENGTHS',table,json.dumps({'columns':large,'rows':conn.execute(q).fetchall()}),flush=True)
              except sqlite3.OperationalError as e:print('BOUNDED_QUERY_REFUSED',table,str(e),flush=True)
              finally:conn.set_progress_handler(None,0)
+            for table in ['passive_market_observations','g1s_observations']:
+             deadline=time.monotonic()+12;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+             try:
+              rows=conn.execute("SELECT pagetype,pgsize,payload,unused FROM dbstat WHERE name=? LIMIT 12000",(table,)).fetchall()
+              print('PAGE_SAMPLE',table,json.dumps({'pages':len(rows),'physical_bytes':sum(r[1] for r in rows),'payload_bytes':sum(r[2] for r in rows),'unused_bytes':sum(r[3] for r in rows),'page_types':{t:sum(r[0]==t for r in rows) for t in set(r[0] for r in rows)}}),flush=True)
+             except sqlite3.OperationalError as e:print('PAGE_SAMPLE_REFUSED',table,str(e),flush=True)
+             finally:conn.set_progress_handler(None,0)
+            print('COVERING_INDEXES',json.dumps(conn.execute("SELECT name,tbl_name,sql FROM sqlite_schema WHERE type='index' AND tbl_name IN ('passive_market_observations','g1s_observations')").fetchall()),flush=True)
             conn.close()
-            try:
-             with urllib.request.urlopen('http://127.0.0.1:8790/api/system/storage/status',timeout=5) as r:
-              b=r.read(262145)
-              if len(b)<=262144:print('STORAGE_STATUS',b.decode(),flush=True)
-            except Exception as e:print('STORAGE_STATUS_REFUSED',type(e).__name__,flush=True)
             PY
-
