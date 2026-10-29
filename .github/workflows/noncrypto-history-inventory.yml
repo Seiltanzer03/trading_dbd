@@ -39,8 +39,16 @@ jobs:
               print('JSON_METADATA',name,json.dumps({k:v.get(k) for k in ('run_id','phase','service_started','abort_reason','admitted','free_bytes','required_free_bytes','started_wall_ts')}),flush=True)
             print('JSON_OWNER',subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','LoadState','-p','ActiveState','-p','SubState','-p','MainPID','-p','Result','-p','ExecMainStatus'],text=True).strip(),flush=True)
             print('COLD_JOURNAL_DIGEST',hashlib.sha256((data/'cutover.journal.json').read_bytes()).hexdigest(),flush=True)
+            owner_pid=int(subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','MainPID','--value'],text=True).strip())
+            if owner_pid:
+              proc=pathlib.Path('/proc')/str(owner_pid)
+              try:
+                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
+                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
+                print('OWNER_PROCESS',json.dumps({'pid':owner_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
+              except FileNotFoundError:print('OWNER_PROCESS','FINISHED',flush=True)
             try:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
             except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
             PY
-# Read-only epoch observation 2
+# Read-only epoch observation 3
