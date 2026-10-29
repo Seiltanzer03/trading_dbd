@@ -172,8 +172,8 @@ def capture_frozen(sftp,identity,output,*,deadline):
         raise
 
 
-def _remote_read(sftp,name):
-    path=REMOTE_DATA+name
+def _remote_read(sftp,name,*,remote_data=REMOTE_DATA):
+    path=remote_data+name
     try:
         info=sftp.lstat(path)
         if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid!=0
@@ -191,20 +191,20 @@ def _remote_read(sftp,name):
     return value
 
 
-def _remote_write(sftp,name,value,*,replace=False):
+def _remote_write(sftp,name,value,*,replace=False,remote_data=REMOTE_DATA):
     raw=core._canonical(value)
-    current=_remote_read(sftp,name)
+    current=_remote_read(sftp,name,remote_data=remote_data)
     if current is not None and not replace:
         if current!=value:raise core.CutoverError('REMOTE_IMMUTABLE_PLAN_CHANGED')
         return
-    temporary=REMOTE_DATA+'.owned-handoff-'+secrets.token_hex(12)
+    temporary=remote_data+'.owned-handoff-'+secrets.token_hex(12)
     try:
         with sftp.open(temporary,'wx') as stream:
             sftp.chmod(temporary,0o600)
             stream.write(raw);stream.flush()
         # This atomic request is not retirement authority. The native owner
         # verifies all pins/streams and fsyncs its own immutable accepted plan.
-        sftp.posix_rename(temporary,REMOTE_DATA+name)
+        sftp.posix_rename(temporary,remote_data+name)
     finally:
         try:sftp.remove(temporary)
         except OSError:pass

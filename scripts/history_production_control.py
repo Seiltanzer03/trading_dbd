@@ -18,7 +18,7 @@ DATABASE = ROOT/'data/trades.db'
 SERVICE = 'seiltanzer.service'
 EXTERNAL_GUARD = Path('/usr/local/lib/seiltanzer-history-start-guard.py')
 OWNER_UID = 0
-STATE_FILES = ('cutover.active','cutover.preparation.json','cutover.plan.json',
+STATE_FILES = ('json-history.epoch.json','cutover.active','cutover.preparation.json','cutover.plan.json',
                'cutover.request.json','cutover.transport.json','cutover.journal.json',
                'cutover.result.json','cutover.capacity.json','cutover.reset.json','cutover.abort.json')
 
@@ -149,7 +149,7 @@ class ProductionControl:
         # present and prevents systemd start throughout verification.
         absent=ROOT/'data/.cutover-offline-check-absent'
         if os.path.lexists(absent):return False
-        result=history_service_fence.check_start(DATABASE,ROOT,guard=absent,journal=absent)
+        result=history_service_fence.check_start(DATABASE,ROOT,guard=absent,journal=absent,json_epoch=absent)
         return result.get('reason') == 'VERIFIED_HOT_RUNTIME_CAPABILITY'
 
     def start_verified_database(self):

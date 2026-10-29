@@ -82,7 +82,7 @@ def _fence(root, state, control):
         _lost(root,state)
 
 
-def _measure(database, deadline):
+def _measure(database, deadline, *, allow_marked_source=False):
     before = _identity(database)
     if not 4096 <= before['size'] <= core.MAX_IMAGE_BYTES:
         raise core.CutoverError('INVALID_FROZEN_SOURCE_SIZE')
@@ -101,7 +101,14 @@ def _measure(database, deadline):
         conn.set_progress_handler(lambda:time.monotonic() >= deadline,1000)
         if conn.execute('PRAGMA quick_check').fetchone() != ('ok',):
             raise core.CutoverError('FROZEN_SOURCE_QUICK_CHECK_FAILED')
-        if conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(history_state.TABLE,)).fetchone():
+        marked = conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(history_state.TABLE,)).fetchone()
+        if allow_marked_source:
+            state=history_state.read_history_state(conn)
+            fields=history_state.history_manifest_fields(conn)
+            if (state is None or state['contract']!=history_state.RUNTIME_CONTRACT
+                    or not fields or history_state.PAYLOAD_PIN_FIELD in fields):
+                raise core.CutoverError('EXISTING_UNENCODED_V2_SOURCE_REQUIRED')
+        elif marked:
             raise core.CutoverError('INITIAL_UNMARKED_SOURCE_REQUIRED')
     finally:
         conn.close()
@@ -112,12 +119,13 @@ def _measure(database, deadline):
                 file_identity=before)
 
 
-def _verify_source(root, state, control, deadline):
+def _verify_source(root, state, control, deadline, *, database=None):
+    database = Path(database) if database is not None else root/'trades.db'
     _fence(root,state,control)
     try:
-        if _identity(root/'trades.db') != state['source']['file_identity']:
+        if _identity(database) != state['source']['file_identity']:
             _lost(root,state)
-        core._verify_database(root/'trades.db',state['source']['identity'],deadline)
+        core._verify_database(database,state['source']['identity'],deadline)
     except core.FencingError:
         raise
     except Exception:
@@ -127,11 +135,12 @@ def _verify_source(root, state, control, deadline):
     _fence(root,state,control)
 
 
-def _finish_abort(root, state, control):
+def _finish_abort(root, state, control, *, database=None):
+    database = Path(database) if database is not None else root/'trades.db'
     guard = root/'cutover.active'
     if guard.exists() or guard.is_symlink():
         _fence(root,state,control)
-        if _identity(root/'trades.db') != state['source']['file_identity']:
+        if _identity(database) != state['source']['file_identity']:
             _lost(root,state)
         guard.unlink();core._fsync_directory(root)
     if not state['service_started']:
@@ -144,9 +153,10 @@ def _finish_abort(root, state, control):
     return dict(state,source=dict(state['source']['identity']))
 
 
-def prepare_epoch(root, *, run_id, application_sha, control):
+def prepare_epoch(root, *, run_id, application_sha, control, database=None, allow_marked_source=False):
     """Prepare/resume one epoch; an expired epoch aborts before any hot access."""
     root = Path(root)
+    database = Path(database) if database is not None else root/'trades.db'
     if (type(run_id) is not str or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_-]{0,63}',run_id)
             or type(application_sha) is not str or not re.fullmatch('[0-9a-f]{40}',application_sha)):
         raise core.CutoverError('INVALID_FROZEN_PREPARATION_INPUT')
@@ -156,8 +166,8 @@ def prepare_epoch(root, *, run_id, application_sha, control):
         raise core.FencingError('FROZEN_EPOCH_REQUIRES_DATA_RECONCILIATION')
     if state is not None and state['phase'] == 'ABORTED_ORIGINAL':
         if (root/'cutover.active').exists() or (root/'cutover.active').is_symlink():
-            _verify_source(root,state,control,time.monotonic()+core.MAX_SECONDS)
-        return _finish_abort(root,state,control)
+            _verify_source(root,state,control,time.monotonic()+core.MAX_SECONDS,database=database)
+        return _finish_abort(root,state,control,database=database)
     if core._read(root/'cutover.journal.json') is not None:
         raise core.CutoverError('EXISTING_TRANSFER_EPOCH_REQUIRES_OWN_PLAN')
     if state is None:
@@ -175,9 +185,9 @@ def prepare_epoch(root, *, run_id, application_sha, control):
         if control.stop_writers() is not True:
             _lost(root,state)
         _fence(root,state,control)
-        if not 4096 <= core._regular(root/'trades.db').st_size <= core.MAX_IMAGE_BYTES:
+        if not 4096 <= core._regular(database).st_size <= core.MAX_IMAGE_BYTES:
             raise core.CutoverError('INVALID_FROZEN_SOURCE_SIZE')
-        conn = sqlite3.connect(root/'trades.db',timeout=1)
+        conn = sqlite3.connect(database,timeout=1)
         try:
             if conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0] != 0:
                 _lost(root,state)
@@ -187,18 +197,19 @@ def prepare_epoch(root, *, run_id, application_sha, control):
         deadline = max(state['started_monotonic']+PREPARATION_SECONDS,
                        time.monotonic()+core.MAX_SECONDS)
         try:
-            state['source'] = _measure(root/'trades.db',deadline)
+            state['source'] = (_measure(database,deadline,allow_marked_source=True)
+                               if allow_marked_source else _measure(database,deadline))
         except core.FencingError:
             _lost(root,state)
         state['phase'] = 'FROZEN'
         core._write(path,state)
         _fence(root,state,control)
-        if _identity(root/'trades.db') != state['source']['file_identity']:
+        if _identity(database) != state['source']['file_identity']:
             _lost(root,state)
     else:
-        _verify_source(root,state,control,time.monotonic()+core.MAX_SECONDS)
+        _verify_source(root,state,control,time.monotonic()+core.MAX_SECONDS,database=database)
     if time.monotonic()-state['started_monotonic'] >= PREPARATION_SECONDS:
         state['phase'] = 'ABORTED_ORIGINAL'
         core._write(path,state)
-        return _finish_abort(root,state,control)
+        return _finish_abort(root,state,control,database=database)
     return dict(state,source=dict(state['source']['identity']))

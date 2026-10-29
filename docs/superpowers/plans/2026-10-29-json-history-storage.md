@@ -121,3 +121,41 @@ Final: Ruling: review did not judge task6/native cloud state or production
 effectiveness because they are unbuilt/unmeasured; retain both as explicit
 pending gates. Cost if wrong: premature deployment or an unsupported savings
 claim; no such authority is granted by this package's tests/review.
+
+Task6 implementation checkpoint: private frozen-source/transfer owners now
+accept an explicit database with separate metadata; existing initial cold
+defaults/refusals remain unchanged. New JSON owner binds the already committed
+cold journal byte-for-byte, mirrors a canonical service guard, independently
+verifies both original/encoded cloud streams before transfer, preserves hard
+clocks and actual reserve/runtime precommit, and permits only verified terminal
+start. A separate durable epoch link also blocks startup if the canonical guard
+is removed while nested metadata is unfinished; offline runtime validation
+bypasses only the three epoch paths, not source/codec capability validation.
+Generated v2 fixture tests reproduced the missing isolation and missing startup
+fence, then passed current-source replacement/partial-transfer recovery without
+resetting old metadata. Owning integration162 passed/3 skipped in22.92s.
+Two new real systemd driver-death/expiry cases remain enabled as a dedicated
+native3.11 CI step; local host has no systemd proof environment. The off-host
+current-source driver and canonical production-concurrency workflow are present.
+One scoped final review of this task6 diff, correction, exact integrated CI,
+actual code-before-data installation and live execution remain pending.
+
+Task6 scoped final review a54a16a..135dacc:0Critical/2Important/1Minor.
+One fix pass reproduced both Important findings. A safe terminal-original JSON
+epoch now advances through a durable transition intent and atomic link update,
+preserving prior JSON metadata and the cold journal; pending/fence-lost and
+committed JSON epochs remain inadmissible. A new attempt captures actual current
+bytes, including legitimate writes after the previous original restart. Owned
+link creation interrupted before preparation can resume without replacing an
+existing clock. Driver launch/polling validates terminal result, exact epoch,
+accepted plan and journal before requiring an observed active unit, so a fast
+terminal resume is reported correctly. These cases first failed, then passed;
+owning integration165 passed/3 skipped in8.39s; extra original-restored versus
+committed transition coverage also passed. Generated fixtures now enlarge only
+one pending row, preserving source hashes and avoiding unnecessary test space.
+Final: minor (deferred): native failure artifacts retain stage/exception class
+but omit the narrower stable reason; private messages/URLs remain excluded.
+Final: Ruling: scoped review declined real systemd/cloud throughput, complete
+current-data timing and production effectiveness; require native CI and actual
+operation receipts before treating these as verified. Cost if wrong: a false
+readiness/savings claim; none is made from the fixture tests.
