@@ -1,4 +1,4 @@
-name: json-delivery-state-readonly
+name: json-current-epoch-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -26,6 +26,19 @@ jobs:
             source=(root/'scripts/history_service_fence.py').read_bytes()
             print('GUARD_CODE_MATCH',actual==source,flush=True)
             print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
+            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
+              p=data/name
+              if not p.exists():print('EPOCH_METADATA',name,'ABSENT',flush=True);continue
+              v=json.loads(p.read_text())
+              print('EPOCH_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','phase','service_started')}),flush=True)
+            run_id='40937497010';metadata=data/('json-rebuild-'+run_id)
+            for name in ('cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json'):
+              p=metadata/name
+              if not p.exists():print('JSON_METADATA',name,'ABSENT',flush=True);continue
+              v=json.loads(p.read_text())
+              print('JSON_METADATA',name,json.dumps({k:v.get(k) for k in ('run_id','phase','service_started','abort_reason','admitted','free_bytes','required_free_bytes','started_wall_ts')}),flush=True)
+            print('JSON_OWNER',subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','LoadState','-p','ActiveState','-p','SubState','-p','MainPID','-p','Result','-p','ExecMainStatus'],text=True).strip(),flush=True)
+            print('COLD_JOURNAL_DIGEST',hashlib.sha256((data/'cutover.journal.json').read_bytes()).hexdigest(),flush=True)
             try:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
             except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
