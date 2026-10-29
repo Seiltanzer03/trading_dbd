@@ -38,4 +38,32 @@ jobs:
             try:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
             except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=5) as r:
+              worker=json.load(r).get('worker') or {};print('WORKER_PHASE',json.dumps({k:worker.get(k) for k in ['current_phase','disk_pause_active','disk_pressure','last_error']}),flush=True)
+            path=root/'seiltanzer/history_storage_state.py'
+            ns={'__name__':'_readonly_storage_guard_probe','__file__':str(path)}
+            exec(compile(path.read_bytes(),str(path),'exec'),ns)
+            import sqlite3
+            c=sqlite3.connect((data/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=1)
+            c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF');c.execute('PRAGMA cache_size=-2048')
+            began=time.monotonic();deadline=began+5;c.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+            phase=['read_state']
+            identity=ns['identity_proof'];projection=ns['_runtime_projection']
+            def traced_identity(conn,table,boundary):
+              phase[0]='identity:'+table;start=time.monotonic()
+              result=identity(conn,table,boundary)
+              print('IDENTITY_PROOF',table,json.dumps({'elapsed_sec':round(time.monotonic()-start,3),'row_count':result.get('row_count'),'max_rowid':result.get('max_rowid')}),flush=True)
+              return result
+            def traced_projection():
+              phase[0]='runtime_projection';return projection()
+            ns['identity_proof']=traced_identity;ns['_runtime_projection']=traced_projection
+            try:
+              state=ns['read_history_state'](c)
+              print('EMBEDDED_STATE',json.dumps({'contract':state.get('contract'),'retired_rows':len(state.get('retired_rowids',{}).get('passive_market_observations',[])),'retained_counts':{k:v.get('row_count') for k,v in state.get('retained_identity',{}).items()}}),flush=True)
+              ns['history_manifest_fields'](c)
+              print('EXACT_STATE_PROOF','PASS',flush=True)
+            except Exception as e:
+              print('EXACT_STATE_PROOF_FAILURE',json.dumps({'phase':phase[0],'exception_type':type(e).__name__,'sqlite_errorname':getattr(e,'sqlite_errorname',None),'elapsed_sec':round(time.monotonic()-began,3)}),flush=True)
+            finally:c.close()
+            print('TRACKED_SOURCE_CLEAN',subprocess.run(['git','-C',str(root),'diff','--quiet','HEAD','--','scripts','seiltanzer']).returncode==0,flush=True)
             PY
