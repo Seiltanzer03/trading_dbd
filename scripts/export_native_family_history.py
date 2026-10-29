@@ -15,6 +15,7 @@ from scripts.production_ede_offload import _connect
 from seiltanzer.config import ALL_INSTRUMENTS
 from seiltanzer.edge_family_native_history import native_history
 from seiltanzer import native_family_capture_projection, real_input_integrity
+from seiltanzer import sqlite_json_payloads
 from seiltanzer import history_live_read_guard
 
 # Embed the exact shared stdlib implementation: no installed server package,
@@ -22,6 +23,8 @@ from seiltanzer import history_live_read_guard
 _SUPPORT = inspect.getsource(real_input_integrity) + '\n' + inspect.getsource(
     native_family_capture_projection).replace('from __future__ import annotations\n','').replace(
         'from .real_input_integrity import FLAGS, simulated_evidence\n','')
+_SUPPORT += '\n_payload_storage_ns={"__name__":"_native_export_payloads"}\nexec(' + repr(
+    inspect.getsource(sqlite_json_payloads)) + ',_payload_storage_ns)\n'
 REMOTE_EXPORT = _SUPPORT + '\n' + r"""
 import sqlite3, time, json, hashlib, gzip, base64
 now=time.time()
@@ -30,6 +33,7 @@ c=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout
 c.row_factory=sqlite3.Row
 c.execute('PRAGMA query_only=ON')
 c.set_progress_handler(lambda: int(time.monotonic()-started>25),10000)
+_payload_storage_ns['install_reader'](c)
 rows=[]
 tables={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('g1s_observations','passive_market_observations')")}
 reason='NATIVE_TABLES_UNAVAILABLE'
@@ -44,7 +48,7 @@ if len(tables)==2:
   passive_columns={r[1] for r in c.execute('PRAGMA table_info(passive_market_observations)')}
   age_column='p.option_age_sec' if 'option_age_sec' in passive_columns else 'NULL'
   query='''SELECT g.instrument,g.captured_ts,g.frozen_features_json,g.features_sha256,
-        g.option_source,g.option_quality,p.created_ts AS original_created_ts,p.features_json AS original_json
+        g.option_source,g.option_quality,p.created_ts AS original_created_ts,storage_json_text(p.features_json) AS original_json
         ,'''+age_column+''' AS option_age_sec
         FROM g1s_observations g JOIN passive_market_observations p ON p.observation_id=g.source_observation_id
         WHERE g.instrument=? AND g.horizon_minutes=15 AND g.captured_ts>=? AND g.captured_ts<=?

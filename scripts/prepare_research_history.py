@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.history_storage_loader import history_state
@@ -20,6 +21,58 @@ from scripts.verify_immutable_snapshot import verify
 
 
 def prepare_research_snapshot(database, manifest_path, destination, *, client=None):
+    """Expand physical encoding before any existing model/cold-history reader."""
+    database,manifest_path,destination=map(Path,(database,manifest_path,destination))
+    if os.path.lexists(destination) or os.path.lexists(str(destination)+'.manifest.json'):
+        raise FileExistsError('Research history output already exists')
+    archive._identity(database)
+    manifest=verify(database,manifest_path)
+    fields=history_state.snapshot_history_manifest(database,manifest)
+    if history_state.PAYLOAD_PIN_FIELD not in fields:
+        return _prepare_plain_research_snapshot(database,manifest_path,destination,client=client)
+    from scripts.sqlite_json_rebuild import rebuild_snapshot
+    proof=dict(immutable_sqlite_read=True,immutable_snapshot_verified=True,
+        verified_local_file=archive._identity(database),database_sha256=manifest['database_sha256'],
+        database_size_bytes=manifest['database_size_bytes'])
+    with tempfile.TemporaryDirectory(prefix='.json-research-',dir=destination.parent) as directory:
+        has_cold='cold_history_catalog_sha256' in fields
+        expanded=Path(directory)/'plain.db' if has_cold else destination
+        result=rebuild_snapshot(database,expanded,source_receipt=proof,mode='expand')
+        output_manifest=Path(str(expanded)+'.manifest.json')
+        expanded_manifest={k:v for k,v in manifest.items() if k not in
+            (history_state.PAYLOAD_PIN_FIELD,'backup_contract','backup_contract_version','manifest_payload_sha256')}
+        expanded_manifest.update(database_sha256=result['database_sha256'],
+            database_size_bytes=result['database_size_bytes'],source='VERIFIED_JSON_FEATURE_EXPANSION',
+            raw_physical_database_sha256=manifest['database_sha256'],
+            raw_physical_database_size_bytes=manifest['database_size_bytes'],
+            json_payloads_expanded=True,analytical_snapshot_only=True,production_authority=False)
+        # Rebuild published an owned inode exclusively. A failed manifest must
+        # never delete a racing replacement or leave an unreceipted database.
+        created=False;manifest_identity=None
+        try:
+            with output_manifest.open('x',encoding='utf8') as stream:
+                created=True;os.chmod(output_manifest,0o600)
+                info=os.fstat(stream.fileno());manifest_identity=(info.st_dev,info.st_ino)
+                json.dump(expanded_manifest,stream,sort_keys=True,allow_nan=False)
+                stream.write('\n');stream.flush();os.fsync(stream.fileno())
+            verify(expanded,output_manifest)
+            if has_cold:
+                prepared=_prepare_plain_research_snapshot(expanded,output_manifest,destination,
+                    client=client,raw_manifest=manifest)
+                prepared['json_payloads_expanded']=True
+                return prepared
+            return dict(database=str(expanded.resolve()),manifest=str(output_manifest.resolve()),
+                history_union_prepared=False,json_payloads_expanded=True,production_authority=False)
+        except BaseException:
+            if expanded.exists() and archive._identity(expanded)==result['verified_local_file']:
+                expanded.unlink()
+            if created and output_manifest.exists():
+                info=output_manifest.lstat()
+                if (info.st_dev,info.st_ino)==manifest_identity:output_manifest.unlink()
+            raise
+
+
+def _prepare_plain_research_snapshot(database, manifest_path, destination, *, client=None, raw_manifest=None):
     database, manifest_path, destination = map(Path, (database, manifest_path, destination))
     output_manifest = Path(str(destination)+'.manifest.json')
     if os.path.lexists(destination) or os.path.lexists(output_manifest):
@@ -63,16 +116,21 @@ def prepare_research_snapshot(database, manifest_path, destination, *, client=No
     # storage marker, or raw backup identity into the complete analytical file.
     retained = ('git_commit', 'source_db', 'started_ts', 'completed_ts', 'created_ts', 'run_id')
     combined = {key: manifest[key] for key in retained if key in manifest}
+    raw_manifest=raw_manifest or manifest
     combined.update(source='VERIFIED_CURRENT_HOT_COLD_UNION',
                     database_sha256=result['database_sha256'],
                     database_size_bytes=result['database_size_bytes'],
-                    raw_hot_database_sha256=manifest['database_sha256'],
+                    raw_hot_database_sha256=raw_manifest['database_sha256'],
                     cold_catalog_used_sha256=result['catalog_sha256'],
                     catalog_output_bound_bytes=result['catalog_output_bound_bytes'],
                     effective_output_bound_bytes=result['effective_output_bound_bytes'],
                     current_hot_rows_preserved=True, original_cold_table_roots_verified=True,
                     history_union_verified=True, analytical_snapshot_only=True,
                     production_authority=False)
+    if manifest.get('json_payloads_expanded') is True:
+        combined.update(json_payloads_expanded=True,raw_physical_database_sha256=raw_manifest['database_sha256'],
+                        raw_physical_database_size_bytes=raw_manifest['database_size_bytes'],
+                        expanded_hot_database_sha256=manifest['database_sha256'])
     created_manifest = False
     try:
         with output_manifest.open('x', encoding='utf8') as stream:

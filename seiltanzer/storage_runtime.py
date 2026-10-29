@@ -21,9 +21,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .history_storage_state import PAYLOAD_PIN_FIELD, snapshot_history_manifest
 
 STORAGE_CONTRACT_VERSION = "seiltanzer-storage-v1"
 BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v1"
+JSON_PAYLOAD_BACKUP_CONTRACT_VERSION = "seiltanzer-backup-v2-json-payloads"
 RECOVERY_CONTRACT_VERSION = "seiltanzer-recovery-v1"
 RETENTION_CONTRACT_VERSION = "seiltanzer-backup-retention-v1"
 LOCAL_BACKUP_INTERVAL_SEC = 15 * 60
@@ -340,9 +342,13 @@ class StorageManager:
                 }
                 self._prestart_integrity_ready = True
             size = temp_db.stat().st_size
+            history_fields = snapshot_history_manifest(temp_db)
             os.replace(temp_db, final_db)
             manifest = {
-                "backup_contract_version": BACKUP_CONTRACT_VERSION,
+                "backup_contract_version": (
+                    JSON_PAYLOAD_BACKUP_CONTRACT_VERSION
+                    if PAYLOAD_PIN_FIELD in history_fields else BACKUP_CONTRACT_VERSION
+                ),
                 "retention_contract_version": RETENTION_CONTRACT_VERSION,
                 "backup_id": backup_id,
                 "kind": kind,
@@ -357,6 +363,7 @@ class StorageManager:
                 "git_commit": self.git_commit,
                 "verified": True,
                 "encryption_status": "external_target_managed" if kind == "offhost" else "filesystem_permissions",
+                **history_fields,
             }
             _atomic_json(manifest_path, manifest)
             self._apply_retention(kind)
@@ -479,11 +486,18 @@ class StorageManager:
         manifest = _read_json(manifest_path)
         if not manifest or manifest.get("verified") is not True:
             raise ValueError("backup manifest is missing or unverified")
-        if manifest.get("backup_contract_version") != BACKUP_CONTRACT_VERSION:
+        if manifest.get("backup_contract_version") not in (
+            BACKUP_CONTRACT_VERSION, JSON_PAYLOAD_BACKUP_CONTRACT_VERSION
+        ):
             raise ValueError("backup contract mismatch")
         expected = str(manifest.get("database_sha256") or "")
         if not expected or _sha256(backup_db) != expected:
             raise ValueError("backup SHA256 mismatch")
+        history_fields = snapshot_history_manifest(backup_db, manifest)
+        expected_contract = (JSON_PAYLOAD_BACKUP_CONTRACT_VERSION
+                             if PAYLOAD_PIN_FIELD in history_fields else BACKUP_CONTRACT_VERSION)
+        if manifest.get("backup_contract_version") != expected_contract:
+            raise ValueError("backup contract mismatch")
         ok, detail = _sqlite_integrity(backup_db, full=True)
         if not ok:
             raise ValueError(f"backup integrity failed: {detail}")

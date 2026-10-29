@@ -5,6 +5,7 @@ Capability covers the v2 rejected-index/rollup contract; the external checker
 also validates the actual data and the three owning calculation contracts.
 """
 HISTORY_RUNTIME_CONTRACT = 'sqlite-history-runtime-v1'
+JSON_PAYLOAD_READER_CONTRACT = 'sqlite-json-zlib-base64-v1'
 from . import history_storage_state as storage
 from . import history_runtime_projection as projection
 from .passive_history_statistics import history_totals

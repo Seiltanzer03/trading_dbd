@@ -134,6 +134,8 @@ def _open_shadow_reader(runtime: Any):
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA cache_size=-2048")
         connection.set_progress_handler(interrupted, 1000)
+        from ..sqlite_json_payloads import install_reader
+        install_reader(connection)
         connection.execute("BEGIN")
         reader = SimpleNamespace(_conn=connection, _lock=threading.RLock(),
                                  _consistent_read_snapshot=True,

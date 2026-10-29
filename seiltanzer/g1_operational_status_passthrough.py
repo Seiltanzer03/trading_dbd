@@ -110,7 +110,10 @@ def _health_payload(self, base: dict[str, Any]) -> dict[str, Any]:
         market_open
         and (latest_eligible is None or (age is not None and age > 2.0 * cadence))
     )
-    if stalled:
+    storage_capture = dict(getattr(self, '_storage_capture_admission', None) or {})
+    if storage_capture.get('admitted') is False:
+        operational_status = 'PAUSED_STORAGE'
+    elif stalled:
         operational_status = "STALLED"
     elif failed_cycles > 0:
         operational_status = "DEGRADED"
@@ -122,6 +125,7 @@ def _health_payload(self, base: dict[str, Any]) -> dict[str, Any]:
         "version": OPERATIONAL_INTEGRITY_VERSION,
         "status_passthrough_version": STATUS_PASSTHROUGH_VERSION,
         "operational_status": operational_status,
+        "storage_capture": storage_capture,
         "market_open_any_supported_instrument": market_open,
         "expected_capture_cadence_sec": cadence,
         "stall_threshold_sec": 2.0 * cadence,
@@ -150,6 +154,9 @@ def install_operational_status_passthrough(app) -> None:
             body = {}
         health = _health_payload(passive, body)
         body["collector_health"] = health
+        body["storage_capture"] = dict(health['storage_capture'])
+        if body['storage_capture'].get('admitted') is False:
+            body['collector_status'] = 'paused_storage'
         body["operational_collector_status"] = health["operational_status"]
         body["collector_health_bounded"] = True
         return body

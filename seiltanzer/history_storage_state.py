@@ -19,6 +19,8 @@ MAX_BYTES = 8 * 1024**2
 MAX_RETIRED_ROWS = 1_000_000
 PIN_FIELDS = ('cold_history_catalog_sha256', 'cold_history_catalog_bucket',
               'cold_history_catalog_object_key', 'sqlite_history_state_sha256')
+PAYLOAD_PIN_FIELD = 'sqlite_json_payload_storage_sha256'
+JSON_PAYLOAD_BACKUP_CONTRACT = 'trading-dbd-offhost-backup-v2-json-payloads'
 _FIELDS = {'contract', 'bucket', 'catalog_source_database_sha256', 'catalog_sha256',
            'catalog_object_key', 'cutover_source_database_sha256', 'retired_rowids',
            'retained_identity', 'source_materialization_watermark', 'production_authority'}
@@ -172,10 +174,35 @@ def read_history_state(conn):
     return state
 
 
+def offhost_backup_contract(manifest):
+    if PAYLOAD_PIN_FIELD not in manifest:
+        return 'trading-dbd-offhost-backup-v1'
+    if not isinstance(manifest[PAYLOAD_PIN_FIELD],str) or not re.fullmatch('[0-9a-f]{64}',manifest[PAYLOAD_PIN_FIELD]):
+        raise ValueError('Invalid JSON payload backup pin')
+    return JSON_PAYLOAD_BACKUP_CONTRACT
+
+
+def _payload_codec():
+    path = Path(__file__).resolve().with_name('sqlite_json_payloads.py')
+    spec = importlib.util.spec_from_file_location('_history_json_payload_storage',path)
+    if spec is None or spec.loader is None:
+        raise ValueError('JSON payload storage verifier unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _payload_manifest_fields(conn):
+    if conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',('json_feature_payload_storage',)).fetchone() is None:
+        return {}
+    return _payload_codec().manifest_fields(conn)
+
+
 def history_manifest_fields(conn):
+    payload_fields = _payload_manifest_fields(conn)
     state = read_history_state(conn)
     if state is None:
-        return {}
+        return payload_fields
     for table, proof in state['retained_identity'].items():
         if identity_proof(conn, table, proof['max_rowid']) != proof:
             raise ValueError('Conflicting hot/cold history rowid: retained identity or retired rowid coverage changed')
@@ -185,11 +212,14 @@ def history_manifest_fields(conn):
     return dict(cold_history_catalog_sha256=state['catalog_sha256'],
                 cold_history_catalog_bucket=state['bucket'],
                 cold_history_catalog_object_key=state['catalog_object_key'],
-                sqlite_history_state_sha256=hashlib.sha256(canonical_state(state)).hexdigest())
+                sqlite_history_state_sha256=hashlib.sha256(canonical_state(state)).hexdigest(),
+                **payload_fields)
 
 
 def validate_manifest_history(conn, manifest):
     fields = history_manifest_fields(conn)
+    if PAYLOAD_PIN_FIELD in manifest and PAYLOAD_PIN_FIELD not in fields:
+        raise ValueError('Manifest JSON payload pin has no storage marker')
     if fields:
         if any(manifest.get(key) != value for key, value in fields.items()):
             raise ValueError('Manifest history pin differs from verified database state')

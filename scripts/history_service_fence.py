@@ -118,6 +118,26 @@ def check_start(database, application_root, *, guard=None, journal=None):
         conn.execute('PRAGMA cache_size=-2048')
         deadline = time.monotonic()+SQL_SECONDS
         conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+        payload_entry = conn.execute('SELECT type FROM sqlite_schema WHERE name=?',('json_feature_payload_storage',)).fetchone()
+        if payload_entry is not None:
+            try:
+                if (_literal_reader_contract(app_root,'history_runtime_views.py','JSON_PAYLOAD_READER_CONTRACT')
+                        != 'sqlite-json-zlib-base64-v1'
+                        or _literal_reader_contract(app_root,'sqlite_json_payloads.py','SQLITE_JSON_PAYLOAD_CONTRACT')
+                        != 'sqlite-json-zlib-base64-v1'):
+                    raise ValueError('Missing JSON payload reader')
+            except Exception:
+                return result(False,'JSON_PAYLOAD_READER_CAPABILITY_REQUIRED')
+            try:
+                codec_path = app_root/'seiltanzer/sqlite_json_payloads.py'
+                _regular(codec_path,MAX_MODULE_BYTES)
+                codec = dict(__name__='_payload_storage_start_guard',__file__=str(codec_path))
+                exec(compile(codec_path.read_bytes(),str(codec_path),'exec'),codec)
+                if not codec['manifest_fields'](conn): raise ValueError('Missing payload marker')
+            except Exception:
+                return result(False,'JSON_PAYLOAD_STORAGE_INVALID')
+            if time.monotonic() >= deadline:
+                return result(False,'JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT')
         entry = conn.execute('SELECT type FROM sqlite_schema WHERE name=?', (HISTORY_TABLE,)).fetchone()
         if entry is None:
             if current is not None and current['phase'] == 'COMMITTED':

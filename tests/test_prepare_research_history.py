@@ -4,6 +4,7 @@ import importlib
 import json
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 
@@ -69,3 +70,53 @@ def test_research_output_manifest_collision_is_not_overwritten(tmp_path):
         prep.prepare_research_snapshot(hot, manifest, destination, client=client)
     assert collision.read_text() == 'keep unrelated file'
     assert not destination.exists()
+
+
+def test_coded_plain_history_expands_exact_text_without_cloud_or_changing_backup(tmp_path):
+    from test_sqlite_json_rebuild import source, proof
+    from scripts.sqlite_json_rebuild import rebuild_snapshot
+    from scripts.history_storage_loader import history_state
+    original,text=source(tmp_path);coded=tmp_path/'coded.db'
+    result=rebuild_snapshot(original,coded,source_receipt=proof(original),mode='compress')
+    manifest=tmp_path/'coded.json';manifest.write_text(json.dumps(result))
+    before=coded.read_bytes()
+    class NoCloud:
+        def get_object(self,**kwargs):raise AssertionError('No cold state')
+    prep=importlib.import_module('scripts.prepare_research_history')
+    prepared=prep.prepare_research_snapshot(coded,manifest,tmp_path/'research.db',client=NoCloud())
+    assert prepared['json_payloads_expanded'] is True
+    with closing(sqlite3.connect(prepared['database'])) as conn:
+        assert conn.execute('SELECT features_json FROM passive_market_observations').fetchone()==(text,)
+        assert history_state.PAYLOAD_PIN_FIELD not in history_state.history_manifest_fields(conn)
+    data=json.loads(Path(prepared['manifest']).read_text())
+    assert data['raw_physical_database_sha256']==result['database_sha256']
+    assert data['analytical_snapshot_only'] is True
+    assert coded.read_bytes()==before
+
+
+@pytest.mark.parametrize('runtime_state',[False,True])
+def test_coded_current_hot_expands_before_cold_union_keeps_current_outcomes_and_pins(tmp_path,runtime_state):
+    from scripts.sqlite_json_rebuild import rebuild_snapshot
+    from test_sqlite_json_rebuild import proof
+    from test_sqlite_history_cutover import _build_cutover_fixture
+    from scripts.sqlite_history_cutover import build_hot_cutover_snapshot
+    src,receipt,raw,pin,client=_build_cutover_fixture(tmp_path,include_post_catalog=True,include_feature_json=True,include_runtime_metadata=runtime_state)
+    hot=tmp_path/'hot.db'
+    build_hot_cutover_snapshot(src,hot,source_receipt=receipt,catalog_bytes=raw,expected_catalog_sha256=pin)
+    with closing(sqlite3.connect(hot)) as conn:
+        text=' {"note": "'+'new current exact feature '*2000+'"} '
+        conn.execute('UPDATE passive_market_observations SET features_json=?,resolution_status=? WHERE rowid=140',(text,'resolved'))
+        conn.commit()
+    coded=tmp_path/'coded-hot.db'
+    result=rebuild_snapshot(hot,coded,source_receipt=proof(hot),mode='compress')
+    manifest=tmp_path/'coded-hot.json';manifest.write_text(json.dumps(result))
+    prep=importlib.import_module('scripts.prepare_research_history')
+    prepared=prep.prepare_research_snapshot(coded,manifest,tmp_path/'research.db',client=client)
+    assert prepared['history_union_prepared'] and prepared['json_payloads_expanded']
+    with closing(sqlite3.connect(prepared['database'])) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM passive_market_observations').fetchone()==((1014 if runtime_state else 14),)
+        assert conn.execute('SELECT features_json,resolution_status FROM passive_market_observations WHERE rowid=140').fetchone()==(text,'resolved')
+    out=json.loads(Path(prepared['manifest']).read_text())
+    assert out['raw_hot_database_sha256']==result['database_sha256']
+    assert out['raw_physical_database_sha256']==result['database_sha256']
+    assert 'cold_history_catalog_sha256' not in out

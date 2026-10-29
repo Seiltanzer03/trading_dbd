@@ -139,11 +139,14 @@ class ShortHorizonRuntime:
         self.engine = engine
         self.passive = engine.passive
         self._conn = self.passive._conn
+        from .sqlite_json_payloads import install_reader
+        self._json_payload_storage_enabled = install_reader(self._conn)
         self._lock = self.passive._lock
         self._last_step_started: float | None = None
         self._last_step_finished: float | None = None
         self._last_step_duration_ms: float | None = None
         self._last_error: str | None = None
+        self._storage_capture_admission = None
         self._cached_materializer_items: list[dict[str, Any]] = []
         self._ensure_tables()
         self._refresh_materializer_cache_under_lock()
@@ -380,13 +383,27 @@ class ShortHorizonRuntime:
     def materialize_new(self, limit: int = 2000, *,
                         max_payload_bytes: int = 16 * 1024 * 1024,
                         time_budget_sec: float | None = None) -> int:
+        from .research_capture_headroom import capture_admission
+        with self._lock:
+            path = getattr(self.passive, '_capture_storage_path', None)
+            if path is None:
+                # Legacy embedded callers may supply only a shared connection.
+                path = next((r[2] for r in self._conn.execute('PRAGMA database_list')
+                             if r[1] == 'main'), None)
+                if path == '': path = ':memory:'
+            previous = self._storage_capture_admission or {}
+            self._storage_capture_admission = capture_admission(path,
+                previously_paused=previous.get('admitted') is False,
+                batch_bytes=max_payload_bytes)
+            if not self._storage_capture_admission['admitted']:
+                return 0  # Retain every source row and the exact durable cursor.
         watermark = self._watermark()
         started = time.time()
         monotonic_started = time.monotonic()
         with self._lock:
             rows = self._conn.execute(
                 "SELECT rowid AS source_rowid,"
-                "length(CAST(features_json AS BLOB))+length(CAST(forecast_json AS BLOB)) AS payload_bytes "
+                "length(CAST(storage_json_text(features_json) AS BLOB))+length(CAST(forecast_json AS BLOB)) AS payload_bytes "
                 "FROM passive_market_observations "
                 "WHERE rowid>? ORDER BY rowid LIMIT ?",
                 (watermark, max(1, min(int(limit), 10000))),
@@ -424,6 +441,10 @@ class ShortHorizonRuntime:
                 origin = "LIVE_PROSPECTIVE"
             feature_sha = _sha_text(features_raw)
             forecast_sha = _sha_text(forecast_raw)
+            stored_features = features_raw
+            if self._json_payload_storage_enabled:
+                from .sqlite_json_payloads import pack_text
+                stored_features = pack_text(features_raw)
             t0_payload = {
                 "source_observation_id": str(row["observation_id"]),
                 "captured_ts": float(row["captured_ts"]),
@@ -456,7 +477,7 @@ class ShortHorizonRuntime:
                      row["market_regime"], row["session"], str(row["feature_contract_version"]),
                      str(row["forecast_model_version"]), feature_sha, forecast_sha,
                      _sha_text(_json(t0_payload)), int(eligible), int(eligible), int(eligible),
-                     exclusion, features_raw, forecast_raw, time.time()))
+                     exclusion, stored_features, forecast_raw, time.time()))
             self._create_prospective_predictions(obs_id, float(row["captured_ts"]),
                                                  int(row["horizon_minutes"]))
             processed += 1
@@ -590,8 +611,8 @@ class ShortHorizonRuntime:
         with self._lock:
             rows = self._conn.execute("""
                 SELECT g.observation_id,g.instrument,g.horizon_minutes,g.captured_ts,
-                       CASE WHEN json_valid(g.frozen_features_json)
-                            THEN json_extract(g.frozen_features_json,
+                       CASE WHEN json_valid(storage_json_text(g.frozen_features_json))
+                            THEN json_extract(storage_json_text(g.frozen_features_json),
                                  '$.price_state.g1s_intraday.ret_15m')
                             ELSE NULL END AS momentum_ret_15m,
                        r.direction_label
@@ -1049,6 +1070,7 @@ class ShortHorizonRuntime:
                 items = self._cached_materializer_items
         return {"contract_version": G1S_MATERIALIZER_VERSION,
                 "items": list(items or []),
+                "storage_capture": dict(self._storage_capture_admission or {}),
                 "worker": {"last_started": self._last_step_started,
                            "last_finished": self._last_step_finished,
                            "duration_ms": self._last_step_duration_ms,

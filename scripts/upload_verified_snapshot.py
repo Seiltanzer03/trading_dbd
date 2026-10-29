@@ -56,6 +56,7 @@ def upload(database: Path, source_manifest: Path, *, bucket: str, key: str) -> d
         raise RuntimeError('source snapshot manifest does not match database metadata')
     print('OFFHOST_BACKUP_PHASE=history_validation', flush=True)
     history_state.snapshot_history_manifest(database, manifest)
+    backup_contract = history_state.offhost_backup_contract(manifest)
     print('OFFHOST_BACKUP_PHASE=storage_setup', flush=True)
     client = boto3.client('s3', endpoint_url='https://storage.yandexcloud.net',
                           region_name='ru-central1',
@@ -67,7 +68,9 @@ def upload(database: Path, source_manifest: Path, *, bucket: str, key: str) -> d
         raise RuntimeError('bucket versioning must be disabled for bounded seven-slot retention')
     metadata = {'source-sha256': digest, 'source-size': str(size),
                 'git-commit': str(manifest.get('git_commit') or ''),
-                'codec': 'gzip', 'contract': 'trading-dbd-offhost-backup-v1'}
+                'codec': 'gzip', 'contract': backup_contract}
+    if history_state.PAYLOAD_PIN_FIELD in manifest:
+        metadata['json-payload-storage-sha256'] = manifest[history_state.PAYLOAD_PIN_FIELD]
     created = client.create_multipart_upload(
         Bucket=bucket, Key=key, ContentType='application/gzip', Metadata=metadata)
     upload_id = created['UploadId']
@@ -130,7 +133,7 @@ def upload(database: Path, source_manifest: Path, *, bucket: str, key: str) -> d
                              Range=f'bytes={start}-{compressed_size-1}')['Body'].read()
     if first != first_sample or last != last_sample:
         raise RuntimeError('uploaded snapshot range verification failed')
-    result = {**manifest, 'backup_contract': 'trading-dbd-offhost-backup-v1',
+    result = {**manifest, 'backup_contract': backup_contract,
               'bucket': bucket, 'object_key': key, 'codec': 'gzip',
               'compressed_size_bytes': compressed_size,
               'compressed_sha256': compressed_digest.hexdigest(),

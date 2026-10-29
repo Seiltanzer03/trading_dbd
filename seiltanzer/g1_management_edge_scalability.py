@@ -53,6 +53,8 @@ def _open_read_snapshot(runtime: ManagementLocalRuntime) -> sqlite3.Connection |
     uri = Path(path).resolve().as_uri() + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=0.5)
     connection.row_factory = sqlite3.Row
+    from .sqlite_json_payloads import install_reader
+    install_reader(connection)
     connection.execute("PRAGMA query_only=ON")
     connection.execute("PRAGMA busy_timeout=500")
     return connection

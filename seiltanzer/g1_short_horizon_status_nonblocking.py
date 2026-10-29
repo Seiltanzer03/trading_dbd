@@ -163,6 +163,7 @@ def install_g1_short_horizon_status_nonblocking(
                 "status": "UNAVAILABLE",
                 "reason": "NONBLOCKING_STATUS_CACHE_MISSING",
                 "request_time_sqlite_access": False,
+                "storage_capture": dict(getattr(self, '_storage_capture_admission', None) or {}),
                 "status_snapshot_cached": False,
                 "authority": {
                     "research_only": True,
@@ -187,6 +188,9 @@ def install_g1_short_horizon_status_nonblocking(
         body["status_materialization"] = materialization
         body["request_time_sqlite_access"] = False
         body["status_snapshot_cached"] = True
+        # Capacity telemetry describes the latest optional capture attempt;
+        # it is separate from the cached historical/model measurements.
+        body["storage_capture"] = dict(getattr(self, '_storage_capture_admission', None) or {})
         return body
 
     def refresh(self, *args, **kwargs):

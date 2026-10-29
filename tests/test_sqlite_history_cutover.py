@@ -22,7 +22,7 @@ from test_sqlite_history_partition import identity
 
 def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_mutable_outcome=False,
                            include_runtime_metadata=False, include_current_ack_schema=False,
-                           include_legacy_ack_guards=False):
+                           include_legacy_ack_guards=False, include_feature_json=False):
     from contextlib import closing
     source = tmp_path / 'source.sqlite3'
     with closing(sqlite3.connect(source)) as conn:
@@ -207,6 +207,14 @@ def _build_cutover_fixture(tmp_path, *, include_post_catalog=False, include_muta
                 conn.execute(_ACK_UPDATE_TRIGGER_SQL)
                 conn.execute('CREATE TRIGGER trg_ai_decision_acks_require_live_trade_insert '
                              'BEFORE INSERT ON ai_decision_acks BEGIN SELECT 1; END')
+    if include_feature_json:
+        with closing(sqlite3.connect(source)) as conn:
+            conn.execute('ALTER TABLE passive_market_observations ADD COLUMN features_json TEXT')
+            conn.execute('ALTER TABLE g1s_observations ADD COLUMN frozen_features_json TEXT')
+            text=' {"exact": "'+'original feature; '*2000+'"} '
+            conn.execute('UPDATE passive_market_observations SET features_json=?',(text,))
+            conn.execute('UPDATE g1s_observations SET frozen_features_json=?',(text,))
+            conn.commit()
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     source_receipt = dict(
         immutable_sqlite_read=True,

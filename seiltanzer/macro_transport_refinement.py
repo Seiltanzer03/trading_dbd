@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .macro_http_transport import official_http_client
+
 
 TRANSPORT_VERSION = "macro-official-transport-v6"
 BROWSER_USER_AGENT = (
@@ -212,7 +214,7 @@ def _fetch_bls_official_with_failover(
     for route_name, route_proxy in routes:
         for attempt in range(1, BLS_TRANSPORT_ATTEMPTS_PER_ROUTE + 1):
             try:
-                with httpx.Client(
+                with official_http_client(
                     timeout=remaining_timeout(),
                     follow_redirects=True,
                     proxy=route_proxy,
@@ -253,7 +255,7 @@ def _fetch_bls_official_with_failover(
         for attempt in range(1, BLS_TRANSPORT_ATTEMPTS_PER_ROUTE + 1):
             try:
                 series_payloads: list[dict[str, Any]] = []
-                with httpx.Client(
+                with official_http_client(
                     timeout=remaining_timeout(),
                     follow_redirects=True,
                     proxy=route_proxy,
@@ -322,7 +324,7 @@ def install_macro_transport_refinement() -> None:
     from .macro_numeric_data import NumericMacroRuntime, OfficialNumericMacroSource
 
     def refined_client(self: OfficialNumericMacroSource) -> httpx.Client:
-        return httpx.Client(
+        return official_http_client(
             timeout=self.timeout_sec,
             follow_redirects=True,
             proxy=macro_proxy_url(),

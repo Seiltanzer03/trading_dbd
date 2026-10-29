@@ -254,10 +254,10 @@ def _safe_eval_rows(runtime: ShortHorizonRuntime) -> dict[str, list[dict[str, An
             SELECT p.model_id,p.p_up,p.created_ts AS prediction_created_ts,
                    g.observation_id,g.instrument,g.horizon_minutes,g.captured_ts,
                    g.target_ts,g.market_regime,
-                   CASE WHEN json_valid(g.frozen_features_json) THEN COALESCE(
-                        json_extract(g.frozen_features_json,'$.g1s_intraday.ret_15m'),
-                        json_extract(g.frozen_features_json,'$.ret_15m'),
-                        json_extract(g.frozen_features_json,'$.return_15m'))
+                   CASE WHEN json_valid(storage_json_text(g.frozen_features_json)) THEN COALESCE(
+                        json_extract(storage_json_text(g.frozen_features_json),'$.g1s_intraday.ret_15m'),
+                        json_extract(storage_json_text(g.frozen_features_json),'$.ret_15m'),
+                        json_extract(storage_json_text(g.frozen_features_json),'$.return_15m'))
                         ELSE NULL END AS frozen_ret_15m,
                    r.direction_label,r.resolved_ts,
                    m.feature_set,m.model_family,m.created_ts AS model_created_ts,

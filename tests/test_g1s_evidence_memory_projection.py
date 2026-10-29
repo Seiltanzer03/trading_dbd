@@ -47,7 +47,9 @@ def test_evidence_queries_project_scalar_not_full_frozen_payload() -> None:
     )
     for fn in query_functions:
         source = inspect.getsource(fn)
-        assert "json_extract(g.frozen_features_json" in source
+        # Decode in SQLite before projecting the scalar; never retain all
+        # expanded feature payloads in the Python evidence row list.
+        assert "json_extract(storage_json_text(g.frozen_features_json)" in source
         assert re.search(
             r"(?m)^\s*g\.frozen_features_json\s*,", source
         ) is None
