@@ -50,6 +50,16 @@ jobs:
             try:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
             except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
+            import sys
+            sys.path.insert(0,str(root))
+            from scripts.history_production_control import database_handles
+            readers=[]
+            for handle in database_handles(data/'trades.db',exclude_pid=owner_pid):
+              try:
+                io=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(handle['pid'])/'io').read_text().splitlines())
+                readers.append({'pid':handle['pid'],'writable':handle['writable'],'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes'])})
+              except FileNotFoundError:pass
+            print('EXTERNAL_DATABASE_HANDLES',json.dumps(readers),flush=True)
             PY
 # Read-only epoch observation 3
-# Read-only epoch observation 4
+# Read-only epoch observation 5
