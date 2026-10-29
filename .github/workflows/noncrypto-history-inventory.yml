@@ -1,4 +1,4 @@
-name: active-storage-packing-diagnostic
+name: yandex-storage-metadata-inventory
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,65 +8,32 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 5
     steps:
-      - uses: appleboy/ssh-action@v1
+      - uses: actions/setup-python@v5
         with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 110s
-          script: |
-            /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,sqlite3,time,shutil,subprocess,urllib.request
-            root=pathlib.Path('/opt/seiltanzer'); data=root/'data'
-            print('CURRENT_SHA',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('SPACE',json.dumps(shutil.disk_usage('/')._asdict()),flush=True)
-            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'],text=True),flush=True)
-            for name in ['trades.db','trades.db-wal','trades.db-shm','cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.plan.json','cutover.active']:
-             p=data/name
-             if p.exists() and p.is_file():
-              s=p.stat(); v={'name':name,'size':s.st_size,'allocated':s.st_blocks*512}
-              if name.endswith('.json') and s.st_size<65536:
-               j=json.loads(p.read_text()); v['metadata']={k:j.get(k) for k in ['contract','run_id','phase','service_started','original','hot','runtime_after'] if k in j}
-              print('DATA_METADATA',json.dumps(v),flush=True)
-            conn=sqlite3.connect((data/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=1)
-            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048');conn.execute('PRAGMA trusted_schema=OFF')
-            names=[r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")]
-            print('TABLE_NAMES',json.dumps(names),flush=True)
-            for pragma in ['page_size','page_count','freelist_count','auto_vacuum']:
-             print('PRAGMA',pragma,conn.execute('PRAGMA '+pragma).fetchone()[0],flush=True)
-            if 'hot_history_storage_state' in names:
-             cols=[r[1] for r in conn.execute('PRAGMA table_info(hot_history_storage_state)')]
-             row=conn.execute('SELECT * FROM hot_history_storage_state LIMIT 1').fetchone()
-             for k,v in zip(cols,row or []):
-              try: j=json.loads(v)
-              except (ValueError,TypeError): continue
-              if isinstance(j,dict):
-               out={a:b for a,b in j.items() if a not in ('retired_rowids','runtime_projection','retained_identity')}
-               out['retired_counts']={a:len(b) for a,b in j.get('retired_rowids',{}).items()}
-               out['runtime_projection_keys']=list(j.get('runtime_projection',{}))
-               print('HOT_STATE',json.dumps(out),flush=True)
-            for table in ['passive_market_observations','g1s_observations','ai_assessments','ai_decisions','ai_analyses']:
-             if table not in names:continue
-             columns=[r[1] for r in conn.execute('PRAGMA table_info('+table+')')]
-             print('TABLE_COLUMNS',table,json.dumps(columns),flush=True)
-             deadline=time.monotonic()+3;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-             try:
-              print('TABLE_COUNT',table,conn.execute('SELECT count(*) FROM '+table).fetchone()[0],flush=True)
-              large=[c for c in columns if 'json' in c or 'payload' in c]
-              if large:
-               q='SELECT '+','.join('length("'+c+'")' for c in large)+' FROM '+table+' ORDER BY rowid DESC LIMIT 8'
-               print('RECENT_PAYLOAD_LENGTHS',table,json.dumps({'columns':large,'rows':conn.execute(q).fetchall()}),flush=True)
-             except sqlite3.OperationalError as e:print('BOUNDED_QUERY_REFUSED',table,str(e),flush=True)
-             finally:conn.set_progress_handler(None,0)
-            for table in ['passive_market_observations','g1s_observations']:
-             deadline=time.monotonic()+12;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-             try:
-              rows=conn.execute("SELECT pagetype,pgsize,payload,unused FROM dbstat WHERE name=? LIMIT 12000",(table,)).fetchall()
-              print('PAGE_SAMPLE',table,json.dumps({'pages':len(rows),'physical_bytes':sum(r[1] for r in rows),'payload_bytes':sum(r[2] for r in rows),'unused_bytes':sum(r[3] for r in rows),'page_types':{t:sum(r[0]==t for r in rows) for t in set(r[0] for r in rows)}}),flush=True)
-             except sqlite3.OperationalError as e:print('PAGE_SAMPLE_REFUSED',table,str(e),flush=True)
-             finally:conn.set_progress_handler(None,0)
-            print('COVERING_INDEXES',json.dumps(conn.execute("SELECT name,tbl_name,sql FROM sqlite_schema WHERE type='index' AND tbl_name IN ('passive_market_observations','g1s_observations')").fetchall()),flush=True)
-            conn.close()
-            PY
+          python-version: "3.11"
+      - run: pip install 'boto3>=1.36,<2'
+      - name: Inspect only existing private archive metadata
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          python -u - <<'PY'
+          import boto3,json
+          from botocore.config import Config
+          c=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(connect_timeout=10,read_timeout=30,retries={'total_max_attempts':1}))
+          bucket='trading-dbd-backups-2026'
+          rows=c.list_objects_v2(Bucket=bucket,Prefix='backups/v1/daily-slot-',MaxKeys=100)
+          print('BOUNDED_LIST',json.dumps({'truncated':rows.get('IsTruncated'), 'count':rows.get('KeyCount')}))
+          manifests=[r for r in rows.get('Contents',[]) if r['Key'].endswith('.manifest.json')]
+          for r in manifests:
+              with c.get_object(Bucket=bucket,Key=r['Key'])['Body'] as s:
+                  raw=s.read(1048577)
+              if len(raw)>1048576:raise ValueError('Oversized manifest')
+              j=json.loads(raw)
+              safe={k:j[k] for k in ['backup_contract','source','git_commit','created_ts','completed_ts','database_size_bytes','database_sha256','compressed_size_bytes','object_key','verified_head','verified_boundary_get','cold_history_catalog_sha256','cold_history_catalog_object_key','sqlite_history_state_sha256'] if k in j}
+              print('PRIVATE_ARCHIVE_METADATA',json.dumps({'manifest_key':r['Key'],'modified':r['LastModified'].isoformat(),'storage_class':r.get('StorageClass'),**safe}),flush=True)
+          PY
