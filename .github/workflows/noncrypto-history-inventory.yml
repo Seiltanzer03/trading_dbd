@@ -39,7 +39,7 @@ jobs:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
             except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
             with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=5) as r:
-              worker=json.load(r).get('worker') or {};print('WORKER_PHASE',json.dumps({k:worker.get(k) for k in ['current_phase','disk_pause_active','disk_pressure','last_error']}),flush=True)
+              worker=json.load(r).get('worker') or {};print('WORKER_PHASE',json.dumps({k:worker.get(k) for k in ['current_phase','disk_pause_active','disk_pressure']}),flush=True)
             path=root/'seiltanzer/history_storage_state.py'
             ns={'__name__':'_readonly_storage_guard_probe','__file__':str(path)}
             exec(compile(path.read_bytes(),str(path),'exec'),ns)
