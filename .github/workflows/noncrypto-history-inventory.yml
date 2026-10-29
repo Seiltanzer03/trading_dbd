@@ -32,6 +32,16 @@ jobs:
                   h=client.head_object(Bucket=bucket,Key=obj['Key'])
                   images.append({'kind':kind,'compressed_size_bytes':h['ContentLength'],'database_size_bytes':int(h.get('Metadata',{}).get('database-size','0'))})
               print('CURRENT_CLOUD_IMAGES',json.dumps(images),flush=True)
+              try:
+                  uploads=client.list_multipart_uploads(Bucket=bucket,Prefix=prefix,MaxUploads=4)
+                  progress=[]
+                  for item in uploads.get('Uploads',[]):
+                      kind=item['Key'].removeprefix(prefix).split('/')[0]
+                      if kind not in ('original','hot'):continue
+                      parts=client.list_parts(Bucket=bucket,Key=item['Key'],UploadId=item['UploadId'],MaxParts=1000)
+                      progress.append({'kind':kind,'uploaded_parts':len(parts.get('Parts',[])),'uploaded_compressed_bytes':sum(p['Size'] for p in parts.get('Parts',[])),'truncated':parts.get('IsTruncated',False)})
+                  print('CURRENT_CLOUD_MULTIPART',json.dumps(progress),flush=True)
+              except Exception as exc:print('CURRENT_MULTIPART_INSPECTION_ERROR',type(exc).__name__,flush=True)
           except Exception as exc:
               print('CURRENT_CLOUD_INSPECTION_ERROR',type(exc).__name__,flush=True)
           CLOUD
@@ -90,4 +100,4 @@ jobs:
 # Read-only epoch observation 3
 # Read-only epoch observation 5
 
-# Read-only epoch observation 10
+# Read-only epoch observation 11
