@@ -29,11 +29,28 @@ jobs:
               if stat.S_ISREG(info.st_mode) and 0<info.st_size<=65536:
                 obj=json.loads(p.read_bytes());row.update({k:obj.get(k) for k in ['contract','run_id','application_sha','phase','service_started']})
               print('STATE_META',name,json.dumps(row),flush=True)
-            started=time.monotonic()
-            try:
-              r=subprocess.run(['/usr/bin/python3','-B','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=12)
-              v=json.loads(r.stdout);print('ACTUAL_START_GUARD',json.dumps({'rc':r.returncode,'elapsed_sec':round(time.monotonic()-started,3),**{k:v.get(k) for k in ['contract','start_allowed','reason','hot_history_present']}}),flush=True)
-            except Exception as e:print('ACTUAL_START_GUARD_FAILURE',type(e).__name__,flush=True)
+            import runpy,sqlite3,sys
+            print('GUARD_PYTHON',sys.version.split()[0],flush=True)
+            ns=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py',run_name='_readonly_guard_trace')
+            check=ns['check_start'];g=check.__globals__;factory=sqlite3.connect
+            class TracedConnection:
+              def __init__(self,*a,**kw):self.inner=factory(*a,**kw)
+              def __getattr__(self,name):return getattr(self.inner,name)
+              def execute(self,sql,*args):
+                try:return self.inner.execute(sql,*args)
+                except sqlite3.Error as e:
+                  family=next((t for t in ['g1_dataset_membership','archived_passive_rejections','passive_market_observations','g1s_observations','history_runtime_rollups'] if t in sql),'metadata')
+                  print('GUARD_SQL_REFUSAL',json.dumps({'family':family,'exception_type':type(e).__name__,'sqlite_errorname':getattr(e,'sqlite_errorname',None)}),flush=True)
+                  raise
+            sqlite3.connect=TracedConnection
+            literal=g['_literal_reader_contract']
+            def traced_literal(app,module,name):
+              began=time.monotonic()
+              try:return literal(app,module,name)
+              finally:print('GUARD_LITERAL',module,round(time.monotonic()-began,3),flush=True)
+            g['_literal_reader_contract']=traced_literal
+            started=time.monotonic();v=check(data/'trades.db',root)
+            print('ACTUAL_START_GUARD',json.dumps({'elapsed_sec':round(time.monotonic()-started,3),**{k:v.get(k) for k in ['contract','start_allowed','reason','hot_history_present']}}),flush=True)
             print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
             try:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
