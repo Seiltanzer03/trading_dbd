@@ -1,4 +1,4 @@
-name: release-capacity-transport-diagnostic-4d35
+name: active-storage-readonly-diagnostic
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -15,16 +15,56 @@ jobs:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 100s
+          command_timeout: 110s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,subprocess,shutil
-            items=[]
-            for p in pathlib.Path('/').iterdir():
-             s=p.lstat()
-             if p.is_file() and not p.is_symlink():items.append({'name':p.name,'bytes':s.st_size,'allocated_bytes':s.st_blocks*512,'mtime':s.st_mtime})
-            print('ROOT_FILES_METADATA',json.dumps(items),flush=True)
-            print('CURRENT_SWAP_METADATA',pathlib.Path('/proc/swaps').read_text(),flush=True)
-            print('CURRENT_MEMORY_METADATA',json.dumps([s for s in pathlib.Path('/proc/meminfo').read_text().splitlines() if s.startswith(('MemTotal:','MemAvailable:','SwapTotal:','SwapFree:'))]),flush=True)
-            print('SPACE_BYTES',shutil.disk_usage('/').free,flush=True)
+            import json,pathlib,sqlite3,time,shutil,subprocess,urllib.request
+            root=pathlib.Path('/opt/seiltanzer'); data=root/'data'
+            print('CURRENT_SHA',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
+            print('SPACE',json.dumps(shutil.disk_usage('/')._asdict()),flush=True)
+            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'],text=True),flush=True)
+            for name in ['trades.db','trades.db-wal','trades.db-shm','cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.plan.json','cutover.active']:
+             p=data/name
+             if p.exists() and p.is_file():
+              s=p.stat(); v={'name':name,'size':s.st_size,'allocated':s.st_blocks*512}
+              if name.endswith('.json') and s.st_size<65536:
+               j=json.loads(p.read_text()); v['metadata']={k:j.get(k) for k in ['contract','run_id','phase','service_started','original','hot','runtime_after'] if k in j}
+              print('DATA_METADATA',json.dumps(v),flush=True)
+            conn=sqlite3.connect((data/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=1)
+            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048');conn.execute('PRAGMA trusted_schema=OFF')
+            names=[r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")]
+            print('TABLE_NAMES',json.dumps(names),flush=True)
+            for pragma in ['page_size','page_count','freelist_count','auto_vacuum']:
+             print('PRAGMA',pragma,conn.execute('PRAGMA '+pragma).fetchone()[0],flush=True)
+            if 'hot_history_storage_state' in names:
+             cols=[r[1] for r in conn.execute('PRAGMA table_info(hot_history_storage_state)')]
+             row=conn.execute('SELECT * FROM hot_history_storage_state LIMIT 1').fetchone()
+             for k,v in zip(cols,row or []):
+              try: j=json.loads(v)
+              except (ValueError,TypeError): continue
+              if isinstance(j,dict):
+               out={a:b for a,b in j.items() if a not in ('retired_rowids','runtime_projection','retained_identity')}
+               out['retired_counts']={a:len(b) for a,b in j.get('retired_rowids',{}).items()}
+               out['runtime_projection_keys']=list(j.get('runtime_projection',{}))
+               print('HOT_STATE',json.dumps(out),flush=True)
+            for table in ['passive_market_observations','g1s_observations','ai_assessments','ai_decisions','ai_analyses']:
+             if table not in names:continue
+             columns=[r[1] for r in conn.execute('PRAGMA table_info('+table+')')]
+             print('TABLE_COLUMNS',table,json.dumps(columns),flush=True)
+             deadline=time.monotonic()+3;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+             try:
+              print('TABLE_COUNT',table,conn.execute('SELECT count(*) FROM '+table).fetchone()[0],flush=True)
+              large=[c for c in columns if 'json' in c or 'payload' in c]
+              if large:
+               q='SELECT '+','.join('length("'+c+'")' for c in large)+' FROM '+table+' ORDER BY rowid DESC LIMIT 8'
+               print('RECENT_PAYLOAD_LENGTHS',table,json.dumps({'columns':large,'rows':conn.execute(q).fetchall()}),flush=True)
+             except sqlite3.OperationalError as e:print('BOUNDED_QUERY_REFUSED',table,str(e),flush=True)
+             finally:conn.set_progress_handler(None,0)
+            conn.close()
+            try:
+             with urllib.request.urlopen('http://127.0.0.1:8790/api/system/storage/status',timeout=5) as r:
+              b=r.read(262145)
+              if len(b)<=262144:print('STORAGE_STATUS',b.decode(),flush=True)
+            except Exception as e:print('STORAGE_STATUS_REFUSED',type(e).__name__,flush=True)
             PY
+
