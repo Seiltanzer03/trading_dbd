@@ -1,90 +1,23 @@
-name: yandex-offhost-page-repack-measurement
+name: storage-headroom-readonly-receipt
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
-  statuses: read
 jobs:
-  measure:
+  inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 80
+    timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: appleboy/ssh-action@v1
         with:
-          ref: a27af401482d251a02a19afaf81e7398242434f6
-          persist-credentials: false
-      - name: Require exact reviewed tree and green final CI
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python - <<'PY'
-          import json,subprocess,urllib.request,os
-          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()=='a27af401482d251a02a19afaf81e7398242434f6'
-          assert subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip()=='c797465569079ef75ed2b43a9fb765574ed4f4f4'
-          url='https://api.github.com/repos/Seiltanzer03/trading_dbd/commits/6c8dc6ee2b6d628660f4b86b28c7fdd8c891423d/status'
-          with urllib.request.urlopen(urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN']}),timeout=15) as r: j=json.load(r)
-          latest={}
-          for row in j['statuses']:latest.setdefault(row['context'],row['state'])
-          assert latest.get('ci/full-webkit')=='success',latest
-          url='https://api.github.com/repos/Seiltanzer03/trading_dbd/git/commits/6c8dc6ee2b6d628660f4b86b28c7fdd8c891423d'
-          with urllib.request.urlopen(urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN']}),timeout=15) as r: j=json.load(r)
-          assert j['tree']['sha']=='c797465569079ef75ed2b43a9fb765574ed4f4f4'
-          print('EXACT_REVIEWED_TREE_CI_VERIFIED')
-          PY
-      - name: Reserve space on the disposable hosted worker
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          sudo docker image prune -af
-          df -h "$RUNNER_TEMP"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install 'boto3>=1.36,<2'
-      - name: Restore one existing verified Yandex seed; no VPS access
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: "true"
-        run: |
-          python scripts/restore_verified_snapshot.py --live-seed \
-            --bucket trading-dbd-backups-2026 \
-            --key backups/v1/daily-slot-6/snapshot.sqlite3.gz \
-            --destination "$RUNNER_TEMP/repack/source.db" \
-            --result "$RUNNER_TEMP/repack/restore.json"
-      - name: Measure lossless row-preserving1024-byte image
-        env:
-          REPACK_WORK: ${{ runner.temp }}/repack
-        run: |
-          python -u - <<'PY'
-          import json,os,time
-          from pathlib import Path
-          from scripts.sqlite_page_repack import repack_snapshot
-          root=Path(os.environ['REPACK_WORK'])
-          restored=json.loads((root/'restore.json').read_text())
-          assert restored['seed_verified'] is True
-          assert restored['production_authority'] is False
-          assert restored['database_sha256']=='4b9a8ee4c81b0abc624e1ae8c3ee8a11aea5dfb9178583c3e1fe43bb50f37388'
-          assert restored['database_size_bytes']==19496972288
-          proof={k:restored[k] for k in ('immutable_sqlite_read','verified_local_file','database_sha256','database_size_bytes')}
-          proof['immutable_snapshot_verified']=True
-          started=time.monotonic()
-          result=repack_snapshot(root/'source.db',root/'compact.db',source_receipt=proof)
-          result.update(elapsed_sec=round(time.monotonic()-started,3),scope='OFFHOST_20261028_SEED_MEASUREMENT_ONLY',current_live_database_replaced=False)
-          (root/'result.json').write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
-          print('ACTUAL_OFFHOST_REPACK_RESULT',json.dumps(result,sort_keys=True),flush=True)
-          PY
-      - name: Preserve only byte pins and row-equivalence proof
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: yandex-page-repack-proof
-          retention-days: 7
-          if-no-files-found: ignore
-          path: |
-            ${{ runner.temp }}/repack/restore.json
-            ${{ runner.temp }}/repack/result.json
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 30s
+          script: |
+            set -e
+            git -C /opt/seiltanzer rev-parse HEAD
+            df -B1 /
+            systemctl show seiltanzer -p MainPID -p ActiveState -p SubState -p NRestarts
