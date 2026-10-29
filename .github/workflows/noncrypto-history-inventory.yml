@@ -18,11 +18,14 @@ jobs:
           command_timeout: 100s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import json,subprocess,shutil
-            for args in (['du','-x','-B1','--max-depth=1','/'],['lsof','+L1','-nP']):
+            import pathlib,subprocess,json
+            r=subprocess.run(['du','-x','-B1','--max-depth=2','/root'],capture_output=True,text=True,timeout=15)
+            print('ROOT_DIRECTORY_CAPACITY',json.dumps({'code':r.returncode,'rows':r.stdout.splitlines()}),flush=True)
+            items=[]
+            for p in pathlib.Path('/root').iterdir():
              try:
-              r=subprocess.run(args,capture_output=True,text=True,timeout=20)
-              print('CAPACITY_FINAL_INVENTORY',json.dumps({'command':args[0],'code':r.returncode,'output':r.stdout[-20000:]}),flush=True)
-             except subprocess.TimeoutExpired:print('CAPACITY_FINAL_INVENTORY_TIMEOUT',args[0],flush=True)
-            print('CAPACITY_FREE_BYTES',shutil.disk_usage('/').free,flush=True)
+              s=p.lstat()
+              if p.is_file() and not p.is_symlink() and s.st_size>5*1024**2:items.append({'name':p.name,'bytes':s.st_size,'allocated_bytes':s.st_blocks*512,'mtime':s.st_mtime})
+             except OSError:pass
+            print('ROOT_LARGE_TOP_FILES',json.dumps(items),flush=True)
             PY
