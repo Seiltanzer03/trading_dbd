@@ -1,32 +1,117 @@
-name: json-delivery-state-readonly
+name: production-json-history-rebuild-offline-recovery
+
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
+
 permissions:
   contents: read
+  statuses: read
+
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+
 jobs:
-  inspect:
+  rebuild:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 210
+    env:
+      EXPECTED_SHA: 407999e24b66fab4755776fd76a6d3d67a97efbb
+      RESUME_RUN_ID: ''
+      NEW_RUN_ID: ${{ github.run_id }}
     steps:
-      - uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
         with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
-          script: |
-            /usr/bin/python3 -B -u - <<'PY'
-            import pathlib,subprocess,json,hashlib,shutil,urllib.request
-            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
-            print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStatus','-p','Result'],text=True).strip(),flush=True)
-            actual=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
-            source=(root/'scripts/history_service_fence.py').read_bytes()
-            print('GUARD_CODE_MATCH',actual==source,flush=True)
-            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
-            try:
-              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
-            except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
-            PY
+          ref: 407999e24b66fab4755776fd76a6d3d67a97efbb
+      - name: Require exact green reviewed revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          if [ -z "$RESUME_RUN_ID" ]; then
+            test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
+          else
+            [[ "$RESUME_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]
+          fi
+          curl -fsS --max-time 15 -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPOSITORY/commits/$EXPECTED_SHA/status" \
+            | python3 -c 'import json,sys; rows=json.load(sys.stdin)["statuses"]; latest={}; [latest.setdefault(r["context"],r["state"]) for r in rows]; assert latest.get("ci/full-webkit")=="success"'
+      - name: Reclaim reproducible hosted worker SDKs before current capture
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo docker image prune -af
+          df -h "$RUNNER_TEMP"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install existing transports
+        run: pip install -e . 'boto3>=1.36,<2' 'paramiko>=3.3,<6'
+      - name: Run separate native JSON epoch with current frozen source
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          NATIVE_RUN_ID="${RESUME_RUN_ID:-$NEW_RUN_ID}"
+          export NATIVE_RUN_ID
+          python - <<'PYBOOT'
+          import json,os,shlex,shutil,time
+          from scripts import json_history_owner as native
+          from scripts import production_history_cutover as previous
+          from scripts.production_ede_offload import _connect,_exec,_verify_sha
+          from scripts.production_json_history_rebuild import _capacity,_properties
+          client=_connect(os.environ['SSH_PASSWORD'],attempts=1)
+          sftp=None
+          try:
+              sha=os.environ['EXPECTED_SHA'];run_id=os.environ['NATIVE_RUN_ID']
+              _verify_sha(client,sha)
+              before=_capacity(client)
+              if shutil.disk_usage(os.environ['RUNNER_TEMP']).free < 3*before['database_size_bytes']+2*1024**3:
+                  raise RuntimeError('JSON_WORKER_CAPACITY_REFUSED')
+              code=('import subprocess; from scripts import json_history_owner as native; '
+                    'subprocess.run(native.launch_command(run_id='+repr(run_id)+',application_sha='+repr(sha)+'),check=True)')
+              _exec(client,shlex.join(['sh','-c','cd /opt/seiltanzer && exec '+shlex.join(['/usr/bin/python3','-c',code])]),timeout=20)
+              sftp=client.open_sftp();sftp.get_channel().settimeout(30)
+              end=time.monotonic()+30
+              while time.monotonic()<end:
+                  link=previous._remote_read(sftp,'json-history.epoch.json')
+                  state=previous._remote_read(sftp,'cutover.preparation.json',remote_data='/opt/seiltanzer/data/json-rebuild-'+run_id+'/')
+                  if (link==dict(contract='sqlite-json-history-epoch-link-v1',run_id=run_id,application_sha=sha)
+                          and state is not None and state.get('run_id')==run_id and state.get('application_sha')==sha):
+                      print(json.dumps({'owner_bootstrap_ack':state['phase'],'run_id':run_id}),flush=True)
+                      break
+                  if _properties(client,run_id).get('ActiveState')=='failed':
+                      raise RuntimeError('JSON_OWNER_START_FAILED')
+                  time.sleep(.25)
+              else:raise RuntimeError('JSON_OWNER_BOOTSTRAP_ACK_TIMEOUT')
+          finally:
+              if sftp is not None:sftp.close()
+              client.close()
+          PYBOOT
+          OPTIONS=(--resume)
+          python -m scripts.production_json_history_rebuild \
+            --expected-sha "$EXPECTED_SHA" --run-id "$NATIVE_RUN_ID" \
+            --directory "$RUNNER_TEMP/json-history-$NEW_RUN_ID" "${OPTIONS[@]}"
+      - name: Preserve public measured proof only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: json-history-public-proof-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/json-history-${{ github.run_id }}/hot-build-proof.json
+            ${{ runner.temp }}/json-history-${{ github.run_id }}/cutover-plan.json
+            ${{ runner.temp }}/json-history-${{ github.run_id }}/result.json
+            ${{ runner.temp }}/json-history-${{ github.run_id }}/failure.json
