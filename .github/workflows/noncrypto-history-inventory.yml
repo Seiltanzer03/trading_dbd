@@ -1,4 +1,4 @@
-name: storage-headroom-readonly-receipt
+name: json-history-compression-readonly-sample
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -15,9 +15,26 @@ jobs:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
+          command_timeout: 50s
           script: |
-            set -e
-            git -C /opt/seiltanzer rev-parse HEAD
-            df -B1 /
-            systemctl show seiltanzer -p MainPID -p ActiveState -p SubState -p NRestarts
+            /usr/bin/python3 -B -u - <<'PY'
+            import sqlite3,pathlib,time,zlib,base64,hashlib,json,shutil
+            p=pathlib.Path('/opt/seiltanzer/data/trades.db')
+            c=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=1)
+            c.execute('PRAGMA query_only=ON');c.execute('PRAGMA trusted_schema=OFF');c.execute('PRAGMA cache_size=-2048')
+            deadline=time.monotonic()+12;c.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+            for table,col in [('passive_market_observations','features_json'),('g1s_observations','frozen_features_json')]:
+              for direction in ['ASC','DESC']:
+                rows=c.execute('SELECT '+col+' FROM '+table+' ORDER BY rowid '+direction+' LIMIT 8').fetchall()
+                raw_n=packed_n=0;hashes=[]
+                for (text,) in rows:
+                  b=text.encode('utf8')
+                  if len(b)>2*1024**2:raise ValueError('Sample field exceeds bound')
+                  packed=zlib.compress(b,1)
+                  assert zlib.decompress(packed)==b
+                  raw_n+=len(b);packed_n+=len(base64.b64encode(packed))+128
+                  hashes.append(hashlib.sha256(b).hexdigest())
+                print('EXACT_COMPRESSION_SAMPLE',json.dumps({'table':table,'direction':direction,'rows':len(rows),'raw_bytes':raw_n,'encoded_bytes_with_128B_envelope_each':packed_n,'distinct_payloads':len(set(hashes)),'exact_byte_roundtrip':True}),flush=True)
+            c.close()
+            print('SPACE_BYTES',shutil.disk_usage('/').free,flush=True)
+            PY
