@@ -37,6 +37,10 @@ jobs:
               def __init__(self,*a,**kw):self.inner=factory(*a,**kw)
               def __getattr__(self,name):return getattr(self.inner,name)
               def execute(self,sql,*args):
+                if 'g1_dataset_membership' in sql and sql.lstrip().upper().startswith('SELECT'):
+                  label='left_membership' if 'LEFT JOIN' in sql else 'cross_membership' if 'CROSS JOIN' in sql else 'other_membership'
+                  plan=self.inner.execute('EXPLAIN QUERY PLAN '+sql,*args).fetchall()
+                  print('GUARD_G1_QUERY_PLAN',json.dumps({'case':label,'plan':[r[3] for r in plan[:20]]}),flush=True)
                 try:return self.inner.execute(sql,*args)
                 except sqlite3.Error as e:
                   family=next((t for t in ['g1_dataset_membership','archived_passive_rejections','passive_market_observations','g1s_observations','history_runtime_rollups'] if t in sql),'metadata')
@@ -83,4 +87,6 @@ jobs:
               print('EXACT_STATE_PROOF_FAILURE',json.dumps({'phase':phase[0],'exception_type':type(e).__name__,'sqlite_errorname':getattr(e,'sqlite_errorname',None),'elapsed_sec':round(time.monotonic()-began,3)}),flush=True)
             finally:c.close()
             print('TRACKED_SOURCE_CLEAN',subprocess.run(['git','-C',str(root),'diff','--quiet','HEAD','--','scripts','seiltanzer']).returncode==0,flush=True)
+            r=subprocess.run(['/usr/bin/python3','-B','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=12)
+            print('WARM_UNCHANGED_GUARD',json.dumps({'rc':r.returncode,'result':json.loads(r.stdout)}),flush=True)
             PY
