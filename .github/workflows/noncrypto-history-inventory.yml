@@ -43,3 +43,4 @@ jobs:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
             except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
             PY
+# Read-only epoch observation 2
