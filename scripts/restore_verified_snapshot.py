@@ -209,13 +209,14 @@ def restore(
     database_sha = str(manifest.get("database_sha256") or "").lower()
     compressed_sha = str(manifest.get("compressed_sha256") or "").lower()
     backup_id = str(manifest.get("backup_id") or "")
+    backup_contract = history_state.offhost_backup_contract(manifest)
     live_snapshot_drill = snapshot_drill and manifest.get('source') == 'LIVE_SQLITE_RSYNC'
     if seed_only or live_snapshot_drill:
         if expected_backup_id is not None:
             raise ValueError('live seed cannot verify a retirement target')
         validate_live_seed_manifest(manifest)
     if not all((
-        manifest.get("backup_contract") == CONTRACT,
+        manifest.get("backup_contract") == backup_contract,
         manifest.get("bucket") == bucket,
         manifest.get("object_key") == key,
         manifest.get("codec") == "gzip",
@@ -237,8 +238,10 @@ def restore(
         "source-size": str(database_size),
         "git-commit": str(manifest.get("git_commit") or ""),
         "codec": "gzip",
-        "contract": CONTRACT,
+        "contract": backup_contract,
     }
+    if history_state.PAYLOAD_PIN_FIELD in manifest:
+        expected_metadata['json-payload-storage-sha256'] = manifest[history_state.PAYLOAD_PIN_FIELD]
     if (
         int(head.get("ContentLength") or -1) != compressed_size
         or _metadata(head.get("Metadata")) != expected_metadata

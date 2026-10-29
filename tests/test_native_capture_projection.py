@@ -123,7 +123,8 @@ def test_projection_cannot_remove_synthetic_markers(where):
     assert out is None or native_history([{**r,**out}],captured_ts=T0)=={}
 
 
-def test_bounded_sql_transport_preserves_more_than_180_existing_large_option_captures(tmp_path):
+@pytest.mark.parametrize('compressed',[False,True])
+def test_bounded_sql_transport_preserves_more_than_180_existing_large_option_captures(tmp_path,compressed):
     from scripts.export_native_family_history import REMOTE_EXPORT
     db=tmp_path/'native.db'; c=sqlite3.connect(db)
     c.execute('CREATE TABLE g1s_observations(source_observation_id TEXT,instrument TEXT,horizon_minutes INT,captured_ts REAL,frozen_features_json TEXT,features_sha256 TEXT,training_eligible INT,option_source TEXT,option_quality REAL)')
@@ -141,6 +142,12 @@ def test_bounded_sql_transport_preserves_more_than_180_existing_large_option_cap
         identity=str(i)
         c.execute('INSERT INTO g1s_observations VALUES(?,?,?,?,?,?,?,?,?)',(identity,'NAS100',15,ts,raw,sha,1,r['option_source'],.5))
         c.execute('INSERT INTO passive_market_observations VALUES(?,?,?,?,?,?)',(identity,'NAS100',ts,ts+6,raw,1))
+    if compressed:
+        from seiltanzer import sqlite_json_payloads as storage
+        c.create_function('storage_pack',1,storage.pack_text)
+        c.execute('UPDATE passive_market_observations SET features_json=storage_pack(features_json)')
+        c.execute('UPDATE g1s_observations SET frozen_features_json=storage_pack(frozen_features_json)')
+        storage.install_marker(c)
     c.commit();c.close(); before=hashlib.sha256(db.read_bytes()).hexdigest()
     stream=io.StringIO()
     with contextlib.redirect_stdout(stream):exec(REMOTE_EXPORT.replace('/opt/seiltanzer/data/trades.db',str(db)),{})

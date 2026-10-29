@@ -268,7 +268,8 @@ def execute_cutover(root, plan, *, transport, control):
         return _execute_validated_transfer(root, raw_plan, transport=transport, control=control)
 
 
-def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit=None, hard_deadline=None):
+def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit=None, hard_deadline=None,
+                                database=None):
     """Private core: caller owns its lock and already validated canonical plan.
 
     The public disposable entry point above keeps its production-root refusal.
@@ -280,7 +281,7 @@ def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit
     epoch = dict(contract=CONTRACT, run_id=plan['run_id'], plan_sha256=pin)
     guard = root/'cutover.active'
     journal = root/'cutover.journal.json'
-    database = root/'trades.db'
+    database = Path(database) if database is not None else root/'trades.db'
     started = time.monotonic()
     deadline = started+MAX_SECONDS
     overall_deadline = started+2*MAX_SECONDS
@@ -327,7 +328,7 @@ def _execute_validated_transfer(root, raw_plan, *, transport, control, precommit
                 _consume(source, plan[kind], deadline, write=write)
                 target.flush()
                 os.fsync(target.fileno())
-        _fsync_directory(root)
+        _fsync_directory(database.parent)
         verified_image = (kind,_verify_database(database, plan[kind], deadline,
                           manifest=plan['hot_manifest'] if kind == 'hot' else None))
 

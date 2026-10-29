@@ -6,6 +6,7 @@ being started, so rolling back to an older checkout cannot open a partial DB.
 """
 import argparse
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -91,7 +92,54 @@ def _literal_reader_contract(app_root, module, name):
     return values[0]
 
 
-def check_start(database, application_root, *, guard=None, journal=None):
+def _private_record(path):
+    info=_regular(path,MAX_JOURNAL_BYTES)
+    if info.st_mode&0o077:raise ValueError('Epoch metadata is not private')
+    raw=path.read_bytes()
+    value=json.loads(raw,object_pairs_hook=_unique)
+    if (not isinstance(value,dict) or json.dumps(value,sort_keys=True,separators=(',',':'),
+            ensure_ascii=True,allow_nan=False).encode('ascii')!=raw):
+        raise ValueError('Invalid canonical epoch metadata')
+    return value
+
+
+def _json_epoch_reason(pointer):
+    if not os.path.lexists(pointer):return None
+    value=_private_record(pointer)
+    if (set(value)!={'contract','run_id','application_sha'}
+            or value['contract']!='sqlite-json-history-epoch-link-v1'
+            or not isinstance(value['run_id'],str)
+            or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_-]{0,63}',value['run_id'])
+            or not isinstance(value['application_sha'],str)
+            or not re.fullmatch('[0-9a-f]{40}',value['application_sha'])):
+        raise ValueError('Invalid JSON epoch link')
+    metadata=pointer.parent/('json-rebuild-'+value['run_id'])
+    info=metadata.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o700
+            or info.st_uid!=pointer.lstat().st_uid):
+        raise ValueError('Invalid JSON epoch directory')
+    if os.path.lexists(metadata/'cutover.active'):return 'ACTIVE_JSON_HISTORY_EPOCH'
+    journal=_journal(metadata/'cutover.journal.json')
+    if journal is not None:
+        if journal['run_id']!=value['run_id']:raise ValueError('JSON epoch journal differs')
+        if journal['phase'] not in ('COMMITTED','ORIGINAL_RESTORED'):
+            return 'UNFINISHED_JSON_HISTORY_EPOCH'
+        plan=_private_record(metadata/'cutover.plan.json')
+        if (plan.get('run_id')!=value['run_id'] or plan.get('application_sha')!=value['application_sha']
+                or journal['plan_sha256']!=hashlib.sha256(core_bytes(plan)).hexdigest()):
+            raise ValueError('JSON epoch terminal plan differs')
+        return None
+    state=_private_record(metadata/'cutover.preparation.json')
+    if state.get('run_id')!=value['run_id'] or state.get('application_sha')!=value['application_sha']:
+        raise ValueError('JSON epoch preparation differs')
+    return None if state.get('phase')=='ABORTED_ORIGINAL' else 'UNFINISHED_JSON_HISTORY_EPOCH'
+
+
+def core_bytes(value):
+    return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('ascii')
+
+
+def check_start(database, application_root, *, guard=None, journal=None,json_epoch=None):
     """Return a bounded safe startup decision, without importing the application."""
     database, app_root = Path(database), Path(application_root)
     guard = Path(guard) if guard is not None else database.parent/'cutover.active'
@@ -103,6 +151,12 @@ def check_start(database, application_root, *, guard=None, journal=None):
 
     if os.path.lexists(guard):
         return result(False, 'ACTIVE_CUTOVER_GUARD')
+    try:
+        reason=_json_epoch_reason(Path(json_epoch) if json_epoch is not None
+                                  else database.parent/'json-history.epoch.json')
+        if reason is not None:return result(False,reason)
+    except Exception:
+        return result(False,'JSON_HISTORY_EPOCH_INVALID')
     try:
         current = _journal(journal)
     except Exception:
@@ -118,6 +172,26 @@ def check_start(database, application_root, *, guard=None, journal=None):
         conn.execute('PRAGMA cache_size=-2048')
         deadline = time.monotonic()+SQL_SECONDS
         conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+        payload_entry = conn.execute('SELECT type FROM sqlite_schema WHERE name=?',('json_feature_payload_storage',)).fetchone()
+        if payload_entry is not None:
+            try:
+                if (_literal_reader_contract(app_root,'history_runtime_views.py','JSON_PAYLOAD_READER_CONTRACT')
+                        != 'sqlite-json-zlib-base64-v1'
+                        or _literal_reader_contract(app_root,'sqlite_json_payloads.py','SQLITE_JSON_PAYLOAD_CONTRACT')
+                        != 'sqlite-json-zlib-base64-v1'):
+                    raise ValueError('Missing JSON payload reader')
+            except Exception:
+                return result(False,'JSON_PAYLOAD_READER_CAPABILITY_REQUIRED')
+            try:
+                codec_path = app_root/'seiltanzer/sqlite_json_payloads.py'
+                _regular(codec_path,MAX_MODULE_BYTES)
+                codec = dict(__name__='_payload_storage_start_guard',__file__=str(codec_path))
+                exec(compile(codec_path.read_bytes(),str(codec_path),'exec'),codec)
+                if not codec['manifest_fields'](conn): raise ValueError('Missing payload marker')
+            except Exception:
+                return result(False,'JSON_PAYLOAD_STORAGE_INVALID')
+            if time.monotonic() >= deadline:
+                return result(False,'JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT')
         entry = conn.execute('SELECT type FROM sqlite_schema WHERE name=?', (HISTORY_TABLE,)).fetchone()
         if entry is None:
             if current is not None and current['phase'] == 'COMMITTED':

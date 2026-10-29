@@ -172,9 +172,13 @@ class PassiveLearningEngine:
 
     def __init__(self, path: str, settings: Settings, cache):
         self.settings, self.cache = settings, cache
+        self._capture_storage_path = str(path)
+        self._storage_capture_admission = None
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
+        from .sqlite_json_payloads import install_reader
+        self._json_payload_storage_enabled = install_reader(self._conn)
         self._feeds: dict[str, MarketData] = {}
         self._instrument_cursor = 0
         self._last_step_error: str | None = None
@@ -478,6 +482,15 @@ class PassiveLearningEngine:
 
         now_day = int(captured_ts//86400)
         with self._lock, self._conn:
+            from .research_capture_headroom import capture_admission
+            previous = self._storage_capture_admission or {}
+            self._storage_capture_admission = capture_admission(self._capture_storage_path,
+                previously_paused=previous.get('admitted') is False)
+            if not self._storage_capture_admission['admitted']:
+                self._last_skip_reason = self._storage_capture_admission['reason']
+                return []
+            if str(self._last_skip_reason or '').startswith('RESEARCH_CAPTURE_'):
+                self._last_skip_reason = None
             day_n = self._conn.execute(
                 "SELECT COUNT(*) FROM passive_market_observations "
                 "WHERE CAST(captured_ts/86400 AS INTEGER)=?",
@@ -490,6 +503,10 @@ class PassiveLearningEngine:
                 f"{instrument}|{captured_ts:.6f}|{market_price:.10f}".encode()
             ).hexdigest()[:24]
             ids = []
+            frozen_features_text = _json(features)
+            if self._json_payload_storage_enabled:
+                from .sqlite_json_payloads import pack_text
+                frozen_features_text = pack_text(frozen_features_text)
 
             # 1. FIXED TRADING-TIME HORIZONS (Each horizon built independently!)
             for horizon in HORIZONS_MINUTES:
@@ -532,7 +549,7 @@ class PassiveLearningEngine:
                      features.get("market_regime"), features.get("session"),
                      PASSIVE_SCHEMA_VERSION, FORECAST_VERSION,
                      "identity-only-unpromoted", "standardized-geometry-f31-v1",
-                     _json(features), _json({**frozen_forecast,
+                     frozen_features_text, _json({**frozen_forecast,
                         "horizon_minutes": horizon,
                         "forecast_made_at": captured_ts}),
                      int(bool(evidence_eligible)), "pending", observation_origin, time.time()))
@@ -606,7 +623,7 @@ class PassiveLearningEngine:
                          features.get("market_regime"), features.get("session"),
                          PASSIVE_SCHEMA_VERSION, FORECAST_VERSION,
                          "identity-only-unpromoted", "standardized-geometry-f31-v1",
-                         _json(features), _json({**native_forecast,
+                         frozen_features_text, _json({**native_forecast,
                             "horizon_minutes": trading_ttm_mins,
                             "producer_t_years_act365": option_metrics.get("t_years"),
                             "forecast_made_at": captured_ts}),
@@ -1430,7 +1447,9 @@ class PassiveLearningEngine:
             "variance_clock_version": VARIANCE_CLOCK_VERSION,
             "option_q_contract_version": OPTION_Q_CONTRACT_VERSION,
             "expiry_clock_version": EXPIRY_CLOCK_VERSION,
-            "collector_status": "degraded" if self._last_step_error else "running",
+            "collector_status": ("paused_storage" if (self._storage_capture_admission or {}).get('admitted') is False
+                                 else "degraded" if self._last_step_error else "running"),
+            "storage_capture": dict(self._storage_capture_admission or {}),
             "last_step_ts": self._last_step_ts,
             "last_skip_reason": self._last_skip_reason,
             "last_successful_capture_ts": self._last_successful_capture_ts,

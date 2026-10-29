@@ -660,7 +660,7 @@ def install_g1_short_horizon_feature_contract_v2() -> None:
         report = previous_status(self)
         with self._lock:
             v2_obs = int(self._conn.execute(
-                "SELECT COUNT(*) FROM g1s_observations WHERE frozen_features_json LIKE ?",
+                "SELECT COUNT(*) FROM g1s_observations WHERE storage_json_text(frozen_features_json) LIKE ?",
                 (f'%"contract_version":"{FEATURE_CONTRACT_V2}"%',)).fetchone()[0])
             v2_models = int(self._conn.execute(
                 "SELECT COUNT(*) FROM g1s_models WHERE model_family='DEPENDENCY_WEIGHTED_LOGISTIC_V2'").fetchone()[0])

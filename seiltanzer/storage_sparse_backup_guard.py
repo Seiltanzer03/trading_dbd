@@ -299,9 +299,13 @@ def _finalize_verified_backup(
             f"available={remaining} required={_guard.MIN_BACKUP_HEADROOM_BYTES}",
         )
 
+    history_fields = _s.snapshot_history_manifest(temp_db)
     os.replace(temp_db, final_db)
     manifest = {
-        "backup_contract_version": _s.BACKUP_CONTRACT_VERSION,
+        "backup_contract_version": (
+            _s.JSON_PAYLOAD_BACKUP_CONTRACT_VERSION
+            if _s.PAYLOAD_PIN_FIELD in history_fields else _s.BACKUP_CONTRACT_VERSION
+        ),
         "retention_contract_version": _s.RETENTION_CONTRACT_VERSION,
         "backup_id": backup_id,
         "kind": kind,
@@ -324,6 +328,7 @@ def _finalize_verified_backup(
         "sparse_guard_version": SPARSE_GUARD_VERSION,
         "free_after_snapshot_bytes": remaining,
         **extra_manifest,
+        **history_fields,
     }
     _s._atomic_json(manifest_path, manifest)
     result = _s.BackupResult(
