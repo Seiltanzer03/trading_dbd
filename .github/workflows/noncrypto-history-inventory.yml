@@ -32,11 +32,12 @@ jobs:
               v=json.loads(p.read_text())
               print('EPOCH_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','phase','service_started')}),flush=True)
             run_id='40937497010';metadata=data/('json-rebuild-'+run_id)
-            for name in ('cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json'):
+            for name in ('cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json','cutover.request.json','cutover.plan.json'):
               p=metadata/name
               if not p.exists():print('JSON_METADATA',name,'ABSENT',flush=True);continue
               v=json.loads(p.read_text())
               print('JSON_METADATA',name,json.dumps({k:v.get(k) for k in ('run_id','phase','service_started','abort_reason','admitted','free_bytes','required_free_bytes','started_wall_ts')}),flush=True)
+              if name in ('cutover.request.json','cutover.plan.json'):print('PLANNED_IMAGE_BYTES',json.dumps({k:(v.get(k) or {}).get('database_size_bytes') for k in ('original','hot')}),flush=True)
             print('JSON_OWNER',subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','LoadState','-p','ActiveState','-p','SubState','-p','MainPID','-p','Result','-p','ExecMainStatus'],text=True).strip(),flush=True)
             print('COLD_JOURNAL_DIGEST',hashlib.sha256((data/'cutover.journal.json').read_bytes()).hexdigest(),flush=True)
             owner_pid=int(subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','MainPID','--value'],text=True).strip())
@@ -64,4 +65,4 @@ jobs:
 # Read-only epoch observation 3
 # Read-only epoch observation 5
 
-# Read-only epoch observation 6
+# Read-only epoch observation 7
