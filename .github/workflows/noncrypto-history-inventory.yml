@@ -29,4 +29,32 @@ jobs:
             try:
               with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
             except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
+            import os,time,re,collections
+            pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip())
+            if pid>0:
+              proc=pathlib.Path('/proc')/str(pid)
+              def sample():
+                status={}
+                for line in (proc/'status').read_text().splitlines():
+                  if line.split(':',1)[0] in ['State','VmRSS','VmSwap','Threads']:status[line.split(':',1)[0]]=line.split(':',1)[1].strip()
+                io={k:int(v.strip()) for k,v in (line.split(':',1) for line in (proc/'io').read_text().splitlines()) if k in ['read_bytes','write_bytes','rchar']}
+                return {'status':status,'wchan':(proc/'wchan').read_text().strip(),'io':io}
+              before=sample();time.sleep(2);after=sample()
+              print('STARTUP_PROCESS',json.dumps({'pid':pid,'current':after,'io_delta':{k:after['io'][k]-before['io'][k] for k in before['io']}}),flush=True)
+            logs=subprocess.run(['journalctl','-u','seiltanzer','--since','-15 minutes','-n','300','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5).stdout
+            for line in logs.splitlines():
+              try:row=json.loads(line)
+              except Exception:
+                classes=re.findall(r'\b[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)\b',line)
+                if classes:print('STARTUP_ERROR_CLASSES',json.dumps(sorted(set(classes))[:6]),flush=True)
+                continue
+              if not isinstance(row,dict):continue
+              public={}
+              for k in ['event','stage','phase','exception_class']:
+                v=row.get(k)
+                if isinstance(v,str) and re.fullmatch('[A-Za-z0-9_.-]{1,80}',v):public[k]=v
+              for k in ['elapsed_ms','duration_ms','rows','input_bytes','request_bytes']:
+                v=row.get(k)
+                if type(v) in (int,float):public[k]=v
+              if public:print('STARTUP_TRACE',json.dumps(public),flush=True)
             PY
