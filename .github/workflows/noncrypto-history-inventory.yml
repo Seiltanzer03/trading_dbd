@@ -18,18 +18,11 @@ jobs:
           command_timeout: 100s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import json,subprocess,os,shutil,pathlib
-            def out(kind,**row):print(kind,json.dumps(row),flush=True)
-            root=subprocess.check_output(['findmnt','-n','-o','SOURCE,FSTYPE','/'],text=True).strip()
-            out('ROOT_FILESYSTEM',description=root)
-            parts=root.split()
-            if len(parts)==2 and parts[1]=='ext4':
-             r=subprocess.run(['tune2fs','-l',parts[0]],text=True,capture_output=True,timeout=6,check=True)
-             keep=('Block count:','Reserved block count:','Free blocks:','Block size:','Filesystem state:','Reserved blocks uid:','Reserved blocks gid:')
-             out('EXT4_CAPACITY',fields=[s for s in r.stdout.splitlines() if s.startswith(keep)])
-            st=os.statvfs('/');out('AVAILABLE_CAPACITY',block_size=st.f_frsize,total_blocks=st.f_blocks,free_blocks=st.f_bfree,available_blocks=st.f_bavail,free_bytes=shutil.disk_usage('/').free)
-            p=pathlib.Path('/opt/seiltanzer/data/research/official_macro_offhost_latest.json')
-            if p.exists():
-             b=json.loads(p.read_bytes());out('MACRO_OFFHOST_RECEIPT',fields={k:b.get(k) for k in ('expected_sha','acceptance_run_id','created_ts','fetched_at','valid_until_ts')})
-            out('READ_ONLY_FILESYSTEM_METADATA',mutations=0)
+            import json,subprocess,shutil
+            for args in (['du','-x','-B1','--max-depth=1','/'],['lsof','+L1','-nP']):
+             try:
+              r=subprocess.run(args,capture_output=True,text=True,timeout=20)
+              print('CAPACITY_FINAL_INVENTORY',json.dumps({'command':args[0],'code':r.returncode,'output':r.stdout[-20000:]}),flush=True)
+             except subprocess.TimeoutExpired:print('CAPACITY_FINAL_INVENTORY_TIMEOUT',args[0],flush=True)
+            print('CAPACITY_FREE_BYTES',shutil.disk_usage('/').free,flush=True)
             PY
