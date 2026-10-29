@@ -144,6 +144,7 @@ class ShortHorizonRuntime:
         self._last_step_finished: float | None = None
         self._last_step_duration_ms: float | None = None
         self._last_error: str | None = None
+        self._storage_capture_admission = None
         self._cached_materializer_items: list[dict[str, Any]] = []
         self._ensure_tables()
         self._refresh_materializer_cache_under_lock()
@@ -380,6 +381,20 @@ class ShortHorizonRuntime:
     def materialize_new(self, limit: int = 2000, *,
                         max_payload_bytes: int = 16 * 1024 * 1024,
                         time_budget_sec: float | None = None) -> int:
+        from .research_capture_headroom import capture_admission
+        with self._lock:
+            path = getattr(self.passive, '_capture_storage_path', None)
+            if path is None:
+                # Legacy embedded callers may supply only a shared connection.
+                path = next((r[2] for r in self._conn.execute('PRAGMA database_list')
+                             if r[1] == 'main'), None)
+                if path == '': path = ':memory:'
+            previous = self._storage_capture_admission or {}
+            self._storage_capture_admission = capture_admission(path,
+                previously_paused=previous.get('admitted') is False,
+                batch_bytes=max_payload_bytes)
+            if not self._storage_capture_admission['admitted']:
+                return 0  # Retain every source row and the exact durable cursor.
         watermark = self._watermark()
         started = time.time()
         monotonic_started = time.monotonic()
@@ -1049,6 +1064,7 @@ class ShortHorizonRuntime:
                 items = self._cached_materializer_items
         return {"contract_version": G1S_MATERIALIZER_VERSION,
                 "items": list(items or []),
+                "storage_capture": dict(self._storage_capture_admission or {}),
                 "worker": {"last_started": self._last_step_started,
                            "last_finished": self._last_step_finished,
                            "duration_ms": self._last_step_duration_ms,

@@ -172,6 +172,8 @@ class PassiveLearningEngine:
 
     def __init__(self, path: str, settings: Settings, cache):
         self.settings, self.cache = settings, cache
+        self._capture_storage_path = str(path)
+        self._storage_capture_admission = None
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
@@ -478,6 +480,15 @@ class PassiveLearningEngine:
 
         now_day = int(captured_ts//86400)
         with self._lock, self._conn:
+            from .research_capture_headroom import capture_admission
+            previous = self._storage_capture_admission or {}
+            self._storage_capture_admission = capture_admission(self._capture_storage_path,
+                previously_paused=previous.get('admitted') is False)
+            if not self._storage_capture_admission['admitted']:
+                self._last_skip_reason = self._storage_capture_admission['reason']
+                return []
+            if str(self._last_skip_reason or '').startswith('RESEARCH_CAPTURE_'):
+                self._last_skip_reason = None
             day_n = self._conn.execute(
                 "SELECT COUNT(*) FROM passive_market_observations "
                 "WHERE CAST(captured_ts/86400 AS INTEGER)=?",
@@ -1430,7 +1441,9 @@ class PassiveLearningEngine:
             "variance_clock_version": VARIANCE_CLOCK_VERSION,
             "option_q_contract_version": OPTION_Q_CONTRACT_VERSION,
             "expiry_clock_version": EXPIRY_CLOCK_VERSION,
-            "collector_status": "degraded" if self._last_step_error else "running",
+            "collector_status": ("paused_storage" if (self._storage_capture_admission or {}).get('admitted') is False
+                                 else "degraded" if self._last_step_error else "running"),
+            "storage_capture": dict(self._storage_capture_admission or {}),
             "last_step_ts": self._last_step_ts,
             "last_skip_reason": self._last_skip_reason,
             "last_successful_capture_ts": self._last_successful_capture_ts,
