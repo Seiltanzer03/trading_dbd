@@ -1,4 +1,4 @@
-name: json-native-failure-readonly
+name: json-current-epoch-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -15,21 +15,10 @@ jobs:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 55s
+          command_timeout: 30s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
             import pathlib,subprocess,json,hashlib,shutil,urllib.request
-            print('SERVICE_CLOCKS',subprocess.check_output(['systemctl','show','seiltanzer','-p','ExecMainStartTimestamp','-p','ActiveEnterTimestamp'],text=True).strip(),flush=True)
-            history=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-10-29 20:30:00 UTC','--until','2026-10-29 21:01:00 UTC','-n','1000','--no-pager','-o','cat'],capture_output=True,text=True,timeout=10)
-            for line in history.stdout.splitlines():
-              if line.startswith('STARTUP_PHASE '):print('RECOVERY_STARTUP',line[:350],flush=True)
-            probe_code="import json,time,re\nfrom pathlib import Path\nfrom scripts import sqlite_history_transaction as core\nfrom scripts import history_image_transport as images\n\ntry:\n    private=core._read(Path('/opt/seiltanzer/data/json-rebuild-40937497010/cutover.transport.json'))\n    transport=images.SignedImageTransport(private,deadline=time.monotonic()+15)\n    for kind in ('original','hot'):\n        started=time.monotonic()\n        try:\n            with transport.open_image(kind) as stream:first=stream.read(1)\n            result=dict(kind=kind,first_decoded_byte_received=len(first)==1,full_get_verified=False,elapsed_sec=round(time.monotonic()-started,3))\n        except Exception as exc:\n            reason=str(exc) if isinstance(exc,images.ImageTransportError) and re.fullmatch('[A-Z_]+',str(exc)) else type(exc).__name__\n            result=dict(kind=kind,stable_error=reason,full_get_verified=False,elapsed_sec=round(time.monotonic()-started,3))\n        print('NATIVE_IMAGE_FIRST_BYTE',json.dumps(result),flush=True)\nexcept Exception as exc:\n    print('NATIVE_IMAGE_PROBE_ERROR',type(exc).__name__,flush=True)\n"
-            try:
-              result=subprocess.run(['/usr/bin/systemd-run','--quiet','--wait','--pipe','--collect','--unit=seiltanzer-json-image-probe-40937497010','--property=Type=exec','--property=RuntimeMaxSec=25','--property=TimeoutStopSec=5','--property=KillMode=control-group','--property=Restart=no','--property=UMask=0077','--working-directory=/opt/seiltanzer','/usr/bin/python3','-B','-c',probe_code],capture_output=True,text=True,timeout=30)
-              for line in result.stdout.splitlines():
-                if line.startswith(('NATIVE_IMAGE_FIRST_BYTE ','NATIVE_IMAGE_PROBE_ERROR ')):print(line,flush=True)
-              print('NATIVE_IMAGE_PROBE_UNIT_EXIT',result.returncode,flush=True)
-            except Exception as exc:print('NATIVE_IMAGE_PROBE_UNIT_ERROR',type(exc).__name__,flush=True)
             root=pathlib.Path('/opt/seiltanzer');data=root/'data'
             print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
             print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStatus','-p','Result'],text=True).strip(),flush=True)
@@ -76,3 +65,6 @@ jobs:
 # Read-only epoch observation 3
 # Read-only epoch observation 5
 
+
+
+# Read-only recovery status before PR548 release
