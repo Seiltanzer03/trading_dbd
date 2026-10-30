@@ -184,6 +184,30 @@ def test_bad_claimed_full_read_never_truncates_original(setup_transaction,monkey
     assert control.starts == 1
 
 
+@pytest.mark.parametrize('error,expected',[
+    ('image_deadline','IMAGE_TRANSFER_DEADLINE'),
+    ('transaction_deadline','TRANSACTION_DEADLINE'),
+    ('private','UNCLASSIFIED_VERIFICATION_FAILURE'),
+])
+def test_terminal_handoff_abort_retains_only_safe_failure_code(setup_transaction,monkeypatch,error,expected):
+    from scripts.history_image_transport import ImageTransportError
+    owner=importlib.import_module('scripts.history_production_owner')
+    root,_,_,_,original,_=setup_transaction
+    _,_,control=owner_inputs(monkeypatch,setup_transaction)
+    failure={'image_deadline':ImageTransportError('IMAGE_TRANSFER_DEADLINE'),
+        'transaction_deadline':core.CutoverError('TRANSACTION_DEADLINE'),
+        'private':RuntimeError('https://PRIVATE-PROVIDER-SECRET.invalid/signed?credential=SECRET')}[error]
+    def refused(*args,**kwargs):raise failure
+    with core._owned_lock(root):
+        result=owner._run_owned_epoch(root,run_id='run-001',application_sha='a'*40,
+            control=control,transport_factory=refused)
+    assert result['phase']=='ABORTED_ORIGINAL' and result['service_started'] is True
+    assert result.get('handoff_failure_code')==expected
+    assert 'PRIVATE-PROVIDER-SECRET' not in str(result)
+    assert (root/'trades.db').read_bytes()==original
+    assert not (root/'cutover.journal.json').exists()
+
+
 def test_owner_idle_polls_do_not_rescan_full_source(setup_transaction,monkeypatch):
     owner = importlib.import_module('scripts.history_production_owner')
     from scripts import history_frozen_preparation as prep
