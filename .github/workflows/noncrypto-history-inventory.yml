@@ -1,4 +1,4 @@
-name: tor-exit-context-readonly
+name: tor-package-policy-readonly
 'on':
   push:
     branches:
@@ -18,14 +18,24 @@ jobs:
         username: root
         password: ${{ secrets.SSH_PASSWORD }}
         command_timeout: 35s
-        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,re,os\nfrom\
-          \ pathlib import Path\nr=subprocess.run(['/usr/bin/tor','--defaults-torrc','/usr/share/tor/tor-service-defaults-torrc','-f','/etc/tor/torrc','--verify-config'],capture_output=True,text=True,timeout=8)\n\
-          print('TOR_VERIFY_CONFIG',json.dumps(dict(returncode=r.returncode,valid='Configuration\
-          \ was valid' in r.stdout)))\nfor root in ('/run','/var/lib/tor','/var/log/tor'):\n\
-          \    try:\n        v=os.statvfs(root);print('TOR_FILESYSTEM',json.dumps(dict(path=root,free_bytes=v.f_bavail*v.f_frsize,free_inodes=v.f_favail)))\n\
-          \    except OSError as e:print('TOR_FILESYSTEM',root,type(e).__name__)\n\
-          r=subprocess.run(['journalctl','-u','tor@default.service','-n','20','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)\n\
-          lines=[]\nfor line in r.stdout.splitlines():\n    line=re.sub(r'https?://\\\
-          S+','[URL]',line)\n    line=re.sub(r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\\
-          b','[IP]',line)\n    lines.append(line[:300])\nprint('TOR_EXIT_CONTEXT',json.dumps(lines))\n\
-          \nPY\n"
+        script: '/usr/bin/python3 -B -u - <<''PY''
+
+          import subprocess,json,re
+
+          from pathlib import Path
+
+          osinfo={line.split(''='',1)[0]:line.split(''='',1)[1].strip(''"'') for line
+          in Path(''/etc/os-release'').read_text().splitlines() if ''='' in line}
+
+          print(''TOR_OS'',json.dumps({k:osinfo.get(k) for k in (''ID'',''VERSION_ID'',''VERSION_CODENAME'')}))
+
+          print(''TOR_PACKAGE_POLICY'',subprocess.check_output([''apt-cache'',''policy'',''tor''],text=True,timeout=5)[:1200])
+
+          version=subprocess.check_output([''/usr/bin/tor'',''--version''],text=True,timeout=3).splitlines()[0]
+
+          print(''TOR_INSTALLED_VERSION'',version)
+
+
+          PY
+
+          '
