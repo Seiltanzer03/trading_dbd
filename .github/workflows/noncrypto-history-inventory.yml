@@ -1,4 +1,4 @@
-name: existing-provider-routes-readonly
+name: local-provider-listener-readonly
 'on':
   push:
     branches:
@@ -25,22 +25,12 @@ jobs:
           0') if '=' in item);proxy=(cfg.get('OPENROUTER_PROXY') or '').strip() or\
           \ None;key=cfg.get('OPENROUTER_API_KEY') or ''\nprint('PROVIDER_CONFIGURATION',json.dumps(dict(key_configured=bool(key),proxy_configured=bool(proxy),proxy_scheme=urlsplit(proxy).scheme\
           \ if proxy else None)))\nassert key,'Provider configuration absent from\
-          \ actual process environment'\nfrom ipaddress import ip_address\nroutes=[]\n\
-          for name,value in sorted(cfg.items()):\n    if 'PROXY' not in name or not\
-          \ value:continue\n    parsed=urlsplit(value)\n    if parsed.scheme not in\
-          \ ('http','https','socks5','socks5h'):continue\n    host=parsed.hostname\
-          \ or ''\n    try:local=ip_address(host).is_loopback\n    except ValueError:local=host.lower()=='localhost'\n\
-          \    print('EXISTING_PROXY_ROUTE',json.dumps(dict(name=name,scheme=parsed.scheme,loopback=local,same_as_provider=value==proxy)))\n\
-          \    if value!=proxy and value not in [p for _,p in routes]:routes.append((name,value))\n\
-          for name,p in routes[:2]:\n    started=time.monotonic()\n    try:\n    \
-          \    if urlsplit(p).scheme in ('socks5','socks5h'):\n            from curl_cffi\
-          \ import requests,CurlOpt\n            import certifi\n            with\
-          \ requests.Session(trust_env=False,verify=certifi.where(),curl_options={CurlOpt.NOPROXY:''})\
-          \ as c:\n                r=c.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer\
-          \ '+key},proxy=p,timeout=5,allow_redirects=False)\n        else:\n     \
-          \       with httpx.Client(proxy=p,trust_env=False,timeout=5) as c:r=c.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer\
-          \ '+key},follow_redirects=False)\n        print('EXISTING_PROXY_AUTH_PROBE',json.dumps(dict(route=name,http_status=r.status_code,elapsed_sec=round(time.monotonic()-started,3))))\n\
-          \    except Exception as e:print('EXISTING_PROXY_AUTH_PROBE',json.dumps(dict(route=name,exception_class=type(e).__name__,elapsed_sec=round(time.monotonic()-started,3))))\n\
-          units=subprocess.run(['systemctl','list-units','--all','--plain','--no-legend','xray*','sing-box*','v2ray*','*proxy*'],capture_output=True,text=True,timeout=3)\n\
-          print('PROXY_SERVICE_STATES',json.dumps([line.split()[:4] for line in units.stdout.splitlines()]))\n\
-          \nPY\n"
+          \ actual process environment'\nimport socket\nparsed=urlsplit(proxy);port=parsed.port\n\
+          try:\n    with socket.create_connection((parsed.hostname,port),timeout=2):print('LOCAL_SOCKS_LISTENER','CONNECTED')\n\
+          except Exception as e:print('LOCAL_SOCKS_LISTENER',type(e).__name__)\nresult=subprocess.run(['ss','-ltnp','sport','=',':'+str(port)],capture_output=True,text=True,timeout=3)\n\
+          pids=set(re.findall(r'pid=([0-9]+)',result.stdout))\nfor pid in pids:\n\
+          \    proc=Path('/proc')/pid\n    try:\n        units=re.findall(r'([A-Za-z0-9_.@-]+\\\
+          .service)',(proc/'cgroup').read_text())\n        print('LOCAL_SOCKS_OWNER',json.dumps(dict(pid=int(pid),process=(proc/'comm').read_text().strip(),units=units)))\n\
+          \        for unit in units:\n            state=subprocess.check_output(['systemctl','show',unit,'-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStatus'],text=True,timeout=3)\n\
+          \            print('LOCAL_SOCKS_UNIT',unit,json.dumps(state.splitlines()))\n\
+          \    except FileNotFoundError:pass\n\nPY\n"
