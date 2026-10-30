@@ -1,8 +1,10 @@
-name: json-current-epoch-readonly
-on:
+name: ai-execution-regression-readonly
+'on':
   push:
-    branches: [ops/noncrypto-history-inventory-20261026]
-    paths: [.github/workflows/noncrypto-history-inventory.yml]
+    branches:
+    - ops/noncrypto-history-inventory-20261026
+    paths:
+    - .github/workflows/noncrypto-history-inventory.yml
 permissions:
   contents: read
 jobs:
@@ -10,61 +12,34 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
-          script: |
-            /usr/bin/python3 -B -u - <<'PY'
-            import pathlib,subprocess,json,hashlib,shutil,urllib.request
-            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
-            print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStatus','-p','Result'],text=True).strip(),flush=True)
-            actual=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
-            source=(root/'scripts/history_service_fence.py').read_bytes()
-            print('GUARD_CODE_MATCH',actual==source,flush=True)
-            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
-            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
-              p=data/name
-              if not p.exists():print('EPOCH_METADATA',name,'ABSENT',flush=True);continue
-              v=json.loads(p.read_text())
-              print('EPOCH_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','phase','service_started')}),flush=True)
-            run_id='40937497010';metadata=data/('json-rebuild-'+run_id)
-            for name in ('cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json','cutover.request.json','cutover.plan.json'):
-              p=metadata/name
-              if not p.exists():print('JSON_METADATA',name,'ABSENT',flush=True);continue
-              v=json.loads(p.read_text())
-              print('JSON_METADATA',name,json.dumps({k:v.get(k) for k in ('run_id','phase','service_started','abort_reason','admitted','free_bytes','required_free_bytes','started_wall_ts')}),flush=True)
-              if name in ('cutover.request.json','cutover.plan.json'):print('PLANNED_IMAGE_BYTES',json.dumps({k:(v.get(k) or {}).get('database_size_bytes') for k in ('original','hot')}),flush=True)
-            print('JSON_OWNER',subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','LoadState','-p','ActiveState','-p','SubState','-p','MainPID','-p','Result','-p','ExecMainStatus'],text=True).strip(),flush=True)
-            print('COLD_JOURNAL_DIGEST',hashlib.sha256((data/'cutover.journal.json').read_bytes()).hexdigest(),flush=True)
-            owner_pid=int(subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','MainPID','--value'],text=True).strip())
-            if owner_pid:
-              proc=pathlib.Path('/proc')/str(owner_pid)
-              try:
-                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
-                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
-                print('OWNER_PROCESS',json.dumps({'pid':owner_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
-              except FileNotFoundError:print('OWNER_PROCESS','FINISHED',flush=True)
-            try:
-              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
-            except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
-            import sys
-            sys.path.insert(0,str(root))
-            from scripts.history_production_control import database_handles
-            readers=[]
-            for handle in database_handles(data/'trades.db',exclude_pid=owner_pid):
-              try:
-                io=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(handle['pid'])/'io').read_text().splitlines())
-                readers.append({'pid':handle['pid'],'writable':handle['writable'],'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes'])})
-              except FileNotFoundError:pass
-            print('EXTERNAL_DATABASE_HANDLES',json.dumps(readers),flush=True)
-            PY
-# Read-only epoch observation 3
-# Read-only epoch observation 5
-
-
-
-# Read-only recovery status before PR548 release
+    - uses: appleboy/ssh-action@v1
+      with:
+        host: 94.241.171.182
+        username: root
+        password: ${{ secrets.SSH_PASSWORD }}
+        command_timeout: 55s
+        script: "/usr/bin/python3 -B -u - <<'PY'\nimport json,pathlib,subprocess,sqlite3,time,re,shutil\n\
+          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nprint('HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
+          print('CAPACITY',json.dumps(dict(free_bytes=shutil.disk_usage(data).free,database_bytes=(data/'trades.db').stat().st_size)))\n\
+          log=subprocess.run(['journalctl','-u','seiltanzer','--since','-2 hours','-n','3000','--no-pager','-o','cat'],capture_output=True,text=True,timeout=8).stdout.splitlines()\n\
+          for i,line in enumerate(log):\n    if 'ai-fda8cdf114424b6691dd' in line:\n\
+          \        try:\n            v=json.loads(line[line.index('{'):]);print('REQUEST_TRACE',json.dumps({k:v[k]\
+          \ for k in ('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','exception_class','finish_reason','completion_tokens')\
+          \ if k in v}))\n        except (ValueError,TypeError):pass\n        for\
+          \ follow in log[i+1:i+35]:\n            if 'ai_verdict_event' in follow:break\n\
+          \            m=re.search(r'RuntimeError: (combined_provider_[a-z_]+|provider_[a-z_]+|OpenRouter\
+          \ HTTP [0-9]{3}|OpenRouter connection failed: [A-Za-z]+)\\s*$',follow)\n\
+          \            if m:print('OWNED_PROVIDER_FAILURE',m.group(1))\ncon=sqlite3.connect((data/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=3);con.row_factory=sqlite3.Row\n\
+          con.execute('PRAGMA query_only=ON')\nfor row in con.execute('SELECT id,trade_id,ts,model,snapshot_json\
+          \ FROM ai_verdicts ORDER BY id DESC LIMIT 3'):\n    s=json.loads(row['snapshot_json']);ctx=s.get('edge_family_market_context')\
+          \ or {};math=s.get('mathematical_edge') or {}\n    print('SAVED_REVIEW',json.dumps(dict(id=row['id'],trade_id=row['trade_id'],ts=row['ts'],model=row['model'],provider=s.get('ai_provider_status'),llm_reason=(s.get('llm_shadow_decision')\
+          \ or {}).get('reason_code'),market_context={k:ctx.get(k) for k in ('reason','available','published_for_sha','failed_source_checks','model_inventory','rejected_models')},math_keys=list(math)[:15],edge_keys=[k\
+          \ for k in s if 'edge' in k],review_id=s.get('review_id')),ensure_ascii=False))\n\
+          con.close()\np=data/'research/mathematical_edge_latest.json'\nprint('MODEL_ARTIFACT',json.dumps(dict(exists=p.exists(),bytes=p.stat().st_size\
+          \ if p.exists() else None)))\nif p.exists() and p.stat().st_size<=32*1024**2:\n\
+          \    report=json.loads(p.read_text());matrix=(report.get('family_market_models')\
+          \ or {}).get('XAU') or {}\n    print('MODEL_PUBLICATION',json.dumps({k:report.get(k)\
+          \ for k in ('published_for_sha','source_application_sha','generated_at','captured_ts','available_at','expires_at','contract_version')}))\n\
+          \    print('XAU_FAMILY_MODELS',json.dumps({k:{f:v.get(f) for f in ('status','reason','state','model_sha256')}\
+          \ for k,v in matrix.items() if isinstance(v,dict)}))\n    print('MODEL_REPORT_KEYS',json.dumps(list(report)[:25]))\n\
+          \nPY\n"
