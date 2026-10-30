@@ -1,4 +1,4 @@
-name: ai-execution-regression-readonly
+name: provider-route-readonly
 'on':
   push:
     branches:
@@ -17,29 +17,21 @@ jobs:
         host: 94.241.171.182
         username: root
         password: ${{ secrets.SSH_PASSWORD }}
-        command_timeout: 55s
-        script: "/usr/bin/python3 -B -u - <<'PY'\nimport json,pathlib,subprocess,sqlite3,time,re,shutil\n\
-          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nprint('HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
-          print('CAPACITY',json.dumps(dict(free_bytes=shutil.disk_usage(data).free,database_bytes=(data/'trades.db').stat().st_size)))\n\
-          log=subprocess.run(['journalctl','-u','seiltanzer','--since','-2 hours','-n','3000','--no-pager','-o','cat'],capture_output=True,text=True,timeout=8).stdout.splitlines()\n\
-          for i,line in enumerate(log):\n    if 'ai-fda8cdf114424b6691dd' in line:\n\
-          \        try:\n            v=json.loads(line[line.index('{'):]);print('REQUEST_TRACE',json.dumps({k:v[k]\
-          \ for k in ('request_id','stage','event','elapsed_ms','duration_ms','input_bytes','request_bytes','output_bytes','exception_class','finish_reason','completion_tokens')\
-          \ if k in v}))\n        except (ValueError,TypeError):pass\n        for\
-          \ follow in log[i+1:i+35]:\n            if 'ai_verdict_event' in follow:break\n\
-          \            m=re.search(r'RuntimeError: (combined_provider_[a-z_]+|provider_[a-z_]+|OpenRouter\
-          \ HTTP [0-9]{3}|OpenRouter connection failed: [A-Za-z]+)\\s*$',follow)\n\
-          \            if m:print('OWNED_PROVIDER_FAILURE',m.group(1))\ncon=sqlite3.connect((data/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=3);con.row_factory=sqlite3.Row\n\
-          con.execute('PRAGMA query_only=ON')\nfor row in con.execute('SELECT id,trade_id,ts,model,snapshot_json\
-          \ FROM ai_verdicts ORDER BY id DESC LIMIT 3'):\n    s=json.loads(row['snapshot_json']);ctx=s.get('edge_family_market_context')\
-          \ or {};math=s.get('mathematical_edge') or {}\n    print('SAVED_REVIEW',json.dumps(dict(id=row['id'],trade_id=row['trade_id'],ts=row['ts'],model=row['model'],provider=s.get('ai_provider_status'),llm_reason=(s.get('llm_shadow_decision')\
-          \ or {}).get('reason_code'),market_context={k:ctx.get(k) for k in ('reason','available','published_for_sha','failed_source_checks','model_inventory','rejected_models')},math_keys=list(math)[:15],edge_keys=[k\
-          \ for k in s if 'edge' in k],review_id=s.get('review_id')),ensure_ascii=False))\n\
-          con.close()\np=data/'research/mathematical_edge_latest.json'\nprint('MODEL_ARTIFACT',json.dumps(dict(exists=p.exists(),bytes=p.stat().st_size\
-          \ if p.exists() else None)))\nif p.exists() and p.stat().st_size<=32*1024**2:\n\
-          \    report=json.loads(p.read_text());matrix=(report.get('family_market_models')\
-          \ or {}).get('XAU') or {}\n    print('MODEL_PUBLICATION',json.dumps({k:report.get(k)\
-          \ for k in ('published_for_sha','source_application_sha','generated_at','captured_ts','available_at','expires_at','contract_version')}))\n\
-          \    print('XAU_FAMILY_MODELS',json.dumps({k:{f:v.get(f) for f in ('status','reason','state','model_sha256')}\
-          \ for k,v in matrix.items() if isinstance(v,dict)}))\n    print('MODEL_REPORT_KEYS',json.dumps(list(report)[:25]))\n\
+        command_timeout: 35s
+        script: "/opt/seiltanzer/.venv/bin/python -B -u - <<'PY'\nimport os,json,subprocess,re,time\n\
+          from pathlib import Path\nfrom urllib.parse import urlsplit\nfrom dotenv\
+          \ import dotenv_values\nimport httpx\ncfg=dotenv_values('/opt/seiltanzer/.env');proxy=(cfg.get('OPENROUTER_PROXY')\
+          \ or '').strip() or None;key=cfg.get('OPENROUTER_API_KEY') or ''\nprint('PROVIDER_CONFIGURATION',json.dumps(dict(key_configured=bool(key),proxy_configured=bool(proxy),proxy_scheme=urlsplit(proxy).scheme\
+          \ if proxy else None)))\nfor mode,p in [('configured_proxy',proxy),('direct',None)]:\n\
+          \    started=time.monotonic()\n    try:\n        if p and urlsplit(p).scheme\
+          \ in ('socks5','socks5h'):\n            from curl_cffi import requests\n\
+          \            from curl_cffi import CurlOpt\n            import certifi\n\
+          \            with requests.Session(trust_env=False,verify=certifi.where(),curl_options={CurlOpt.NOPROXY:''})\
+          \ as s:\n                r=s.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer\
+          \ '+key},proxy=p,timeout=6,allow_redirects=False)\n        else:\n     \
+          \       with httpx.Client(proxy=p,trust_env=False,timeout=6) as s:r=s.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer\
+          \ '+key},follow_redirects=False)\n        print('PROVIDER_READONLY_AUTH_PROBE',json.dumps(dict(mode=mode,http_status=r.status_code,elapsed_sec=round(time.monotonic()-started,3))))\n\
+          \    except Exception as e:\n        message=str(e);status=re.search(r'\\\
+          b(407|403|502|503|504)\\b',message)\n        print('PROVIDER_READONLY_AUTH_PROBE',json.dumps(dict(mode=mode,exception_class=type(e).__name__,proxy_http_status=int(status.group(1))\
+          \ if status else None,elapsed_sec=round(time.monotonic()-started,3))))\n\
           \nPY\n"
