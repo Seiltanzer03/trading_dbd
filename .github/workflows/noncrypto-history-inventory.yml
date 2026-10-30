@@ -1,4 +1,4 @@
-name: tor-provider-health-readonly
+name: tor-provider-failure-readonly
 'on':
   push:
     branches:
@@ -18,16 +18,10 @@ jobs:
         username: root
         password: ${{ secrets.SSH_PASSWORD }}
         command_timeout: 35s
-        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,re\nr=subprocess.run(['journalctl','-u','tor@default.service','--since','-30\
-          \ minutes','-n','120','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)\n\
-          counts={};bootstrap=[]\nfor line in r.stdout.splitlines():\n    m=re.search(r'Bootstrapped\
-          \ ([0-9]+)%',line)\n    if m:bootstrap.append(int(m.group(1)))\n    for\
-          \ token in ('No space left on device','Permission denied','Address already\
-          \ in use','Configuration was invalid','Control process exited','Failed to\
-          \ start','start operation timed out','Bootstrapped','Out of memory','Failed\
-          \ to parse','Could not bind','Failed to create','Read-only file system'):\n\
-          \        if token.lower() in line.lower():counts[token]=counts.get(token,0)+1\n\
-          \    m=re.search(r'(status=[0-9]+/[A-Z]+|result .[a-z-]+.)',line)\n    if\
-          \ m:counts[m.group(1)]=counts.get(m.group(1),0)+1\nprint('TOR_BOUNDED_DIAGNOSTIC',json.dumps(dict(tokens=counts,bootstrap_percent=bootstrap[-8:])))\n\
-          print('TOR_UNIT_STATUS',json.dumps(subprocess.check_output(['systemctl','show','tor@default.service','-p','ActiveState','-p','SubState','-p','Result','-p','MainPID','-p','NRestarts','-p','ExecMainCode','-p','ExecMainStatus','-p','RestartUSec','-p','TimeoutStartUSec','-p','MemoryCurrent'],text=True).splitlines()))\n\
-          \nPY\n"
+        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,re\nr=subprocess.run(['journalctl','-u','tor@default.service','--since','-15\
+          \ minutes','-n','200','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)\n\
+          errors=[]\nfor line in r.stdout.splitlines():\n    if not any(k in line.lower()\
+          \ for k in ('[err]','[warn]','failed','error','fatal','permission','sandbox')):continue\n\
+          \    line=re.sub(r'https?://\\S+','[URL]',line)\n    line=re.sub(r'\\b(?:[0-9]{1,3}\\\
+          .){3}[0-9]{1,3}\\b','[IP]',line)\n    if line not in errors:errors.append(line[:350])\n\
+          print('TOR_SELECTED_FAILURES',json.dumps(errors[-12:]))\n\nPY\n"
