@@ -1,4 +1,4 @@
-name: tor-provider-failure-readonly
+name: tor-exit-context-readonly
 'on':
   push:
     branches:
@@ -18,14 +18,14 @@ jobs:
         username: root
         password: ${{ secrets.SSH_PASSWORD }}
         command_timeout: 35s
-        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,re\nr=subprocess.run(['journalctl','-u','tor@default.service','--since','-15\
-          \ minutes','-n','200','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)\n\
-          errors=[]\nfor line in r.stdout.splitlines():\n    if not any(k in line.lower()\
-          \ for k in ('[err]','[warn]','failed','error','fatal','permission','sandbox','exiting','terminated','controller','interrupt','shutdown','couldn','stopping')):continue\n\
-          \    line=re.sub(r'https?://\\S+','[URL]',line)\n    line=re.sub(r'\\b(?:[0-9]{1,3}\\\
-          .){3}[0-9]{1,3}\\b','[IP]',line)\n    if line not in errors:errors.append(line[:350])\n\
-          print('TOR_SELECTED_FAILURES',json.dumps(errors[-12:]))\nunit=subprocess.check_output(['systemctl','cat','tor@default.service'],text=True,timeout=3)\n\
-          for line in unit.splitlines():\n    if line.startswith(('Type=','Restart=','TimeoutStartSec=','User=','Group=','PIDFile=','RuntimeDirectory=')):print('TOR_UNIT_OPTION',line)\n\
-          \    if line.startswith(('ExecStart=','ExecStartPre=','ExecStartPost=')):print('TOR_UNIT_PROGRAM',line.split('=',1)[0],line.split('=',1)[1].split()[0],\
-          \ 'owning_controller_option='+str('OwningControllerProcess' in line))\n\n\
-          PY\n"
+        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,re,os\nfrom\
+          \ pathlib import Path\nr=subprocess.run(['/usr/bin/tor','--defaults-torrc','/usr/share/tor/tor-service-defaults-torrc','-f','/etc/tor/torrc','--verify-config'],capture_output=True,text=True,timeout=8)\n\
+          print('TOR_VERIFY_CONFIG',json.dumps(dict(returncode=r.returncode,valid='Configuration\
+          \ was valid' in r.stdout)))\nfor root in ('/run','/var/lib/tor','/var/log/tor'):\n\
+          \    try:\n        v=os.statvfs(root);print('TOR_FILESYSTEM',json.dumps(dict(path=root,free_bytes=v.f_bavail*v.f_frsize,free_inodes=v.f_favail)))\n\
+          \    except OSError as e:print('TOR_FILESYSTEM',root,type(e).__name__)\n\
+          r=subprocess.run(['journalctl','-u','tor@default.service','-n','20','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)\n\
+          lines=[]\nfor line in r.stdout.splitlines():\n    line=re.sub(r'https?://\\\
+          S+','[URL]',line)\n    line=re.sub(r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\\
+          b','[IP]',line)\n    lines.append(line[:300])\nprint('TOR_EXIT_CONTEXT',json.dumps(lines))\n\
+          \nPY\n"
