@@ -20,17 +20,21 @@ jobs:
         command_timeout: 35s
         script: "/opt/seiltanzer/.venv/bin/python -B -u - <<'PY'\nimport os,json,subprocess,re,time\n\
           from pathlib import Path\nfrom urllib.parse import urlsplit\nfrom dotenv\
-          \ import dotenv_values\nimport httpx\ncfg=dotenv_values('/opt/seiltanzer/.env');proxy=(cfg.get('OPENROUTER_PROXY')\
-          \ or '').strip() or None;key=cfg.get('OPENROUTER_API_KEY') or ''\nprint('PROVIDER_CONFIGURATION',json.dumps(dict(key_configured=bool(key),proxy_configured=bool(proxy),proxy_scheme=urlsplit(proxy).scheme\
-          \ if proxy else None)))\nfor mode,p in [('configured_proxy',proxy),('direct',None)]:\n\
+          \ import dotenv_values\nimport httpx\npid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()\n\
+          cfg=dict(item.split('=',1) for item in Path('/proc/'+pid+'/environ').read_text().split('\\\
+          0') if '=' in item);proxy=(cfg.get('OPENROUTER_PROXY') or '').strip() or\
+          \ None;key=cfg.get('OPENROUTER_API_KEY') or ''\nprint('PROVIDER_CONFIGURATION',json.dumps(dict(key_configured=bool(key),proxy_configured=bool(proxy),proxy_scheme=urlsplit(proxy).scheme\
+          \ if proxy else None)))\nassert key,'Provider configuration absent from\
+          \ actual process environment'\nfor mode,p in [('configured_proxy',proxy),('direct',None)]:\n\
           \    started=time.monotonic()\n    try:\n        if p and urlsplit(p).scheme\
           \ in ('socks5','socks5h'):\n            from curl_cffi import requests\n\
           \            from curl_cffi import CurlOpt\n            import certifi\n\
           \            with requests.Session(trust_env=False,verify=certifi.where(),curl_options={CurlOpt.NOPROXY:''})\
           \ as s:\n                r=s.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer\
-          \ '+key},proxy=p,timeout=6,allow_redirects=False)\n        else:\n     \
-          \       with httpx.Client(proxy=p,trust_env=False,timeout=6) as s:r=s.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer\
-          \ '+key},follow_redirects=False)\n        print('PROVIDER_READONLY_AUTH_PROBE',json.dumps(dict(mode=mode,http_status=r.status_code,elapsed_sec=round(time.monotonic()-started,3))))\n\
+          \ '+key} if key else {},proxy=p,timeout=6,allow_redirects=False)\n     \
+          \   else:\n            with httpx.Client(proxy=p,trust_env=False,timeout=6)\
+          \ as s:r=s.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer\
+          \ '+key} if key else {},follow_redirects=False)\n        print('PROVIDER_READONLY_AUTH_PROBE',json.dumps(dict(mode=mode,http_status=r.status_code,elapsed_sec=round(time.monotonic()-started,3))))\n\
           \    except Exception as e:\n        message=str(e);status=re.search(r'\\\
           b(407|403|502|503|504)\\b',message)\n        print('PROVIDER_READONLY_AUTH_PROBE',json.dumps(dict(mode=mode,exception_class=type(e).__name__,proxy_http_status=int(status.group(1))\
           \ if status else None,elapsed_sec=round(time.monotonic()-started,3))))\n\
