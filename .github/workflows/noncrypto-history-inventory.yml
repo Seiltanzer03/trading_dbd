@@ -19,7 +19,10 @@ jobs:
         password: ${{ secrets.SSH_PASSWORD }}
         command_timeout: 55s
         script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,shutil,pathlib,urllib.request\n\
-          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nr=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
+          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nr=subprocess.run(['journalctl','-u','seiltanzer','--since','-20\
+          \ minutes','-n','500','--no-pager','-o','cat'],capture_output=True,text=True,timeout=6)\n\
+          for line in r.stdout.splitlines():\n if line.startswith('STARTUP_PHASE '):print('STARTUP_PROGRESS',line[:250])\n\
+          r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
           try: print('START_GUARD',json.dumps(json.loads(r.stdout)))\nexcept ValueError:\
           \ print('START_GUARD_EXIT',r.returncode)\nfor n in ('cutover.active','json-history.epoch.json'):\n\
           \ p=data/n;print('GUARD_METADATA',n,p.exists())\nprint('GUARD_BYTES_EQUAL',(root/'scripts/history_service_fence.py').read_bytes()==pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes())\n\
@@ -34,5 +37,3 @@ jobs:
           try:\n with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
           \ as r:print('LIVE_HTTP',r.status)\nexcept Exception as e:print('LIVE_HTTP_ERROR',type(e).__name__)\n\
           \nPY\n"
-
-# Read-only observer following one queued guarded native JSON operation
