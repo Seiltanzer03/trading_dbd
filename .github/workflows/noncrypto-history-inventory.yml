@@ -40,7 +40,7 @@ jobs:
           p=data/'research/mathematical_edge_latest.json'\nif p.exists():\n r=json.loads(p.read_text());print('MODELS',json.dumps(dict(published_for_sha=r.get('published_for_sha'),created_ts=r.get('created_ts'))))\n\
           try:\n with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
           \ as r:print('LIVE_HTTP',r.status)\nexcept Exception as e:print('LIVE_HTTP_ERROR',type(e).__name__)\n\
-          \nPY\n\ntry:\n with urllib.request.urlopen('http://127.0.0.1:8790/api/position',timeout=4)\
+          \n\ntry:\n with urllib.request.urlopen('http://127.0.0.1:8790/api/position',timeout=4)\
           \ as response:position=json.loads(response.read())\n context=position.get('execution_reconciliation')\n\
           \ print('ACTUAL_RECONCILIATION',json.dumps(dict(required=bool(context and\
           \ context.get('required')),trade_id=position.get('trade_id'),unresolved_commands=len((context\
@@ -55,4 +55,5 @@ jobs:
           \ except urllib.error.HTTPError as e:code=e.code;body=json.loads(e.read())\n\
           \  print('ACTUAL_EXECUTION_GUARD',json.dumps(dict(http=code,error_code=(body.get('error')\
           \ or {}).get('code'),new_command_present='management_decision' in body,verdict_present='verdict'\
-          \ in body)))\nexcept Exception as e:print('ACTUAL_EXECUTION_GUARD_PROBE',type(e).__name__)\n"
+          \ in body)))\nexcept Exception as e:print('ACTUAL_EXECUTION_GUARD_PROBE',type(e).__name__)\n\
+          \nPY\n"
