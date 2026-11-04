@@ -1,4 +1,4 @@
-name: tor-package-policy-readonly
+name: current-terminal-provider-readonly
 'on':
   push:
     branches:
@@ -18,24 +18,13 @@ jobs:
         username: root
         password: ${{ secrets.SSH_PASSWORD }}
         command_timeout: 35s
-        script: '/usr/bin/python3 -B -u - <<''PY''
-
-          import subprocess,json,re
-
-          from pathlib import Path
-
-          osinfo={line.split(''='',1)[0]:line.split(''='',1)[1].strip(''"'') for line
-          in Path(''/etc/os-release'').read_text().splitlines() if ''='' in line}
-
-          print(''TOR_OS'',json.dumps({k:osinfo.get(k) for k in (''ID'',''VERSION_ID'',''VERSION_CODENAME'')}))
-
-          print(''TOR_PACKAGE_POLICY'',subprocess.check_output([''apt-cache'',''policy'',''tor''],text=True,timeout=5)[:1200])
-
-          version=subprocess.check_output([''/usr/bin/tor'',''--version''],text=True,timeout=3).splitlines()[0]
-
-          print(''TOR_INSTALLED_VERSION'',version)
-
-
-          PY
-
-          '
+        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,shutil,pathlib,urllib.request\n\
+          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nprint('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
+          print('SERVICE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','MainPID','-p','NRestarts'],text=True).splitlines()))\n\
+          print('CAPACITY',json.dumps(dict(free_bytes=shutil.disk_usage(data).free,database_bytes=(data/'trades.db').stat().st_size)))\n\
+          print('TOR_VERSION',subprocess.check_output(['/usr/bin/tor','--version'],text=True).splitlines()[0])\n\
+          print('TOR_POLICY',subprocess.check_output(['apt-cache','policy','tor'],text=True)[:900])\n\
+          print('TOR_STATE',json.dumps(subprocess.check_output(['systemctl','show','tor@default.service','-p','ActiveState','-p','SubState','-p','NRestarts'],text=True).splitlines()))\n\
+          p=data/'research/mathematical_edge_latest.json'\nif p.exists():\n r=json.loads(p.read_text());print('MODELS',json.dumps(dict(published_for_sha=r.get('published_for_sha'),created_ts=r.get('created_ts'))))\n\
+          with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
+          \ as r:print('LIVE_HTTP',r.status)\n\nPY\n"
