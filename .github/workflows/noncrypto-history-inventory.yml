@@ -1,150 +1,134 @@
-name: json-current-epoch-readonly
-on:
+name: guarded-existing-provider-repair
+'on':
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
+  actions: write
+concurrency:
+  group: production-provider-maintenance
+  queue: max
+  cancel-in-progress: false
 jobs:
-  inspect:
+  repair:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 12
+    env:
+      EXPECTED_SHA: 32e1058b786fae902ff55e89b1bb6fd1d301adaf
+      NATIVE_RUN_ID: '41808108303'
     steps:
-      - uses: actions/checkout@v4
-      - name: Validate prepared maintenance and canonical acceptance without executing them
+      - name: Cancel only unstarted serialized provider maintenance before independent postcommit execution
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const params={owner:context.repo.owner,repo:context.repo.repo,run_id:41817855746};
+            let {data:run}=await github.rest.actions.getWorkflowRun(params);
+            if(run.head_sha!=='a6e85eefe49f525ddad8526cd575437b3d0de852' || run.path!=='.github/workflows/noncrypto-history-inventory.yml') throw new Error('provider maintenance identity mismatch');
+            if(run.status!=='pending') throw new Error('serialized provider maintenance is no longer unstarted pending');
+            const {data:jobs}=await github.rest.actions.listJobsForWorkflowRun({...params,filter:'latest',per_page:100});
+            if(jobs.jobs.length!==0) throw new Error('provider maintenance already has jobs; independent execution refused');
+            await github.rest.actions.cancelWorkflowRun(params);
+            for(let attempt=0;attempt<20;attempt++){
+              ({data:run}=await github.rest.actions.getWorkflowRun(params));
+              if(run.status==='completed' && run.conclusion==='cancelled'){core.info('UNSTARTED_PROVIDER_MAINTENANCE_CANCELLED '+params.run_id);return;}
+              if(run.status==='completed') throw new Error('original provider maintenance completed with another conclusion');
+              await new Promise(resolve=>setTimeout(resolve,1000));
+            }
+            throw new Error('prior provider maintenance cancellation not verified; no host operation permitted');
+      - name: Validate bounded maintenance before transfer
         run: |
-          python - <<'PY'
-          import yaml
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/repair-tor.py" <<'PY'
+          import os,json,subprocess,time,urllib.request
           from pathlib import Path
-          repair=yaml.safe_load(Path('ops/prepared-provider-repair-32e1058.yml').read_text())
-          first=repair['jobs']['repair']['steps'][0]['run']
-          code=first.split("<<'PY'\n",1)[1].split("\nPY\n",1)[0]
-          compile(code,'prepared-provider-repair','exec')
-          acceptance=yaml.safe_load(Path('ops/prepared-canonical-acceptance-32e1058.yml').read_text())
-          job=acceptance['jobs']['deploy']
-          assert job['env']['EXPECTED_SHA']=='32e1058b786fae902ff55e89b1bb6fd1d301adaf'
-          assert acceptance['permissions']=={'actions':'write','contents':'read','statuses':'write'}
-          steps=job['steps']
-          delivery=next(x for x in steps if x.get('id')=='delivery')['with']['script']
-          assert 'COMMITTED' in delivery and 'start_allowed' in delivery and 'cutover.active' in delivery
-          assert not any(x in delivery for x in ('git reset','systemctl start','systemctl stop','systemctl restart'))
-          required={'delivery','preacceptance','readiness','mathrefresh','sourcerefresh','fomcrefresh','smoke','public','orchestration'}
-          assert required <= {x.get('id') for x in steps}
-          assert any('Publish exact-SHA production statuses'==x.get('name') and x.get('if')=='always()' for x in steps)
-          print('PREPARED_OPERATIONS_VALIDATED no_production_mutation=true')
-          PY
-      - name: Inspect only cloud images from current native run
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: "true"
-        run: |
-          python -m pip -q install 'boto3>=1.36,<2'
-          python - <<'CLOUD'
-          import json,boto3
-          from botocore.config import Config
-          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(connect_timeout=5,read_timeout=10,retries={'total_max_attempts':1},s3={'addressing_style':'path'}))
-          prefix='research/sqlite-cutover/v1/41808108303/';bucket='trading-dbd-backups-2026'
-          try:
-              listing=client.list_objects_v2(Bucket=bucket,Prefix=prefix,MaxKeys=4)
-              images=[]
-              for obj in listing.get('Contents',[]):
-                  kind=obj['Key'].removeprefix(prefix).split('/')[0]
-                  if kind not in ('original','hot'):continue
-                  h=client.head_object(Bucket=bucket,Key=obj['Key'])
-                  images.append({'kind':kind,'compressed_size_bytes':h['ContentLength'],'database_size_bytes':int({str(k).lower():str(v) for k,v in h.get('Metadata',{}).items()}.get('database-size','0'))})
-              print('CURRENT_CLOUD_IMAGES',json.dumps(images),flush=True)
+          from urllib.parse import urlsplit
+          ROOT=Path('/opt/seiltanzer');DATA=ROOT/'data'
+          def command(args,timeout=30,env=None):
+              p=subprocess.run(args,capture_output=True,text=True,timeout=timeout,env=env)
+              if p.returncode:
+                  print('COMMAND_FAILURE',json.dumps({'program':args[0],'exit_code':p.returncode}),flush=True)
+                  raise RuntimeError('BOUNDED_MAINTENANCE_COMMAND_FAILED')
+              return p.stdout
+          expected=os.environ['EXPECTED_SHA'];epoch=os.environ['NATIVE_RUN_ID']
+          assert command(['git','-C',str(ROOT),'rev-parse','HEAD']).strip()==expected
+          journal=json.loads((DATA/('json-rebuild-'+epoch)/'cutover.journal.json').read_text())
+          assert journal['run_id']==epoch and journal['phase']=='COMMITTED' and journal['service_started'] is True
+          assert not os.path.lexists(DATA/'cutover.active')
+          assert __import__('shutil').disk_usage(DATA).free>2*1024**3
+          proof=json.loads(command(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(DATA/'trades.db'),'--application-root',str(ROOT)],20))
+          assert proof['start_allowed'] is True
+          with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as r:assert r.status==200
+          pid=command(['systemctl','show','seiltanzer','-p','MainPID','--value']).strip()
+          assert pid.isdigit() and int(pid)>0
+          config=dict(x.split('=',1) for x in Path('/proc',pid,'environ').read_text().split('\0') if '=' in x)
+          proxy=config.get('OPENROUTER_PROXY','');key=config.get('OPENROUTER_API_KEY','')
+          assert key and urlsplit(proxy).scheme in ('socks5','socks5h')
+          assert urlsplit(proxy).hostname in ('127.0.0.1','localhost','::1')
+          before=command(['dpkg-query','-W','-f=${Version}','tor']).strip()
+          minimum='0.4.9~'
+          def supported(version):
+              return subprocess.run(['dpkg','--compare-versions',version,'ge',minimum]).returncode==0
+          print('TOR_VERSION_BEFORE',before,flush=True)
+          if not supported(before):
+              command(['apt-get','-o','Acquire::Retries=2','-o','Acquire::http::Timeout=10','-o','Acquire::https::Timeout=10','update'],150)
+              policy=command(['apt-cache','policy','tor'])
+              candidate=next(line.split(':',1)[1].strip() for line in policy.splitlines() if 'Candidate:' in line)
+              assert supported(candidate),'SUPPORTED_TOR_NOT_AVAILABLE_FROM_CONFIGURED_REPOSITORIES'
+              simulation=command(['apt-get','-s','--only-upgrade','--no-install-recommends','install','tor='+candidate,'tor-geoipdb'])
+              packages=[line.split()[1].split(':')[0] for line in simulation.splitlines() if line.startswith('Inst ')]
+              assert packages and set(packages)<={'tor','tor-geoipdb'},'UNRELATED_PACKAGE_CHANGE_REFUSED'
+              assert not any(line.startswith('Remv ') for line in simulation.splitlines())
+              print('TOR_UPGRADE_PLAN',json.dumps({'candidate':candidate,'packages':packages}),flush=True)
+              maintenance_env={**os.environ,'DEBIAN_FRONTEND':'noninteractive','NEEDRESTART_MODE':'l'}
+              command(['apt-get','-y','--only-upgrade','--no-install-recommends','-o','DPkg::Lock::Timeout=20','-o','Dpkg::Options::=--force-confold','install','tor='+candidate,'tor-geoipdb'],180,maintenance_env)
+          after=command(['dpkg-query','-W','-f=${Version}','tor']).strip()
+          assert supported(after)
+          command(['systemctl','restart','tor@default.service'],30)
+          print('TOR_VERSION_AFTER',after,flush=True)
+          from curl_cffi import requests,CurlOpt
+          import certifi
+          deadline=time.monotonic()+100;status=None;error=None
+          while time.monotonic()<deadline:
               try:
-                  uploads=client.list_multipart_uploads(Bucket=bucket,Prefix=prefix,MaxUploads=4)
-                  progress=[]
-                  for item in uploads.get('Uploads',[]):
-                      kind=item['Key'].removeprefix(prefix).split('/')[0]
-                      if kind not in ('original','hot'):continue
-                      parts=client.list_parts(Bucket=bucket,Key=item['Key'],UploadId=item['UploadId'],MaxParts=1000)
-                      progress.append({'kind':kind,'uploaded_parts':len(parts.get('Parts',[])),'uploaded_compressed_bytes':sum(p['Size'] for p in parts.get('Parts',[])),'truncated':parts.get('IsTruncated',False)})
-                  print('CURRENT_CLOUD_MULTIPART',json.dumps(progress),flush=True)
-              except Exception as exc:print('CURRENT_MULTIPART_INSPECTION_ERROR',type(exc).__name__,flush=True)
-          except Exception as exc:
-              print('CURRENT_CLOUD_INSPECTION_ERROR',type(exc).__name__,flush=True)
-          CLOUD
+                  with requests.Session(trust_env=False,verify=certifi.where(),curl_options={CurlOpt.NOPROXY:''}) as c:
+                      response=c.get('https://openrouter.ai/api/v1/auth/key',headers={'Authorization':'Bearer '+key},proxy=proxy,timeout=8,allow_redirects=False)
+                      status=response.status_code
+                  if status==200:break
+                  if status in (401,403):break
+              except Exception as exc:error=type(exc).__name__
+              time.sleep(3)
+          print('PROVIDER_AUTH_RESULT',json.dumps({'http':status,'exception_class':error,'provider_calls_with_inference':0}),flush=True)
+          assert status==200,'CONFIGURED_PROVIDER_AUTH_NOT_READY'
+          assert command(['systemctl','show','seiltanzer','-p','MainPID','--value']).strip()==pid
+          with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as r:assert r.status==200
+          print('PROVIDER_REPAIR_RESULT',json.dumps({'installed_sha':expected,'app_pid':pid,'app_restarts':0,'db_writes':0,'acks':0,'orders':0,'provider_auth_http':status}),flush=True)
+          
+          PY
+          python3 - "$RUNNER_TEMP/repair-tor.py" <<'PY'
+          import sys,os,base64
+          from pathlib import Path
+          raw=Path(sys.argv[1]).read_bytes()
+          compile(raw,sys.argv[1],'exec')
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write('REPAIR_SCRIPT_B64='+base64.b64encode(raw).decode()+'\n')
+          print('Maintenance syntax verified; production prerequisites remain enforced remotely.')
+          PY
       - uses: appleboy/ssh-action@v1
+        env:
+          REPAIR_SCRIPT_B64: ${{ env.REPAIR_SCRIPT_B64 }}
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
+          command_timeout: 10m
+          envs: EXPECTED_SHA,NATIVE_RUN_ID,REPAIR_SCRIPT_B64
           script: |
-            /usr/bin/python3 -B -u - <<'PY'
-            import pathlib,subprocess,json,hashlib,shutil,urllib.request
-            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
-            print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStatus','-p','Result'],text=True).strip(),flush=True)
-            actual=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
-            source=(root/'scripts/history_service_fence.py').read_bytes()
-            print('GUARD_CODE_MATCH',actual==source,flush=True)
-            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
-            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
-              p=data/name
-              if not p.exists():print('EPOCH_METADATA',name,'ABSENT',flush=True);continue
-              v=json.loads(p.read_text())
-              print('EPOCH_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','phase','service_started')}),flush=True)
-            run_id='41808108303';metadata=data/('json-rebuild-'+run_id)
-            for name in ('cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json','cutover.request.json','cutover.plan.json'):
-              p=metadata/name
-              if not p.exists():print('JSON_METADATA',name,'ABSENT',flush=True);continue
-              v=json.loads(p.read_text())
-              print('JSON_METADATA',name,json.dumps({k:v.get(k) for k in ('run_id','phase','service_started','abort_reason','admitted','free_bytes','required_free_bytes','started_wall_ts')}),flush=True)
-              if name in ('cutover.request.json','cutover.plan.json'):print('PLANNED_IMAGE_BYTES',json.dumps({k:(v.get(k) or {}).get('database_size_bytes') for k in ('original','hot')}),flush=True)
-            print('JSON_OWNER',subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','LoadState','-p','ActiveState','-p','SubState','-p','MainPID','-p','Result','-p','ExecMainStatus'],text=True).strip(),flush=True)
-            print('COLD_JOURNAL_DIGEST',hashlib.sha256((data/'cutover.journal.json').read_bytes()).hexdigest(),flush=True)
-            owner_pid=int(subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','MainPID','--value'],text=True).strip())
-            if owner_pid:
-              proc=pathlib.Path('/proc')/str(owner_pid)
-              try:
-                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
-                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
-                print('OWNER_PROCESS',json.dumps({'pid':owner_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
-              except FileNotFoundError:print('OWNER_PROCESS','FINISHED',flush=True)
-            try:
-              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
-            except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
-            import sys
-            sys.path.insert(0,str(root))
-            from scripts.history_production_control import database_handles
-            readers=[]
-            for handle in database_handles(data/'trades.db',exclude_pid=owner_pid):
-              try:
-                io=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(handle['pid'])/'io').read_text().splitlines())
-                readers.append({'pid':handle['pid'],'writable':handle['writable'],'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes'])})
-              except FileNotFoundError:pass
-            print('EXTERNAL_DATABASE_HANDLES',json.dumps(readers),flush=True)
-            import re
-            recent=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-11-04 10:50:00 UTC','-n','150','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)
-            for line in recent.stdout.splitlines():
-              if re.fullmatch(r'STARTUP_PHASE phase=[a-z.]+ elapsed_sec=[0-9.]+',line):
-                print('CURRENT_STARTUP',line,flush=True)
-            app_pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip())
-            if app_pid:
-              try:
-                proc=pathlib.Path('/proc')/str(app_pid)
-                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
-                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
-                print('APP_PROCESS',json.dumps({'pid':app_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
-              except FileNotFoundError:pass
-            PY
-# Read-only epoch observation 3
-# Read-only epoch observation 5
-
-# Read-only epoch observation 21
-
-# Current installed release: 32e1058b786fae902ff55e89b1bb6fd1d301adaf
-# One active native epoch: 41808108303; original source frozen, not yet replaced at last observation.
-# Preparation deadline 2026-11-04T11:19:17.178Z; hard deadline 2026-11-04T12:49:17.178Z. Never extend either clock.
-# Cold journal SHA256 remains 2931ab09b14d1f86a82e89238af8630684fc368c21f74a9b4ee885ae9481a6f0.
-# Publications run concurrently: observing either upload does not prove either full GET.
-# Local development environment unavailable; remote owner and hosted worker remain independent.
-
-# Read-only syntax validation and epoch observation after continuation.
-
-# Native epoch COMMITTED/service_started=true and HTTP200 observed10:58:30UTC. Provider maintenance isolated in run 41817855746.
+            set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
+            umask 077
+            repair_dir=$(mktemp -d /run/seiltanzer-provider-repair.XXXXXX)
+            trap 'rm -rf -- "$repair_dir"' EXIT
+            printf '%s' "$REPAIR_SCRIPT_B64" | base64 -d > "$repair_dir/repair.py"
+            /opt/seiltanzer/.venv/bin/python -B -u "$repair_dir/repair.py"
