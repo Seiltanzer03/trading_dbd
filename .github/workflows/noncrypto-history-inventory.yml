@@ -5,11 +5,28 @@ on:
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
+  actions: write
 jobs:
   inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
+      - name: Retire only identified superseded queued unsafe deployments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const targets = [[37655532741,'9cb20e4dfdb63d11cda3863415b7d52617d0d213'],[31116129535,'585336fcc86f54deb2be29fda9a434438f156abe']];
+            for (const [run_id,sha] of targets) {
+              const params = {owner:context.repo.owner,repo:context.repo.repo,run_id};
+              const {data:run} = await github.rest.actions.getWorkflowRun(params);
+              if (run.head_sha!==sha || run.path!=='.github/workflows/deploy.yml') throw new Error('identified obsolete run changed');
+              if (run.status==='completed') {core.info('OBSOLETE_DEPLOY_ALREADY_TERMINAL '+run_id+' '+run.conclusion); continue;}
+              if (run.status!=='queued') throw new Error('obsolete deployment is no longer queued; inspect before action');
+              const {data:jobs} = await github.rest.actions.listJobsForWorkflowRun({...params,filter:'latest',per_page:100});
+              if (jobs.jobs.some(job=>job.status==='in_progress')) throw new Error('running obsolete job requires separate investigation');
+              await github.rest.actions.cancelWorkflowRun(params);
+              core.info('IDENTIFIED_SUPERSEDED_DEPLOY_CANCEL_REQUESTED '+run_id);
+            }
       - uses: actions/checkout@v4
       - name: Validate prepared maintenance and canonical acceptance without executing them
         run: |
