@@ -30,8 +30,12 @@ jobs:
               connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,32*1024**2)
               deadline=time.monotonic()+2
               connection.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-              rows=connection.execute('SELECT report_name,length(CAST(payload_json AS BLOB)),duration_ms FROM g1s_evidence_materializations ORDER BY report_name LIMIT 10').fetchall()
-              print('MATERIALIZED_REPORT_SIZES',json.dumps([{'report':r[0],'serialized_bytes':r[1],'last_build_ms':r[2]} for r in rows]),flush=True)
+              rows=connection.execute('SELECT rowid,report_name,duration_ms FROM g1s_evidence_materializations ORDER BY report_name LIMIT 10').fetchall()
+              sizes=[]
+              for row_id,name,duration in rows:
+                with connection.blobopen('g1s_evidence_materializations','payload_json',row_id,readonly=True) as blob:
+                  sizes.append({'report':name,'serialized_bytes':len(blob),'last_build_ms':duration})
+              print('MATERIALIZED_REPORT_SIZES',json.dumps(sizes),flush=True)
             except Exception as error:print('REPORT_SIZE_UNAVAILABLE',type(error).__name__,flush=True)
             finally:connection.close()
             print('READ_ONLY_NO_DB_WRITES_NO_RESTART',flush=True)
