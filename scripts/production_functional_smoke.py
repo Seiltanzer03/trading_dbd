@@ -453,6 +453,21 @@ def request_ai_verdict():
         time.sleep(1.)
 
 
+def verify_execution_reconciliation_contract(body, position):
+    """A factual execution block is distinct from an available AI opinion."""
+    from seiltanzer.ai_api import AI_API_VERSION
+    assert body['ok'] is False and body['api_version'] == AI_API_VERSION
+    assert body['error']['code'] == 'broker_reconciliation_required'
+    assert body['error']['retriable'] is False
+    assert 'verdict' not in body and 'management_decision' not in body
+    context = body['reconciliation']
+    assert context['required'] is True and context['broker_state_verified'] is False
+    assert context['trade_id'] == position['trade_id']
+    assert context['commands'] and context == position['execution_reconciliation']
+    identities = [c['decision_id'] for c in context['commands']]
+    assert len(set(identities)) == len(identities) and all(isinstance(x, str) and x for x in identities)
+
+
 def verify_ai_verdict() -> None:
     verify_management_ack_guard_contract()
     verify_trade_settlement_contract()
@@ -469,6 +484,11 @@ def verify_ai_verdict() -> None:
         print(f"AI_REVIEW_RESULT: {code} final_request_ms={elapsed:.0f}")
         assert elapsed < AI_VERDICT_MAX_MS, (elapsed, AI_VERDICT_MAX_MS, code, body)
         assert code != 504, body
+        if code == 409 and ((body or {}).get('error') or {}).get('code') == 'broker_reconciliation_required':
+            position = assert_route('/api/position')
+            verify_execution_reconciliation_contract(body, position)
+            print('AI_VERDICT_RECONCILIATION_CONTRACT PASS new_command=False broker_state_verified=False llm_availability_not_proven=True')
+            break
         if (code == 503 and isinstance(body, dict)
                 and isinstance(body.get("error"), dict)
                 and body["error"].get("code") == "authoritative_price_unavailable"):

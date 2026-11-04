@@ -4,6 +4,8 @@ Credentials and signed URLs are private workflow inputs. Public artifacts bind
 only actual byte identities, preserved history pins and measured outcomes.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor,as_completed
+from contextlib import suppress
 import hashlib
 import json
 import os
@@ -20,6 +22,12 @@ from scripts.publish_history_image import publish_image,yandex_image_client
 from scripts.sqlite_history_partition import _identity
 from scripts.sqlite_json_rebuild import rebuild_snapshot
 from scripts.history_storage_loader import history_state
+
+
+def _publication_staging_bytes(sizes):
+    # Two immutable raw files already exist. Reserve both complete worst-case
+    # gzip outputs together, even when the packers allocate concurrently.
+    return sum(size*101//100+65536 for size in sizes)+2*1024**3
 
 
 def make_plan(original,hot,built,*,source_proof,run_id,application_sha,receipts):
@@ -121,7 +129,8 @@ def run(*,expected_sha,run_id,directory,resume=False):
         before=_capacity(client)
         if state is None:
             if not resume:_probe_api(client)
-            if shutil.disk_usage(directory).free<3*before['database_size_bytes']+2*1024**3:
+            size=before['database_size_bytes']
+            if shutil.disk_usage(directory).free<2*size+_publication_staging_bytes((size,size)):
                 raise core.CutoverError('JSON_WORKER_CAPACITY_REFUSED')
         accepted=read('cutover.plan.json')
         handed=accepted is not None
@@ -188,11 +197,25 @@ def run(*,expected_sha,run_id,directory,resume=False):
             identities=dict(original=frozen['source']['identity'],
                             hot={key:built[key] for key in core._IDENTITY_FIELDS})
             receipts={};deadline=time.monotonic()+3600
-            for kind,path in [('original',original),('hot',hot)]:
-                enter('publish_and_readback_'+kind)
-                receipts[kind]=publish_image(path,identities[kind],run_id=run_id,kind=kind,
-                                             client=s3,deadline=deadline)
-                assert_frozen()
+            if shutil.disk_usage(directory).free<_publication_staging_bytes(
+                    identities[kind]['database_size_bytes'] for kind in ('original','hot')):
+                raise core.CutoverError('JSON_PARALLEL_IMAGE_STAGING_RESERVE_REQUIRED')
+            enter('publish_and_readback_both')
+            # Separate clients are constructed on this thread. Publisher jobs
+            # own only local files and cloud I/O; SFTP stays on the parent.
+            other_client=yandex_image_client()
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    pending={pool.submit(publish_image,path,identities[kind],
+                        run_id=run_id,kind=kind,client=s3 if kind=='original' else other_client,
+                        deadline=deadline):kind for kind,path in [('original',original),('hot',hot)]}
+                    for future in as_completed(pending):
+                        receipts[pending[future]]=future.result()
+                        assert_frozen()
+                # The executor joins both jobs on failure too, before the
+                # exception path can request a safe original restart.
+            finally:
+                with suppress(Exception):other_client.close()
             plan=make_plan(original,hot,built,source_proof=proof,run_id=run_id,
                            application_sha=expected_sha,receipts=receipts)
             core._write(directory/'cutover-plan.json',plan)

@@ -16,7 +16,7 @@ class Element {
 globalThis.document = {createElement: (tag) => new Element(tag)};
 const source = fs.readFileSync('seiltanzer/web/js/management_ui.js', 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace('mountG1SEvidencePanel();', '');
-const {mountEdgeManagement, mountArchivedManagement, mountManagementDecision} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const {mountEdgeManagement, mountArchivedManagement, mountManagementDecision, mountBrokerReconciliation} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const protectionPanel = new Element();
 mountManagementDecision(protectionPanel, {policy:'HOLD', execution_status:'not_required',
   stop_execution_context:{recorded_stop_price:3976,proposed_stop_price:4040.41,
@@ -184,3 +184,37 @@ mountEdgeManagement(booleanTypes, {unified_edge_ensemble:{...audit,
 assert.doesNotMatch(booleanTypes.textContent, /0\.0% → 0\.0%/,
   'boolean types must not be coerced to 0.0% numbers');
 console.log('Unified edge audit rendering smoke: PASS');
+
+const reconcilePanel = new Element();
+let receiptCalls = [];
+mountBrokerReconciliation(reconcilePanel, {required:true,trade_id:141,commands:[{
+  decision_id:'legacy-stop',policy:'TIGHTEN_STOP',execution_status:'superseded',
+  parameters:{stop_price:4040.41},issued_at:2000}]}, async (url,body)=>{
+  receiptCalls.push({url,body});return {execution_status:'recommended_not_executed'};
+});
+assert.match(reconcilePanel.textContent,/СВЕРКА С БРОКЕРОМ/);
+assert.match(reconcilePanel.textContent,/legacy-stop/);
+assert.doesNotMatch(reconcilePanel.textContent,/Закрыть 10%|Выполнить стоп/);
+assert.equal(receiptCalls.length,0);
+const findButtons = (el)=>[...(el.tag==='button'?[el]:[]),...el.children.flatMap(findButtons)];
+const receiptButtons = findButtons(reconcilePanel);
+assert.equal(receiptButtons.length,1,'superseded stop only allows factual non-execution');
+await receiptButtons[0].listeners.click();
+assert.equal(receiptCalls.length,1);
+assert.equal(receiptCalls[0].body.executed,false);
+assert.equal(receiptCalls[0].body.decision_id,'legacy-stop');
+const pendingReconcile = new Element();
+const pendingReceipts = [];
+mountBrokerReconciliation(pendingReconcile, {required:true,trade_id:141,commands:[{
+  decision_id:'old-exit',policy:'EXIT',execution_status:'pending_execution'}]},
+  async (url,body)=>{ pendingReceipts.push({url,body});return {execution_status:'executed'}; });
+const confirmedButtons = findButtons(pendingReconcile);
+assert.equal(confirmedButtons.length,2);
+await confirmedButtons[1].listeners.click();
+assert.equal(pendingReceipts.length,0,'missing broker fill never substitutes a market quote');
+const findInputs = (el)=>[...(el.tag==='input'?[el]:[]),...el.children.flatMap(findInputs)];
+findInputs(pendingReconcile)[0].value='4002.29';
+await confirmedButtons[1].listeners.click();
+assert.equal(pendingReceipts.length,1);
+assert.equal(pendingReceipts[0].body.execution_price,4002.29);
+assert.equal(pendingReceipts[0].body.executed,true);

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from .config import INSTRUMENTS, SETUPS, Settings, settings_from_env
 from .decision_research import canonical_snapshot
-from .position_state import EXTENDED_POLICIES, StaleDecisionError
+from .position_state import EXTENDED_POLICIES, StaleDecisionError, BrokerReconciliationRequired
 from .engine import Engine
 from .ai_verdict import build_snapshot, render_policy_report, request_verdict
 from .ai_api import (
@@ -247,6 +247,10 @@ def _assert_unified_review_current(engine, snapshot, trade, audit):
         current_version = engine.position._geometry_version(active, engine.position.state(active))
         if frozen.get('geometry_version') != current_version:
             raise StaleDecisionError('position geometry changed before unified publication')
+        unresolved = engine.position.execution_reconciliation(
+            active, ignore_review_id=snapshot.get('review_id'))
+        if unresolved:
+            raise BrokerReconciliationRequired(unresolved)
         from .ai_snapshot_market_refresh import assert_live_review_compatible
         winner = next((row for row in audit.get('candidates') or []
                        if row.get('candidate_id') == audit.get('selected_candidate_id')), None)
@@ -1309,6 +1313,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from .ai_review_worker import AIReviewWorkerBusy
         req_id = trace.request_id
         from .ai_review_worker import review_executor
+        active = engine.journal.active_trade()
+        unresolved = engine.position.execution_reconciliation(active) if active else None
+        if unresolved:
+            return reconciliation_response(unresolved, req_id)
         if ai_lock.locked() or review_executor().busy:
             return JSONResponse(
                 status_code=429,
@@ -1514,6 +1522,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     active_trade, audit)
             except AIReviewWorkerBusy:
                 raise
+            except BrokerReconciliationRequired as exc:
+                return reconciliation_response(exc.context, req_id)
             except StaleDecisionError as exc:
                 trace.error("stale_decision", exc)
                 materializer = getattr(app.state, 'ai_snapshot_materializer', None)
@@ -1551,13 +1561,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             return JSONResponse(content=body)
 
+    def reconciliation_response(context, req_id):
+        return JSONResponse(status_code=409, content={
+            **ai_error_body('broker_reconciliation_required',
+                'Требуется сверка с брокером: подтвердите фактическую позицию и судьбу прежних команд. '
+                'Новая торговая команда не выдана.', req_id, retriable=False),
+            'reconciliation': context})
+
     @app.post("/api/ai/decision/ack")
     def api_ai_decision_ack(req: ManagementExecution):
         try:
             trade = execution_trade(req.trade_id, req.decision_id, req.executed)
-            tick = engine.tick_payload()
-            execution_price, execution_r = _acknowledged_execution(
-                trade, tick, req.execution_price)
+            execution_price, execution_r = (_acknowledged_execution(
+                trade, engine.tick_payload(), req.execution_price) if req.executed else (None, None))
             if req.decision_id.startswith(("shadow-action-", "management-action-")):
                 acknowledged = engine.position.acknowledge_shadow_action(
                     action_id=req.decision_id, trade=trade, executed=req.executed,
@@ -1580,9 +1596,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_ai_shadow_action_ack(req: ShadowActionExecution):
         try:
             trade = execution_trade(req.trade_id, req.action_id, req.executed)
-            tick = engine.tick_payload()
-            execution_price, execution_r = _acknowledged_execution(
-                trade, tick, req.execution_price)
+            execution_price, execution_r = (_acknowledged_execution(
+                trade, engine.tick_payload(), req.execution_price) if req.executed else (None, None))
             acknowledged = engine.position.acknowledge_shadow_action(
                 action_id=req.action_id, trade=trade, executed=req.executed,
                 execution_price=execution_price, execution_r=execution_r,
@@ -1649,6 +1664,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "position_state": engine.position.state(trade) if trade else None,
             "events": engine.position.events(trade["id"]) if trade else [],
             "shadow_actions": engine.position.shadow_actions(trade["id"]) if trade else [],
+            "execution_reconciliation": engine.position.execution_reconciliation(trade) if trade else None,
             "stop_execution_context": engine.position.stop_execution_context(
                 trade, captured_ts=time.time()) if trade else None,
         }

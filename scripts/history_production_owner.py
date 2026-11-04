@@ -17,6 +17,19 @@ from scripts.sqlite_history_partition import _identity
 HARD_SECONDS = 10800
 START_SECONDS = 900
 POLL_SECONDS = 5
+_HANDOFF_FAILURE_CODES = frozenset({
+    'TRANSACTION_DEADLINE','IMAGE_TRANSFER_DEADLINE','IMAGE_OPEN_FAILED',
+    'IMAGE_NETWORK_READ_FAILED','IMAGE_HTTP_CONTRACT_MISMATCH','IMAGE_IDENTITY_MISMATCH',
+    'SQLITE_QUICK_CHECK_FAILED','HOT_FOREIGN_KEY_CHECK_FAILED','HOT_HISTORY_STATE_REQUIRED',
+    'IMAGE_SIZE_MISMATCH','IMAGE_CHANGED_DURING_VERIFICATION','PREDICTED_RESERVE_REFUSED',
+    'PRIVATE_IMAGE_PLAN_MISMATCH','COMPRESSED_IMAGE_SIZE_MISMATCH','RAW_IMAGE_SIZE_MISMATCH',
+    'INVALID_IMAGE_GZIP_STREAM','IMAGE_REDIRECT_REFUSED',
+})
+
+
+def _handoff_failure_code(error):
+    code=error.args[0] if len(error.args)==1 else None
+    return code if type(code) is str and code in _HANDOFF_FAILURE_CODES else 'UNCLASSIFIED_VERIFICATION_FAILURE'
 
 
 def _abort(root,state,control,reason,*,database=None):
@@ -101,8 +114,10 @@ def _run_owned_epoch(root, *, run_id, application_sha, control,
                         raise core.FencingError('TRANSFER_READERS_NOT_CLOSED')
                 except core.FencingError:
                     prep._lost(root,state)
-                except Exception:
-                    return _abort(root,state,control,'HANDOFF_VERIFICATION_REFUSED',database=database)
+                except Exception as error:
+                    result=_abort(root,state,control,'HANDOFF_VERIFICATION_REFUSED',database=database)
+                    result['handoff_failure_code']=_handoff_failure_code(error)
+                    return result
                 # Immutable accepted plan is durable before changing the epoch
                 # guard. Either side of this boundary can resume safely.
                 core._write(root/'cutover.plan.json',accepted)

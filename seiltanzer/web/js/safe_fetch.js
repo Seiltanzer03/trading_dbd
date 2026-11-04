@@ -74,6 +74,7 @@ async function fetchStructuredOnce(url, init = {}) {
     error.code = parsed.body?.error?.code
       || (typeof parsed.body?.error === 'string' ? parsed.body.error : 'http_error');
     error.retryAfterSec = Number(parsed.body?.retry_after_sec || 0) || 0;
+    error.reconciliation = parsed.body?.reconciliation || null;
     throw error;
   }
   if (!parsed.body || typeof parsed.body !== 'object') {

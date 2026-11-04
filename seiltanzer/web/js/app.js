@@ -20,7 +20,7 @@ import { fetchStructured, aiProviderWarning } from './safe_fetch.js';
 import { mountJournalManagement, totalAfterRemainingExit } from './journal_management.js';
 import {
   mountEdgeManagement, mountManagementDecision, mountShadowWorkingAction,
-  mountArmedShadowActions, mountArchivedManagement,
+  mountArmedShadowActions, mountArchivedManagement, mountBrokerReconciliation,
 } from './management_ui.js';
 
 initTooltips();
@@ -1164,6 +1164,12 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     const status = err.status ? ` · HTTP ${err.status}` : '';
     const req = err.requestId ? `\nID: ${err.requestId}` : '';
     out.textContent = `ИИ-РАЗБОР НЕДОСТУПЕН${status}: ${err.message}${req}`;
+    if (err.code === 'broker_reconciliation_required' && err.reconciliation) {
+      $('#ai-edge-management').replaceChildren();
+      $('#ai-shadow-action').replaceChildren();
+      mountBrokerReconciliation($('#ai-management-execution'), err.reconciliation, apiPost,
+        async () => { await refreshJournalAndSetups(); await refreshArmed(); });
+    }
     if (err.status === 503 && err.code === 'authoritative_price_unavailable'
         && requestTradeId !== null && $('#ai-verdict-text') === out) {
       const errorText = out.textContent;
