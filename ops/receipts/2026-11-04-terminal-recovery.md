@@ -39,3 +39,33 @@ production-ede-v13-audit41821259536 завершился SUCCESS во всех �
 EDE:3960 гипотез,9365 допущенных разрешённых наблюдений по всем10 noncrypto инструментам; stable_candidates=0, passed_all_historical_gates=0, verdict NO MATERIAL SELECTIVE EDGE FOUND. Это результат исследования, а не повод ослаблять допуск. Transition audit1392 гипотез/3 RESEARCH_SIGNAL, стабильность0. Последующий production-active-edge41835770290 SUCCESS: ML и все структурные горизонты15/30/60/120/240 выполнены и опубликованы для exact32. Новая полнота чтения не доказывает прибыльность.
 
 Свежий серверный observer16:56:55UTC(19:56:55МСК): exact32, PID668212, NRestarts0, HTTP200, свободно8,230,629,376B. У worker нет last_error и дискового запрета; acceptance_gate снят. Обнаруженное оставшееся ограничение: memory_pressure_pause, RSS719052KiB(около702MiB), поэтому фоновые исследования уступают память. Порог не повышался, приложение не перезапускалось. Следующая отдельная инженерная задача — установить владельца удерживаемой памяти и ограничить его без ослабления защиты; этот пункт не считать исправленным.
+
+
+## Исправление удерживаемого кэша и текущий выпуск — 4 ноября, 21:47 МСК
+
+PR549 merged e1f4944253127dddc638bdec93b7a8fbbc6080c5, tested tree c3eafd6f5cefb536166b6c3877aa6e00604217d7. Локальный b80930c имеет тот же tree; его baseline0c061c9d равен tree9ad7c587 предыдущего remote main32e1058. Исходный worktree/ветка сохранены.
+
+Установлено конкретное избыточное удержание: большие materialized-отчёты одновременно оставались parsed Python graph и encoded JSON. Размеры observer41883534992: ablation36,899,343B; probability39,446,662B; continuous8,811,961B; calibration7,590,855B. Теперь хранится только encoded-кэш, legacy dict читает его с декодированием по запросу; пять больших HTTP-маршрутов используют preencoded bytes. Пороги, данные, risk/cost/source gates и торговые команды не менялись.
+
+Доказательства: реальные RED retention15,172,043B при wire1,451,872B и мутация nested legacy reader, затем GREEN;33 уникальных профильных случая. Один независимый review0Critical/0Important/1Minor, без повторного review. PR CI41884980642 и main CI41885916055 SUCCESS5257passed/7skipped/13subtests; реальные WebKit/systemd/native/separate-epoch/pinned-SQLite gates зелёные. Deploy41886922109 SUCCESS: exact delivery18:36:57UTC, readiness18:38:18, smoke18:40:06, public/orchestrationSUCCESS; ci/full-webkit и все6production contextsSUCCESS.
+
+Fresh mathematical-edge41889122551 SUCCESS и actual live consumption76trained/40historically supported total,58trained/30supported noncrypto,10instruments/16configured setups. Current inputs не подтверждены; NO_ACTIVE_TRADE_FORECAST_REQUIRED. Sources41889126536 и FOMC41889130100/41889170554 SUCCESS. Предыдущие43/31supported — исторические значения32, не текущий счётчик.
+
+Observer41889172834 SUCCESS: exact e1f494/PID697742/NRestarts0;14 выборок18:38:48–18:45:18UTC после prewarm6/6 отчётов v4. RSS319.98–343.86MiB; swap13.49–16.38MiB; anonymous+swap307.74–334.24MiB. Все memory_pause_active=false, worker_error=false. Все acceptance_pause_active=true; свежий core cycle завершился до выборок, полный maintenance после gate не проверен. Старые материализации: probability~40мин, остальные5~11.8дня; не называть их свежими.
+
+Первый observer41887329853 завершился EXACT_PREWARM_NOT_READY после10мин ожидания; это не результат по памяти. Read-only startup I/O41888797244 подтвердил продвижение read_bytes74.66→75.90GB за20с, PID697742/NRestarts0; принудительного рестарта не было. Повторный sampler выполнен после старта, без изменений продукта.
+
+### Решения реализации и цена ошибки
+
+1. Ruling: выполнить уже согласованный автономный push/PR/merge/exact-SHA release без повторного меню разрешений — авторизация пользователя и AGENTS была явной. Предел: ни брокерских приказов, ни фиктивных fills/ACK, ни новых платных ресурсов.
+2. Ruling: оставить единственный существующий encoded-кэш, декодировать только legacy dict reads, сохранить полные отчёты — это устраняет измеренное постоянное дублирование без eviction/сокращения истории/поднятия порогов. Цена: transient decode allocation/latency при legacy read.
+3. Final ruling: малый final-report legacy decode совместим с текущим3716B отчётом и добавлением backup status; пять больших HTTP-маршрутов остаются preencoded. Цена при росте final-report — дополнительная transient latency/allocation; actual readiness остаётся обязательной.
+4. Final ruling: reviewer не оценивал hosted dependencies/runtime memory; вместо предположения использованы реальные mandatory CI/deploy и14 postwarm samples. Полный maintenance ещё явно открыт; цена ошибочного обобщения — пропуск последующих пиков/пауз, поэтому «вся RAM исправлена» не заявлено.
+5. Completion ruling: принять конкретный duplicate-retention fix после RED→GREEN, full CI, exact-SHA production acceptance, свежего core и postwarm observation. Длительный maintenance и свежесть старых5 материализаций остаются открыты; существующую post-research41889413580 не дублировать и gate не обходить.
+
+### Отложенные мелочи этого пакета
+
+- Комментарии/план местами говорят «HTTP не декодирует» без исключения малого final-report. Фактические пять больших маршрутов не декодируют; поведение малого маршрута сохранено.
+- До этого существовавшее доверие HTTP reader к произвольно испорченному private bytes entry не расширялось; новый legacy reader fail-closed. Это не оправдание ослаблять source/authority.
+
+Глобальное состояние и открытые вопросы обновлены в2026-11-04-global-and-ai-status.md. Все ошибки проекта и новый live AI-разбор решёнными не объявлены.
