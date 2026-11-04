@@ -132,6 +132,14 @@ jobs:
                 status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
                 print('APP_PROCESS',json.dumps({'pid':app_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
               except FileNotFoundError:pass
+            import time
+            try:
+              started=time.monotonic()
+              with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=3) as response:
+                payload=json.loads(response.read(100001))
+              worker=payload.get('worker') or {}
+              print('CURRENT_WORKER',json.dumps({**{k:worker.get(k) for k in ('running','current_phase','core_stage','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','maintenance_running','maintenance_phase','acceptance_gate_active','acceptance_pause_active','acceptance_gate_run_id','memory_pause_active','disk_pause_active')},'last_error_present':worker.get('last_error') is not None,'request_elapsed_ms':round((time.monotonic()-started)*1000)}),flush=True)
+            except Exception as exc:print('CURRENT_WORKER_UNAVAILABLE',type(exc).__name__,flush=True)
             PY
 # Read-only epoch observation 3
 # Read-only epoch observation 5
@@ -146,5 +154,3 @@ jobs:
 # Local development environment unavailable; remote owner and hosted worker remain independent.
 
 # Read-only syntax validation and epoch observation after continuation.
-
-# Guarded postcommit no-restart exact-SHA acceptance isolated in run 41819708724; prior unstarted serialized attempt must be verified cancelled before any host step.
