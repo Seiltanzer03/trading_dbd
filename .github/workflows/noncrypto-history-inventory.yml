@@ -31,3 +31,5 @@ jobs:
           p=data/'research/mathematical_edge_latest.json'\nif p.exists():\n r=json.loads(p.read_text());print('MODELS',json.dumps(dict(published_for_sha=r.get('published_for_sha'),created_ts=r.get('created_ts'))))\n\
           with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
           \ as r:print('LIVE_HTTP',r.status)\n\nPY\n"
+
+# Verify actual installation and service after exact-SHA deployment retry
