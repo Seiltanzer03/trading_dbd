@@ -1,4 +1,4 @@
-name: json-current-epoch-readonly
+name: bounded-memory-report-size-observer
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,66 +8,8 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 7
+    timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
-      - name: Validate prepared maintenance and canonical acceptance without executing them
-        run: |
-          python - <<'PY'
-          import yaml
-          from pathlib import Path
-          repair=yaml.safe_load(Path('ops/prepared-provider-repair-32e1058.yml').read_text())
-          first=repair['jobs']['repair']['steps'][0]['run']
-          code=first.split("<<'PY'\n",1)[1].split("\nPY\n",1)[0]
-          compile(code,'prepared-provider-repair','exec')
-          acceptance=yaml.safe_load(Path('ops/prepared-canonical-acceptance-32e1058.yml').read_text())
-          job=acceptance['jobs']['deploy']
-          assert job['env']['EXPECTED_SHA']=='32e1058b786fae902ff55e89b1bb6fd1d301adaf'
-          assert acceptance['permissions']=={'actions':'write','contents':'read','statuses':'write'}
-          steps=job['steps']
-          delivery=next(x for x in steps if x.get('id')=='delivery')['with']['script']
-          assert 'COMMITTED' in delivery and 'start_allowed' in delivery and 'cutover.active' in delivery
-          assert not any(x in delivery for x in ('git reset','systemctl start','systemctl stop','systemctl restart'))
-          required={'delivery','preacceptance','readiness','mathrefresh','sourcerefresh','fomcrefresh','smoke','public','orchestration'}
-          assert required <= {x.get('id') for x in steps}
-          assert any('Publish exact-SHA production statuses'==x.get('name') and x.get('if')=='always()' for x in steps)
-          print('PREPARED_OPERATIONS_VALIDATED no_production_mutation=true')
-          PY
-      - name: Inspect only cloud images from current native run
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ru-central1
-          AWS_EC2_METADATA_DISABLED: "true"
-        run: |
-          python -m pip -q install 'boto3>=1.36,<2'
-          python - <<'CLOUD'
-          import json,boto3
-          from botocore.config import Config
-          client=boto3.client('s3',endpoint_url='https://storage.yandexcloud.net',region_name='ru-central1',config=Config(connect_timeout=5,read_timeout=10,retries={'total_max_attempts':1},s3={'addressing_style':'path'}))
-          prefix='research/sqlite-cutover/v1/41808108303/';bucket='trading-dbd-backups-2026'
-          try:
-              listing=client.list_objects_v2(Bucket=bucket,Prefix=prefix,MaxKeys=4)
-              images=[]
-              for obj in listing.get('Contents',[]):
-                  kind=obj['Key'].removeprefix(prefix).split('/')[0]
-                  if kind not in ('original','hot'):continue
-                  h=client.head_object(Bucket=bucket,Key=obj['Key'])
-                  images.append({'kind':kind,'compressed_size_bytes':h['ContentLength'],'database_size_bytes':int({str(k).lower():str(v) for k,v in h.get('Metadata',{}).items()}.get('database-size','0'))})
-              print('CURRENT_CLOUD_IMAGES',json.dumps(images),flush=True)
-              try:
-                  uploads=client.list_multipart_uploads(Bucket=bucket,Prefix=prefix,MaxUploads=4)
-                  progress=[]
-                  for item in uploads.get('Uploads',[]):
-                      kind=item['Key'].removeprefix(prefix).split('/')[0]
-                      if kind not in ('original','hot'):continue
-                      parts=client.list_parts(Bucket=bucket,Key=item['Key'],UploadId=item['UploadId'],MaxParts=1000)
-                      progress.append({'kind':kind,'uploaded_parts':len(parts.get('Parts',[])),'uploaded_compressed_bytes':sum(p['Size'] for p in parts.get('Parts',[])),'truncated':parts.get('IsTruncated',False)})
-                  print('CURRENT_CLOUD_MULTIPART',json.dumps(progress),flush=True)
-              except Exception as exc:print('CURRENT_MULTIPART_INSPECTION_ERROR',type(exc).__name__,flush=True)
-          except Exception as exc:
-              print('CURRENT_CLOUD_INSPECTION_ERROR',type(exc).__name__,flush=True)
-          CLOUD
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -76,112 +18,21 @@ jobs:
           command_timeout: 30s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import pathlib,subprocess,json,hashlib,shutil,urllib.request
-            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
-            print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStatus','-p','Result'],text=True).strip(),flush=True)
-            actual=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
-            source=(root/'scripts/history_service_fence.py').read_bytes()
-            print('GUARD_CODE_MATCH',actual==source,flush=True)
-            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
-            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
-              p=data/name
-              if not p.exists():print('EPOCH_METADATA',name,'ABSENT',flush=True);continue
-              v=json.loads(p.read_text())
-              print('EPOCH_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','phase','service_started')}),flush=True)
-            run_id='41808108303';metadata=data/('json-rebuild-'+run_id)
-            for name in ('cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json','cutover.request.json','cutover.plan.json'):
-              p=metadata/name
-              if not p.exists():print('JSON_METADATA',name,'ABSENT',flush=True);continue
-              v=json.loads(p.read_text())
-              print('JSON_METADATA',name,json.dumps({k:v.get(k) for k in ('run_id','phase','service_started','abort_reason','admitted','free_bytes','required_free_bytes','started_wall_ts')}),flush=True)
-              if name in ('cutover.request.json','cutover.plan.json'):print('PLANNED_IMAGE_BYTES',json.dumps({k:(v.get(k) or {}).get('database_size_bytes') for k in ('original','hot')}),flush=True)
-            print('JSON_OWNER',subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','LoadState','-p','ActiveState','-p','SubState','-p','MainPID','-p','Result','-p','ExecMainStatus'],text=True).strip(),flush=True)
-            print('COLD_JOURNAL_DIGEST',hashlib.sha256((data/'cutover.journal.json').read_bytes()).hexdigest(),flush=True)
-            owner_pid=int(subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','MainPID','--value'],text=True).strip())
-            if owner_pid:
-              proc=pathlib.Path('/proc')/str(owner_pid)
-              try:
-                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
-                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
-                print('OWNER_PROCESS',json.dumps({'pid':owner_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
-              except FileNotFoundError:print('OWNER_PROCESS','FINISHED',flush=True)
+            import json,sqlite3,time,pathlib,subprocess
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+            status=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'status').read_text().splitlines() if ':' in line)
+            print('MEMORY_NOW',json.dumps({k:status.get(k,'').strip() for k in ('VmRSS','RssAnon','RssFile','VmSwap')}),flush=True)
+            connection=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
             try:
-              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
-            except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
-            import sys
-            sys.path.insert(0,str(root))
-            from scripts.history_production_control import database_handles
-            readers=[]
-            for handle in database_handles(data/'trades.db',exclude_pid=owner_pid):
-              try:
-                io=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(handle['pid'])/'io').read_text().splitlines())
-                readers.append({'pid':handle['pid'],'writable':handle['writable'],'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes'])})
-              except FileNotFoundError:pass
-            print('EXTERNAL_DATABASE_HANDLES',json.dumps(readers),flush=True)
-            import re
-            recent=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-11-04 10:50:00 UTC','-n','150','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)
-            for line in recent.stdout.splitlines():
-              if re.fullmatch(r'STARTUP_PHASE phase=[a-z.]+ elapsed_sec=[0-9.]+',line):
-                print('CURRENT_STARTUP',line,flush=True)
-            app_pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip())
-            if app_pid:
-              try:
-                proc=pathlib.Path('/proc')/str(app_pid)
-                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
-                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
-                print('APP_PROCESS',json.dumps({'pid':app_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
-              except FileNotFoundError:pass
-            try:
-              pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip())
-              status=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(pid)/'status').read_text().splitlines() if ':' in line)
-              roll=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(pid)/'smaps_rollup').read_text().splitlines() if ':' in line)
-              print('MEMORY_BREAKDOWN',json.dumps({'pid':pid,**{k:status.get(k,'').strip() for k in ('VmRSS','VmData','RssAnon','RssFile','RssShmem','VmSwap')},'rollup':{k:roll.get(k,'').strip() for k in ('Rss','Pss_Anon','Pss_File','Private_Dirty','Anonymous','Swap')}}),flush=True)
-            except Exception as exc:print('MEMORY_BREAKDOWN_ERROR',type(exc).__name__,flush=True)
-            import time
-            try:
-              started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=3) as response:
-                payload=json.loads(response.read(100001))
-              worker=payload.get('worker') or {}
-              print('CURRENT_WORKER',json.dumps({**{k:worker.get(k) for k in ('running','current_phase','core_stage','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','maintenance_running','maintenance_phase','acceptance_gate_active','acceptance_pause_active','acceptance_gate_run_id','memory_pause_active','disk_pause_active')},'last_error_present':worker.get('last_error') is not None,'request_elapsed_ms':round((time.monotonic()-started)*1000)}),flush=True)
-            except Exception as exc:print('CURRENT_WORKER_UNAVAILABLE',type(exc).__name__,flush=True)
+              connection.execute('PRAGMA query_only=ON')
+              connection.execute('PRAGMA trusted_schema=OFF')
+              connection.execute('PRAGMA cache_size=-2048')
+              connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,32*1024**2)
+              deadline=time.monotonic()+2
+              connection.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+              rows=connection.execute('SELECT report_name,length(CAST(payload_json AS BLOB)),duration_ms FROM g1s_evidence_materializations ORDER BY report_name LIMIT 10').fetchall()
+              print('MATERIALIZED_REPORT_SIZES',json.dumps([{'report':r[0],'serialized_bytes':r[1],'last_build_ms':r[2]} for r in rows]),flush=True)
+            except Exception as error:print('REPORT_SIZE_UNAVAILABLE',type(error).__name__,flush=True)
+            finally:connection.close()
+            print('READ_ONLY_NO_DB_WRITES_NO_RESTART',flush=True)
             PY
-      - name: Sample memory across existing worker phases
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 5m
-          script: |
-            /usr/bin/python3 -B -u - <<'PY'
-            import pathlib,subprocess,json,time,urllib.request
-            for index in range(6):
-              pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-              state=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'status').read_text().splitlines() if ':' in line)
-              host=dict(line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if ':' in line)
-              worker={}
-              try:
-                with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=2) as response:
-                  worker=json.loads(response.read(100001)).get('worker') or {}
-              except Exception as error:worker={'read_error_class':type(error).__name__}
-              print('MEMORY_PHASE_SAMPLE',json.dumps({'ts':time.time(),'pid':int(pid),'memory':{k:state.get(k,'').strip() for k in ('VmRSS','RssAnon','RssFile','VmSwap')},'host_available':host.get('MemAvailable','').strip(),'worker':{k:worker.get(k) for k in ('current_phase','core_stage','memory_pause_active','last_started_ts','last_finished_ts','read_error_class')}}),flush=True)
-              if index<5:time.sleep(30)
-            PY
-
-# Read-only epoch observation 3
-# Read-only epoch observation 5
-
-# Read-only epoch observation 21
-
-# Current installed release: 32e1058b786fae902ff55e89b1bb6fd1d301adaf
-# One active native epoch: 41808108303; original source frozen, not yet replaced at last observation.
-# Preparation deadline 2026-11-04T11:19:17.178Z; hard deadline 2026-11-04T12:49:17.178Z. Never extend either clock.
-# Cold journal SHA256 remains 2931ab09b14d1f86a82e89238af8630684fc368c21f74a9b4ee885ae9481a6f0.
-# Publications run concurrently: observing either upload does not prove either full GET.
-# Local development environment unavailable; remote owner and hosted worker remain independent.
-
-# Read-only syntax validation and epoch observation after continuation.
-
-# Bounded read-only memory sampling; no application mutation.
