@@ -1,4 +1,4 @@
-name: bounded-memory-report-size-observer
+name: bounded-post-release-memory-observer
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,35 +8,47 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 19
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 30s
+          command_timeout: 18m
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import json,sqlite3,time,pathlib,subprocess
+            import datetime,json,pathlib,subprocess,time,urllib.request
+            expected='e1f4944253127dddc638bdec93b7a8fbbc6080c5'
+            actual=subprocess.check_output(['git','-C','/opt/seiltanzer','rev-parse','HEAD'],text=True).strip()
+            assert actual == expected, 'EXACT_SHA_MISMATCH'
+            def get(path):
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=4) as response:
+                return json.loads(response.read(1024*1024))
+            deadline=time.monotonic()+600
+            while True:
+              try:
+                evidence=get('/api/research/g1s/evidence-materialization')
+                if evidence.get('cached_snapshot') is True and evidence.get('nonblocking_evidence_version') == 'g1s-evidence-nonblocking-v4-single-cache' and len(evidence.get('reports') or []) == 6:
+                  break
+              except Exception:
+                pass
+              assert time.monotonic() < deadline, 'EXACT_PREWARM_NOT_READY'
+              time.sleep(15)
             pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-            status=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'status').read_text().splitlines() if ':' in line)
-            print('MEMORY_NOW',json.dumps({k:status.get(k,'').strip() for k in ('VmRSS','RssAnon','RssFile','VmSwap')}),flush=True)
-            connection=sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=.5)
-            try:
-              connection.execute('PRAGMA query_only=ON')
-              connection.execute('PRAGMA trusted_schema=OFF')
-              connection.execute('PRAGMA cache_size=-2048')
-              connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,32*1024**2)
-              deadline=time.monotonic()+2
-              connection.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-              rows=connection.execute('SELECT rowid,report_name,duration_ms FROM g1s_evidence_materializations ORDER BY report_name LIMIT 10').fetchall()
-              sizes=[]
-              for row_id,name,duration in rows:
-                with connection.blobopen('g1s_evidence_materializations','payload_json',row_id,readonly=True) as blob:
-                  sizes.append({'report':name,'serialized_bytes':len(blob),'last_build_ms':duration})
-              print('MATERIALIZED_REPORT_SIZES',json.dumps(sizes),flush=True)
-            except Exception as error:print('REPORT_SIZE_UNAVAILABLE',type(error).__name__,flush=True)
-            finally:connection.close()
-            print('READ_ONLY_NO_DB_WRITES_NO_RESTART',flush=True)
+            restarts=subprocess.check_output(['systemctl','show','seiltanzer','-p','NRestarts','--value'],text=True).strip()
+            print('EXACT_RELEASE',json.dumps({'sha':actual,'pid':pid,'restarts':restarts}),flush=True)
+            print('PREWARMED_EVIDENCE',json.dumps({'cached_snapshot':evidence.get('cached_snapshot'),'version':evidence.get('nonblocking_evidence_version'),'reports':[{k:row.get(k) for k in ('report_name','generated_ts','duration_ms','age_sec')} for row in evidence.get('reports',[]) if isinstance(row,dict)]}),flush=True)
+            for sample in range(14):
+              if sample:time.sleep(30)
+              values=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'status').read_text().splitlines() if ':' in line)
+              memory={k:values.get(k,'').strip() for k in ('VmRSS','RssAnon','RssFile','VmSwap')}
+              try:
+                worker=get('/api/research/runtime/worker-status').get('worker') or {}
+                memory.update({k:worker.get(k) for k in ('current_phase','maintenance_phase','last_finished_ts','last_maintenance_finished_ts','memory_pause_active','acceptance_pause_active')})
+                memory['worker_error_present']=bool(worker.get('last_error') or worker.get('last_maintenance_error'))
+              except Exception as error:memory['worker_status_error']=type(error).__name__
+              memory.update({'sample':sample,'utc':datetime.datetime.now(datetime.timezone.utc).isoformat()})
+              print('MEMORY_SAMPLE',json.dumps(memory),flush=True)
+            print('READ_ONLY_NO_DB_WRITES_NO_RESTART_NO_TRADE',flush=True)
             PY
