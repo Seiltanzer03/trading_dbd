@@ -69,7 +69,12 @@ jobs:
           envs: EXPECTED_SHA
           script: |
             set -euo pipefail
+            exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
+            flock -w 15 9
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            git -C /opt/seiltanzer diff --quiet HEAD -- seiltanzer scripts
+            test "$(systemctl is-active seiltanzer)" = active
+            verified_pid=$(systemctl show seiltanzer -p MainPID --value)
             /opt/seiltanzer/.venv/bin/python -B -u - <<'PY'
             import os,json,shutil,subprocess,urllib.request
             from pathlib import Path
@@ -85,6 +90,7 @@ jobs:
             with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as r:assert r.status==200
             print('INSTALLED_RELEASE_AND_NATIVE_COMMIT_VERIFIED',json.dumps({'sha':expected,'free_bytes':shutil.disk_usage(data).free,'app_restarts':0}),flush=True)
             PY
+            test "$(systemctl show seiltanzer -p MainPID --value)" = "$verified_pid"
 
       - name: Pause research for exact-SHA production acceptance
         id: preacceptance
