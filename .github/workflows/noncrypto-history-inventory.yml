@@ -1,31 +1,39 @@
-name: restore-current-approved-source-bundle
+name: bounded-existing-collector-runtime-proof
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
-  actions: write
 jobs:
-  refresh:
+  inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
-      - name: Refresh the existing exact-SHA collector once
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import json,os,urllib.request
-          root='https://api.github.com/repos/Seiltanzer03/trading_dbd'
-          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
-          with urllib.request.urlopen(urllib.request.Request(root+'/git/ref/heads/main',headers=headers),timeout=15) as response:
-              current=json.load(response)['object']['sha']
-          expected='e1f4944253127dddc638bdec93b7a8fbbc6080c5'
-          assert current==expected,'SUPERSEDED_MAIN_NO_DISPATCH'
-          payload=json.dumps({'ref':'main','inputs':{'expected_sha':expected}}).encode()
-          request=urllib.request.Request(root+'/actions/workflows/edge-family-sources.yml/dispatches',data=payload,headers={**headers,'Content-Type':'application/json'},method='POST')
-          with urllib.request.urlopen(request,timeout=15) as response:
-              assert response.status==204
-          print('EXISTING_SOURCE_REFRESH_DISPATCHED expected_sha='+expected)
-          PY
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          script: |
+            cd /opt/seiltanzer
+            PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
+            import json,pathlib,time,urllib.request
+            from seiltanzer.edge_family_sources import build_bundle,SourceBudget
+            path=pathlib.Path('/opt/seiltanzer/data/research/edge_family_sources_latest.json')
+            previous=json.loads(path.read_bytes()) if path.is_file() else {}
+            bundle=build_bundle(previous=previous,budget=SourceBudget(seconds=35))
+            print('HOST_COLLECTOR_PROOF',json.dumps({'captured_ts':bundle.get('captured_ts'),'limits':bundle.get('collection_limits'),'raw_sources':{k:{f:row.get(f) for f in ('fetch_status','http_status','received_ts')} for k,row in (bundle.get('raw_sources') or {}).items()},'errors':bundle.get('errors'),'bytes':len(json.dumps(bundle,separators=(',',':')).encode())}),flush=True)
+            for name in ('xy_v1x.txt','i_v1x.txt'):
+              url='https://stoxx.com/document/Indices/Current/IntradayData/'+name
+              try:
+                with urllib.request.urlopen(url,timeout=5) as response:
+                  raw=response.read(500001)
+                  row={'name':name,'http':response.status,'bytes':len(raw),'type':response.headers.get('Content-Type')}
+                if len(raw)<500000 and 'text/plain' in str(row['type']):
+                  lines=raw.decode('utf-8-sig').splitlines();row.update(header=lines[:2],tail=lines[-3:])
+                print('VDAX_INTRADAY_PROOF',json.dumps(row),flush=True)
+              except Exception as error:print('VDAX_INTRADAY_PROOF',json.dumps({'name':name,'error_type':type(error).__name__,'http':getattr(error,'code',None)}),flush=True)
+            print('NO_REPORT_PUBLISHED_NO_APPLICATION_STATE_CHANGED',flush=True)
+            PY
