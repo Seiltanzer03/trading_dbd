@@ -1,4 +1,4 @@
-name: bounded-existing-collector-runtime-proof
+name: bounded-decision-model-input-trace
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,32 +8,71 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 2m
+          command_timeout: 3m
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import json,pathlib,time,urllib.request
-            from seiltanzer.edge_family_sources import build_bundle,SourceBudget
-            path=pathlib.Path('/opt/seiltanzer/data/research/edge_family_sources_latest.json')
-            previous=json.loads(path.read_bytes()) if path.is_file() else {}
-            bundle=build_bundle(previous=previous,budget=SourceBudget(seconds=35))
-            print('HOST_COLLECTOR_PROOF',json.dumps({'captured_ts':bundle.get('captured_ts'),'limits':bundle.get('collection_limits'),'raw_sources':{k:{f:row.get(f) for f in ('fetch_status','http_status','received_ts')} for k,row in (bundle.get('raw_sources') or {}).items()},'errors':bundle.get('errors'),'bytes':len(json.dumps(bundle,separators=(',',':')).encode())}),flush=True)
-            for name in ('xy_v1x.txt','i_v1x.txt'):
-              url='https://stoxx.com/document/Indices/Current/IntradayData/'+name
+            import json,pathlib,sqlite3,threading,time,types
+            from seiltanzer.sqlite_json_payloads import unpack_text
+            from seiltanzer.edge_discovery.ai_context import _latest_frozen_context,canonical_current_feature_map
+            from seiltanzer.active_edge_ai_integration import build_active_edge_context
+            root=pathlib.Path('/opt/seiltanzer/data')
+            conn=sqlite3.connect('file:'+str(root/'trades.db')+'?mode=ro',uri=True,timeout=.1)
+            def row_factory(cursor,row):
+              result={col[0]:value for col,value in zip(cursor.description,row)}
+              for key in ('frozen_features_json','features_json'):
+                if key in result:result[key]=unpack_text(result[key])
+              return result
+            conn.row_factory=row_factory
+            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048');conn.execute('PRAGMA trusted_schema=OFF')
+            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,4*1024**2)
+            runtime=types.SimpleNamespace(_conn=conn,_lock=threading.RLock())
+            engine=types.SimpleNamespace(short_horizon=runtime,settings=types.SimpleNamespace(data_dir=root,ede_context_max_age_sec=900))
+            now=time.time()
+            for code in ('NAS100','SP500','US30','GER40','UK100','JPY100','XAU','XAG','EURUSD','USDCAD'):
+              deadline=time.monotonic()+1.
+              conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
               try:
-                with urllib.request.urlopen(url,timeout=5) as response:
-                  raw=response.read(500001)
-                  row={'name':name,'http':response.status,'bytes':len(raw),'type':response.headers.get('Content-Type')}
-                if len(raw)<500000 and 'text/plain' in str(row['type']):
-                  lines=raw.decode('utf-8-sig').splitlines();row.update(header=lines[:2],tail=lines[-3:])
-                print('VDAX_INTRADAY_PROOF',json.dumps(row),flush=True)
-              except Exception as error:print('VDAX_INTRADAY_PROOF',json.dumps({'name':name,'error_type':type(error).__name__,'http':getattr(error,'code',None)}),flush=True)
-            print('NO_REPORT_PUBLISHED_NO_APPLICATION_STATE_CHANGED',flush=True)
+                passive=conn.execute('SELECT captured_ts FROM passive_market_observations WHERE instrument=? ORDER BY captured_ts DESC LIMIT 1',(code,)).fetchone()
+                frozen=_latest_frozen_context(engine,{'captured_ts':now,'strategy':{'instrument':code}})
+                values=canonical_current_feature_map(frozen,code)
+                available={k:v for k,v in values.items() if v.get('available')}
+                stamp=frozen.get('observation_t0')
+                print('CORE_MODEL_INPUTS',json.dumps({'instrument':code,'passive_age_sec':None if not passive else now-passive['captured_ts'],'frozen_age_sec':None if stamp is None else now-stamp,'registry_metrics':len(values),'available_at_capture':len(available),'within_management_900s':{k:bool(v.get('asof') is not None and 0<=now-v['asof']<=900) for k,v in available.items()},'root_groups':sorted((frozen.get('_raw_frozen') or {}).keys()),'read_reason':frozen.get('_context_read')}),flush=True)
+              except Exception as error:print('CORE_MODEL_INPUTS',json.dumps({'instrument':code,'error_type':type(error).__name__}),flush=True)
+            conn.set_progress_handler(None,0)
+            snapshot={'captured_ts':time.time(),'strategy':{'instrument':'NAS100'}}
+            try:
+              context=build_active_edge_context(engine,snapshot)
+              keys=('measurement_available','available','report_state','source_report_n','expected_report_n','structured_signal_n','ml_signal_n','matched_structured_signal_n','total_active_signal_n','runtime_sha')
+              print('CORE_ACTIVE_EDGE',json.dumps({k:context.get(k) for k in keys}),flush=True)
+            except Exception as error:print('CORE_ACTIVE_EDGE_ERROR',type(error).__name__,flush=True)
+            for name in ['active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)]]:
+              path=root/'research'/name
+              row={'name':name,'exists':path.is_file()}
+              if path.is_file():
+                meta=path.stat();row.update(bytes=meta.st_size,mtime=meta.st_mtime)
+                if meta.st_size<=12000000:
+                  data=json.loads(path.read_bytes());row.update({k:data.get(k) for k in ('created_ts','captured_ts','published_for_sha','contract_version')})
+              print('CORE_ACTIVE_PUBLICATION',json.dumps(row),flush=True)
+            try:
+              row=conn.execute('SELECT payload_json FROM llm_edge_lifecycle_materialized WHERE singleton_id=1 LIMIT 1').fetchone()
+              data=json.loads(row['payload_json']) if row else {}
+              print('CORE_HISTORICAL_LLM',json.dumps({'status':data.get('status'),'updated_ts':data.get('updated_ts'),'keys':sorted(data.keys()),'researcher':{k:v for k,v in (data.get('researcher') or {}).items() if isinstance(v,(bool,int,float))}}),flush=True)
+            except Exception as error:print('CORE_HISTORICAL_LLM_ERROR',type(error).__name__,flush=True)
+            try:
+              row=conn.execute('SELECT ts,model,snapshot_json FROM ai_verdicts ORDER BY id DESC LIMIT 1').fetchone()
+              if row:
+                data=json.loads(row['snapshot_json']);manager=data.get('policy_manager') or {}
+                print('CORE_LAST_ACTUAL_AI_REVIEW',json.dumps({'ts':row['ts'],'model':row['model'],'snapshot_ts':data.get('captured_ts'),'active_edge':{k:(manager.get('active_edge_provisional_weight') or {}).get(k) for k in ('available','reason')},'math':{k:(manager.get('mathematical_edge') or {}).get(k) for k in ('available','reason')},'historical_llm':{k:(manager.get('llm_edge_exploratory_weight') or {}).get(k) for k in ('available','reason')},'family_context':{k:(data.get('edge_family_market_context') or {}).get(k) for k in ('available','reason')},'budget_exclusions':data.get('edge_family_budget_status'),'snapshot_budget':{k:(data.get('snapshot_budget') or {}).get(k) for k in ('degrade_level','degraded','final_bytes')}}),flush=True)
+            except Exception as error:print('CORE_LAST_ACTUAL_AI_REVIEW_ERROR',type(error).__name__,flush=True)
+            conn.close()
+            print('READ_ONLY_EXISTING_INPUTS_NO_NEW_TRADE_NO_ACK_NO_PROVIDER',flush=True)
             PY
