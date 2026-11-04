@@ -119,6 +119,19 @@ jobs:
                 readers.append({'pid':handle['pid'],'writable':handle['writable'],'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes'])})
               except FileNotFoundError:pass
             print('EXTERNAL_DATABASE_HANDLES',json.dumps(readers),flush=True)
+            import re
+            recent=subprocess.run(['journalctl','-u','seiltanzer','--since','2026-11-04 10:50:00 UTC','-n','150','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)
+            for line in recent.stdout.splitlines():
+              if re.fullmatch(r'STARTUP_PHASE phase=[a-z.]+ elapsed_sec=[0-9.]+',line):
+                print('CURRENT_STARTUP',line,flush=True)
+            app_pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip())
+            if app_pid:
+              try:
+                proc=pathlib.Path('/proc')/str(app_pid)
+                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
+                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
+                print('APP_PROCESS',json.dumps({'pid':app_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
+              except FileNotFoundError:pass
             PY
 # Read-only epoch observation 3
 # Read-only epoch observation 5
