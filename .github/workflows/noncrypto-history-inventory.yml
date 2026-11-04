@@ -1,35 +1,60 @@
-name: current-terminal-provider-readonly
+name: resume-verified-closed-syslog-archive
+permissions:
+  contents: read
+concurrency:
+  group: production-seiltanzer
+  queue: max
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: 407999e24b66fab4755776fd76a6d3d67a97efbb
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install existing off-host archive transports
+      run: python -m pip install --quiet 'boto3>=1.36,<2' 'paramiko>=3.3,<6'
+    - name: Rotate only syslog and preserve every byte in the existing private bucket
+      env:
+        SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ru-central1
+        AWS_EC2_METADATA_DISABLED: 'true'
+      run: "python -u - <<'PY'\nimport os,json,tempfile,sys\nfrom pathlib import Path\n\
+        sys.path.insert(0,'scripts')\nfrom production_ede_offload import _connect,_verify_sha\n\
+        from ops_yandex_archive_recovery import remote,copy_to_cloud\nexpected='407999e24b66fab4755776fd76a6d3d67a97efbb'\n\
+        client=_connect(os.environ.pop('SSH_PASSWORD'))\ntry:\n    _verify_sha(client,expected)\n\
+        \    for source in ('/var/log/seiltanzer-capacity-41806233192/syslog.1','/var/log/syslog.1'):\n\
+        \        with tempfile.TemporaryDirectory(prefix='verified-closed-syslog-')\
+        \ as tmp:\n            _,manifest=copy_to_cloud(client,source,expected,Path(tmp))\n\
+        \        code=\"SOURCE=\"+repr(source)+\"\\nmanifest=\"+repr(manifest)+\"\\\
+        n\"\n        code+='import subprocess\\nvalidate(manifest)\\n'\n        code+='def\
+        \ closed(path):\\n    r=subprocess.run([\"lsof\",\"--\",str(path)],capture_output=True,timeout=10)\\\
+        n    if r.returncode not in (0,1):raise ValueError(\"CLOSED_FILE_PROOF_UNAVAILABLE\"\
+        )\\n    return r.returncode==1\\n'\n        code+='p=Path(SOURCE)\\nreceipt=p.with_name(p.name+\"\
+        .cloud-archive.json\")\\n'\n        code+='assert not receipt.is_symlink()\\\
+        nif receipt.exists():\\n    assert json.loads(receipt.read_text())==manifest\\\
+        nelse:\\n    receipt.write_text(json.dumps(manifest,sort_keys=True)+\"\\\\\
+        n\")\\n    receipt.chmod(0o600)\\n'\n        code+='proof=retire_closed_archive(p,manifest,is_closed=closed)\\\
+        nprint(json.dumps(dict(kind=\"verified_cloud_archive\",verified_full_get=manifest[\"\
+        verified_full_get\"],**proof)))\\n'\n        compile(code,'retire-verified-closed-log','exec')\n\
+        \        print(json.dumps(remote(client,code)),flush=True)\n    _verify_sha(client,expected)\n\
+        \    code='import shutil,subprocess,urllib.request\\npid=subprocess.check_output([\"\
+        systemctl\",\"show\",\"seiltanzer\",\"-p\",\"MainPID\",\"--value\"],text=True).strip()\\\
+        nassert pid==\"113273\"\\nfree=shutil.disk_usage(\"/\").free\\nwith urllib.request.urlopen(\"\
+        http://127.0.0.1:8790/api/state\",timeout=5) as r:status=r.status\\nprint(json.dumps(dict(kind=\"\
+        result\",free_after=free,http=status,pid=pid,app_restarts=0,db_writes=0)))\\\
+        n'\n    result=remote(client,code);print(json.dumps(result),flush=True)\n\
+        \    assert result['free_after']>=512*1024**2 and result['http']==200\nfinally:client.close()\n\
+        \nPY\n"
 'on':
   push:
     branches:
     - ops/noncrypto-history-inventory-20261026
     paths:
     - .github/workflows/noncrypto-history-inventory.yml
-permissions:
-  contents: read
-jobs:
-  inspect:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 3
-    steps:
-    - uses: appleboy/ssh-action@v1
-      with:
-        host: 94.241.171.182
-        username: root
-        password: ${{ secrets.SSH_PASSWORD }}
-        command_timeout: 55s
-        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,shutil,pathlib,urllib.request\n\
-          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nr=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
-          try: print('START_GUARD',json.dumps(json.loads(r.stdout)))\nexcept ValueError:\
-          \ print('START_GUARD_EXIT',r.returncode)\nfor n in ('cutover.active','json-history.epoch.json'):\n\
-          \ p=data/n;print('GUARD_METADATA',n,p.exists())\nprint('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
-          print('SERVICE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','MainPID','-p','NRestarts'],text=True).splitlines()))\n\
-          print('CAPACITY',json.dumps(dict(free_bytes=shutil.disk_usage(data).free,database_bytes=(data/'trades.db').stat().st_size)))\n\
-          print('TOR_VERSION',subprocess.check_output(['/usr/bin/tor','--version'],text=True).splitlines()[0])\n\
-          print('TOR_POLICY',subprocess.check_output(['apt-cache','policy','tor'],text=True)[:900])\n\
-          print('TOR_STATE',json.dumps(subprocess.check_output(['systemctl','show','tor@default.service','-p','ActiveState','-p','SubState','-p','NRestarts'],text=True).splitlines()))\n\
-          p=data/'research/mathematical_edge_latest.json'\nif p.exists():\n r=json.loads(p.read_text());print('MODELS',json.dumps(dict(published_for_sha=r.get('published_for_sha'),created_ts=r.get('created_ts'))))\n\
-          with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
-          \ as r:print('LIVE_HTTP',r.status)\n\nPY\n"
-
-# Read-only observer after acknowledged valid two-log archive workflow
