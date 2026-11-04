@@ -17,9 +17,12 @@ jobs:
         host: 94.241.171.182
         username: root
         password: ${{ secrets.SSH_PASSWORD }}
-        command_timeout: 35s
+        command_timeout: 55s
         script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,shutil,pathlib,urllib.request\n\
-          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nprint('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
+          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nr=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
+          try: print('START_GUARD',json.dumps(json.loads(r.stdout)))\nexcept ValueError:\
+          \ print('START_GUARD_EXIT',r.returncode)\nfor n in ('cutover.active','json-history.epoch.json'):\n\
+          \ p=data/n;print('GUARD_METADATA',n,p.exists())\nprint('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
           print('SERVICE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','MainPID','-p','NRestarts'],text=True).splitlines()))\n\
           print('CAPACITY',json.dumps(dict(free_bytes=shutil.disk_usage(data).free,database_bytes=(data/'trades.db').stat().st_size)))\n\
           print('TOR_VERSION',subprocess.check_output(['/usr/bin/tor','--version'],text=True).splitlines()[0])\n\
