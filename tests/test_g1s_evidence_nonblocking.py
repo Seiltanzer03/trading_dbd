@@ -113,7 +113,7 @@ def test_worker_refresh_replaces_process_local_evidence_snapshots():
 def test_missing_process_cache_fails_closed_without_database_fallback():
     runtime = _Runtime()
     install_g1_short_horizon_evidence_nonblocking(runtime)
-    runtime._g1s_evidence_report_cache = {}
+    runtime._g1s_evidence_json_cache = {}
     reads = runtime.report_reads
 
     body = runtime.materialized_evidence_report("calibration_oos")
