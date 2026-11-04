@@ -22,14 +22,15 @@ jobs:
           root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nr=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
           try: print('START_GUARD',json.dumps(json.loads(r.stdout)))\nexcept ValueError:\
           \ print('START_GUARD_EXIT',r.returncode)\nfor n in ('cutover.active','json-history.epoch.json'):\n\
-          \ p=data/n;print('GUARD_METADATA',n,p.exists())\nprint('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
+          \ p=data/n;print('GUARD_METADATA',n,p.exists())\nprint('GUARD_BYTES_EQUAL',(root/'scripts/history_service_fence.py').read_bytes()==pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes())\n\
+          print('TRACKED_SOURCE_CLEAN',subprocess.run(['git','-C',str(root),'diff','--quiet','HEAD','--','seiltanzer','scripts']).returncode==0)\n\
+          print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
           print('SERVICE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','MainPID','-p','NRestarts'],text=True).splitlines()))\n\
           print('CAPACITY',json.dumps(dict(free_bytes=shutil.disk_usage(data).free,database_bytes=(data/'trades.db').stat().st_size)))\n\
           print('TOR_VERSION',subprocess.check_output(['/usr/bin/tor','--version'],text=True).splitlines()[0])\n\
           print('TOR_POLICY',subprocess.check_output(['apt-cache','policy','tor'],text=True)[:900])\n\
           print('TOR_STATE',json.dumps(subprocess.check_output(['systemctl','show','tor@default.service','-p','ActiveState','-p','SubState','-p','NRestarts'],text=True).splitlines()))\n\
           p=data/'research/mathematical_edge_latest.json'\nif p.exists():\n r=json.loads(p.read_text());print('MODELS',json.dumps(dict(published_for_sha=r.get('published_for_sha'),created_ts=r.get('created_ts'))))\n\
-          with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
-          \ as r:print('LIVE_HTTP',r.status)\n\nPY\n"
-
-# Read-only observer after acknowledged final single-log archive
+          try:\n with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
+          \ as r:print('LIVE_HTTP',r.status)\nexcept Exception as e:print('LIVE_HTTP_ERROR',type(e).__name__)\n\
+          \nPY\n"
