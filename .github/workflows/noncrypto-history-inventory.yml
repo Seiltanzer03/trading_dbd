@@ -19,7 +19,9 @@ jobs:
         password: ${{ secrets.SSH_PASSWORD }}
         command_timeout: 55s
         script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,shutil,pathlib,urllib.request\n\
-          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nr=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
+          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nfor p in pathlib.Path('/var/log').iterdir():\n\
+          \ try:\n  st=p.lstat()\n  if p.is_file() and not p.is_symlink() and st.st_size>16*1024**2:print('LOG_FILE',json.dumps(dict(name=p.name,bytes=st.st_size,uid=st.st_uid,gid=st.st_gid,mode=oct(st.st_mode&511))))\n\
+          \ except OSError: pass\nr=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
           try: print('START_GUARD',json.dumps(json.loads(r.stdout)))\nexcept ValueError:\
           \ print('START_GUARD_EXIT',r.returncode)\nfor n in ('cutover.active','json-history.epoch.json'):\n\
           \ p=data/n;print('GUARD_METADATA',n,p.exists())\nprint('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
@@ -31,5 +33,3 @@ jobs:
           p=data/'research/mathematical_edge_latest.json'\nif p.exists():\n r=json.loads(p.read_text());print('MODELS',json.dumps(dict(published_for_sha=r.get('published_for_sha'),created_ts=r.get('created_ts'))))\n\
           with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
           \ as r:print('LIVE_HTTP',r.status)\n\nPY\n"
-
-# Read-only observation following single verified log archive request
