@@ -19,8 +19,12 @@ jobs:
         password: ${{ secrets.SSH_PASSWORD }}
         command_timeout: 55s
         script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,shutil,pathlib,urllib.request\n\
-          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\nr=subprocess.run(['journalctl','-u','seiltanzer','--since','-20\
-          \ minutes','-n','500','--no-pager','-o','cat'],capture_output=True,text=True,timeout=6)\n\
+          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\npid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()\n\
+          if pid!='0':\n try:\n  io=dict(l.split(':',1) for l in pathlib.Path('/proc',pid,'io').read_text().splitlines())\n\
+          \  st=dict(l.split(':',1) for l in pathlib.Path('/proc',pid,'status').read_text().splitlines()\
+          \ if ':' in l)\n  print('STARTUP_PROCESS',json.dumps(dict(pid=pid,rchar=int(io['rchar']),read_bytes=int(io['read_bytes']),write_bytes=int(io['write_bytes']),state=st.get('State','').strip(),rss=st.get('VmRSS','').strip())))\n\
+          \ except FileNotFoundError:pass\nprint('STARTUP_CLOCK',subprocess.check_output(['systemctl','show','seiltanzer','-p','ExecMainStartTimestamp'],text=True).strip())\n\
+          r=subprocess.run(['journalctl','-u','seiltanzer','--since','-20 minutes','-n','500','--no-pager','-o','cat'],capture_output=True,text=True,timeout=6)\n\
           for line in r.stdout.splitlines():\n if line.startswith('STARTUP_PHASE '):print('STARTUP_PROGRESS',line[:250])\n\
           r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
           try: print('START_GUARD',json.dumps(json.loads(r.stdout)))\nexcept ValueError:\
