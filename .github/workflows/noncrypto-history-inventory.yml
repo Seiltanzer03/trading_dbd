@@ -8,7 +8,7 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@v4
       - name: Validate prepared maintenance and canonical acceptance without executing them
@@ -147,6 +147,29 @@ jobs:
               print('CURRENT_WORKER',json.dumps({**{k:worker.get(k) for k in ('running','current_phase','core_stage','core_stage_started_ts','last_started_ts','last_finished_ts','last_duration_ms','maintenance_running','maintenance_phase','acceptance_gate_active','acceptance_pause_active','acceptance_gate_run_id','memory_pause_active','disk_pause_active')},'last_error_present':worker.get('last_error') is not None,'request_elapsed_ms':round((time.monotonic()-started)*1000)}),flush=True)
             except Exception as exc:print('CURRENT_WORKER_UNAVAILABLE',type(exc).__name__,flush=True)
             PY
+      - name: Sample memory across existing worker phases
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 5m
+          script: |
+            /usr/bin/python3 -B -u - <<'PY'
+            import pathlib,subprocess,json,time,urllib.request
+            for index in range(6):
+              pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+              state=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'status').read_text().splitlines() if ':' in line)
+              host=dict(line.split(':',1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if ':' in line)
+              worker={}
+              try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=2) as response:
+                  worker=json.loads(response.read(100001)).get('worker') or {}
+              except Exception as error:worker={'read_error_class':type(error).__name__}
+              print('MEMORY_PHASE_SAMPLE',json.dumps({'ts':time.time(),'pid':int(pid),'memory':{k:state.get(k,'').strip() for k in ('VmRSS','RssAnon','RssFile','VmSwap')},'host_available':host.get('MemAvailable','').strip(),'worker':{k:worker.get(k) for k in ('current_phase','core_stage','memory_pause_active','last_started_ts','last_finished_ts','read_error_class')}}),flush=True)
+              if index<5:time.sleep(30)
+            PY
+
 # Read-only epoch observation 3
 # Read-only epoch observation 5
 
@@ -160,3 +183,5 @@ jobs:
 # Local development environment unavailable; remote owner and hosted worker remain independent.
 
 # Read-only syntax validation and epoch observation after continuation.
+
+# Bounded read-only memory sampling; no application mutation.
