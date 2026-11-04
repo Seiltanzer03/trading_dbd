@@ -9,7 +9,7 @@ the worker path after durable writes.
 HTTP reads never touch SQLite and never trigger full-history/network work.
 Missing or corrupt process-local cache fails closed instead of falling back to a
 request-time database scan. Large evidence payloads are also pre-encoded on the
-worker/startup path so latency-sensitive HTTP routes do not recursively JSON-
+worker/startup path. Only this encoded representation is retained, so latency-sensitive HTTP routes do not recursively JSON-
 encode the same immutable report on every request.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any, Callable
 from .g1_short_horizon_evidence_materialization import REPORT_NAMES
 
 
-NONBLOCKING_EVIDENCE_VERSION = "g1s-evidence-nonblocking-v3-preencoded"
+NONBLOCKING_EVIDENCE_VERSION = "g1s-evidence-nonblocking-v4-single-cache"
 _AGE_PLACEHOLDER = "__G1S_MATERIALIZATION_AGE_SEC__"
 _AGE_MARKER = json.dumps(_AGE_PLACEHOLDER).encode("utf-8")
 
@@ -99,10 +99,6 @@ def _encode_report_template(snapshot: dict[str, Any]) -> tuple[bytes, float | No
 
 
 def _cache_report(runtime: Any, name: str, body: dict[str, Any]) -> None:
-    cache = getattr(runtime, "_g1s_evidence_report_cache", None)
-    if not isinstance(cache, dict):
-        cache = {}
-        runtime._g1s_evidence_report_cache = cache
     snapshot = dict(body) if isinstance(body, dict) else _building(name)
     materialization = snapshot.get("materialization")
     if isinstance(materialization, dict):
@@ -115,7 +111,6 @@ def _cache_report(runtime: Any, name: str, body: dict[str, Any]) -> None:
         snapshot["materialization"] = materialization
     snapshot["request_time_sqlite_access"] = False
     snapshot["materialized_snapshot_cached"] = True
-    cache[str(name)] = snapshot
 
     json_cache = getattr(runtime, "_g1s_evidence_json_cache", None)
     if not isinstance(json_cache, dict):
@@ -160,28 +155,13 @@ def _cache_historical(runtime: Any, body: dict[str, Any]) -> None:
 
 
 def _present_report(runtime: Any, name: str) -> dict[str, Any]:
-    cache = getattr(runtime, "_g1s_evidence_report_cache", None)
-    source = cache.get(str(name)) if isinstance(cache, dict) else None
-    if not isinstance(source, dict):
+    # Only explicit legacy dict consumers reconstruct the full object graph.
+    # HTTP uses the preencoded method directly; no expanded report is retained.
+    try:
+        body = json.loads(_present_report_json(runtime, name))
+    except (ValueError, TypeError, UnicodeError):
         return _building(name)
-    body = dict(source)
-    materialization = body.get("materialization")
-    if isinstance(materialization, dict):
-        materialization = dict(materialization)
-        generated = materialization.get("generated_ts")
-        try:
-            generated_ts = float(generated)
-        except (TypeError, ValueError):
-            generated_ts = None
-        if generated_ts is not None:
-            materialization["age_sec"] = max(0.0, time.time()-generated_ts)
-        materialization["request_time_sqlite_access"] = False
-        materialization["cached_snapshot"] = True
-        materialization["nonblocking_evidence_version"] = NONBLOCKING_EVIDENCE_VERSION
-        body["materialization"] = materialization
-    body["request_time_sqlite_access"] = False
-    body["materialized_snapshot_cached"] = True
-    return body
+    return body if isinstance(body, dict) else _building(name)
 
 
 def _present_report_json(runtime: Any, name: str) -> bytes:
