@@ -1,10 +1,8 @@
-name: installed-execution-guard-acceptance
-'on':
+name: json-current-epoch-readonly
+on:
   push:
-    branches:
-    - ops/noncrypto-history-inventory-20261026
-    paths:
-    - .github/workflows/noncrypto-history-inventory.yml
+    branches: [ops/noncrypto-history-inventory-20261026]
+    paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
 jobs:
@@ -12,48 +10,62 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     steps:
-    - uses: appleboy/ssh-action@v1
-      with:
-        host: 94.241.171.182
-        username: root
-        password: ${{ secrets.SSH_PASSWORD }}
-        command_timeout: 80s
-        script: "/usr/bin/python3 -B -u - <<'PY'\nimport subprocess,json,shutil,pathlib,urllib.request\n\
-          root=pathlib.Path('/opt/seiltanzer');data=root/'data'\npid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()\n\
-          if pid!='0':\n try:\n  io=dict(l.split(':',1) for l in pathlib.Path('/proc',pid,'io').read_text().splitlines())\n\
-          \  st=dict(l.split(':',1) for l in pathlib.Path('/proc',pid,'status').read_text().splitlines()\
-          \ if ':' in l)\n  print('STARTUP_PROCESS',json.dumps(dict(pid=pid,rchar=int(io['rchar']),read_bytes=int(io['read_bytes']),write_bytes=int(io['write_bytes']),state=st.get('State','').strip(),rss=st.get('VmRSS','').strip())))\n\
-          \ except FileNotFoundError:pass\nprint('STARTUP_CLOCK',subprocess.check_output(['systemctl','show','seiltanzer','-p','ExecMainStartTimestamp'],text=True).strip())\n\
-          r=subprocess.run(['journalctl','-u','seiltanzer','--since','-20 minutes','-n','500','--no-pager','-o','cat'],capture_output=True,text=True,timeout=6)\n\
-          for line in r.stdout.splitlines():\n if line.startswith('STARTUP_PHASE '):print('STARTUP_PROGRESS',line[:250])\n\
-          r=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)\n\
-          try: print('START_GUARD',json.dumps(json.loads(r.stdout)))\nexcept ValueError:\
-          \ print('START_GUARD_EXIT',r.returncode)\nfor n in ('cutover.active','json-history.epoch.json'):\n\
-          \ p=data/n;print('GUARD_METADATA',n,p.exists())\nprint('GUARD_BYTES_EQUAL',(root/'scripts/history_service_fence.py').read_bytes()==pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes())\n\
-          print('TRACKED_SOURCE_CLEAN',subprocess.run(['git','-C',str(root),'diff','--quiet','HEAD','--','seiltanzer','scripts']).returncode==0)\n\
-          print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())\n\
-          print('SERVICE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','MainPID','-p','NRestarts'],text=True).splitlines()))\n\
-          print('CAPACITY',json.dumps(dict(free_bytes=shutil.disk_usage(data).free,database_bytes=(data/'trades.db').stat().st_size)))\n\
-          print('TOR_VERSION',subprocess.check_output(['/usr/bin/tor','--version'],text=True).splitlines()[0])\n\
-          print('TOR_POLICY',subprocess.check_output(['apt-cache','policy','tor'],text=True)[:900])\n\
-          print('TOR_STATE',json.dumps(subprocess.check_output(['systemctl','show','tor@default.service','-p','ActiveState','-p','SubState','-p','NRestarts'],text=True).splitlines()))\n\
-          p=data/'research/mathematical_edge_latest.json'\nif p.exists():\n r=json.loads(p.read_text());print('MODELS',json.dumps(dict(published_for_sha=r.get('published_for_sha'),created_ts=r.get('created_ts'))))\n\
-          try:\n with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4)\
-          \ as r:print('LIVE_HTTP',r.status)\nexcept Exception as e:print('LIVE_HTTP_ERROR',type(e).__name__)\n\
-          \n\ntry:\n with urllib.request.urlopen('http://127.0.0.1:8790/api/position',timeout=4)\
-          \ as response:position=json.loads(response.read())\n context=position.get('execution_reconciliation')\n\
-          \ print('ACTUAL_RECONCILIATION',json.dumps(dict(required=bool(context and\
-          \ context.get('required')),trade_id=position.get('trade_id'),unresolved_commands=len((context\
-          \ or {}).get('commands') or []))))\n if context and context.get('required')\
-          \ is True:\n  import urllib.error\n  req=urllib.request.Request('http://127.0.0.1:8790/api/ai/verdict',data=b'',method='POST')\n\
-          \  try:\n   with urllib.request.urlopen(req,timeout=6) as response:code=response.status;body=json.loads(response.read())\n\
-          \  except urllib.error.HTTPError as e:code=e.code;body=json.loads(e.read())\n\
-          \  for _ in range(10):\n   if code!=202:break\n   import time\n   time.sleep(.5)\n\
-          \   poll=body['review_job']['poll_url'];assert __import__('re').fullmatch('/api/ai/reviews/[a-f0-9]{32}',poll)\n\
-          \   try:\n    with urllib.request.urlopen('http://127.0.0.1:8790'+poll,timeout=4)\
-          \ as response:code=response.status;body=json.loads(response.read())\n  \
-          \ except urllib.error.HTTPError as e:code=e.code;body=json.loads(e.read())\n\
-          \  print('ACTUAL_EXECUTION_GUARD',json.dumps(dict(http=code,error_code=(body.get('error')\
-          \ or {}).get('code'),new_command_present='management_decision' in body,verdict_present='verdict'\
-          \ in body)))\nexcept Exception as e:print('ACTUAL_EXECUTION_GUARD_PROBE',type(e).__name__)\n\
-          \nPY\n"
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 30s
+          script: |
+            /usr/bin/python3 -B -u - <<'PY'
+            import pathlib,subprocess,json,hashlib,shutil,urllib.request
+            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
+            print('PRODUCTION_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
+            print('SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStatus','-p','Result'],text=True).strip(),flush=True)
+            actual=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
+            source=(root/'scripts/history_service_fence.py').read_bytes()
+            print('GUARD_CODE_MATCH',actual==source,flush=True)
+            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_size_bytes':(data/'trades.db').stat().st_size}),flush=True)
+            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
+              p=data/name
+              if not p.exists():print('EPOCH_METADATA',name,'ABSENT',flush=True);continue
+              v=json.loads(p.read_text())
+              print('EPOCH_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','phase','service_started')}),flush=True)
+            run_id='41808108303';metadata=data/('json-rebuild-'+run_id)
+            for name in ('cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.capacity.json','cutover.request.json','cutover.plan.json'):
+              p=metadata/name
+              if not p.exists():print('JSON_METADATA',name,'ABSENT',flush=True);continue
+              v=json.loads(p.read_text())
+              print('JSON_METADATA',name,json.dumps({k:v.get(k) for k in ('run_id','phase','service_started','abort_reason','admitted','free_bytes','required_free_bytes','started_wall_ts')}),flush=True)
+              if name in ('cutover.request.json','cutover.plan.json'):print('PLANNED_IMAGE_BYTES',json.dumps({k:(v.get(k) or {}).get('database_size_bytes') for k in ('original','hot')}),flush=True)
+            print('JSON_OWNER',subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','LoadState','-p','ActiveState','-p','SubState','-p','MainPID','-p','Result','-p','ExecMainStatus'],text=True).strip(),flush=True)
+            print('COLD_JOURNAL_DIGEST',hashlib.sha256((data/'cutover.journal.json').read_bytes()).hexdigest(),flush=True)
+            owner_pid=int(subprocess.check_output(['systemctl','show','seiltanzer-json-history-'+run_id+'.service','-p','MainPID','--value'],text=True).strip())
+            if owner_pid:
+              proc=pathlib.Path('/proc')/str(owner_pid)
+              try:
+                io=dict(line.split(':',1) for line in (proc/'io').read_text().splitlines())
+                status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
+                print('OWNER_PROCESS',json.dumps({'pid':owner_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
+              except FileNotFoundError:print('OWNER_PROCESS','FINISHED',flush=True)
+            try:
+              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as r:print('LIVE_STATE_HTTP',r.status,flush=True)
+            except Exception as e:print('LIVE_STATE_HTTP_ERROR',type(e).__name__,flush=True)
+            import sys
+            sys.path.insert(0,str(root))
+            from scripts.history_production_control import database_handles
+            readers=[]
+            for handle in database_handles(data/'trades.db',exclude_pid=owner_pid):
+              try:
+                io=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(handle['pid'])/'io').read_text().splitlines())
+                readers.append({'pid':handle['pid'],'writable':handle['writable'],'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes'])})
+              except FileNotFoundError:pass
+            print('EXTERNAL_DATABASE_HANDLES',json.dumps(readers),flush=True)
+            for receipt_path in (pathlib.Path('/var/log/seiltanzer-capacity-41806233192/syslog.1.cloud-archive.json'),pathlib.Path('/var/log/syslog.1.93a513907c4168dcdee1233c261adb5ae3ceb2d525adff31da0e09c2519981ca.cloud-archive.json')):
+              try:
+                receipt=json.loads(receipt_path.read_text());print('LOG_RECEIPT_VALID',receipt_path.name,receipt.get('verified_full_get') is True,flush=True)
+              except Exception as e:print('LOG_RECEIPT_INVALID',receipt_path.name,type(e).__name__,flush=True)
+            PY
+# Read-only epoch observation 3
+# Read-only epoch observation 5
+
