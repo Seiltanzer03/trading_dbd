@@ -505,6 +505,54 @@ function mountStopExecutionContext(container, protection) {
   }
 }
 
+export function mountBrokerReconciliation(container, context, post, onApplied = () => {}) {
+  container.replaceChildren();
+  if (context?.required !== true) return;
+  appendTextLine(container, 'ai-execution-warning', 'СВЕРКА С БРОКЕРОМ · НОВАЯ КОМАНДА НЕ ВЫДАНА');
+  appendTextLine(container, 'tiny amber',
+    'Проверьте, существует ли позиция и какой стоп установлен. Касание уровня не подтверждает исполнение. Если позиция закрыта, внесите фактическое закрытие в журнал. Прежние команды повторно не выполнять.');
+  for (const command of context.commands || []) {
+    const row = document.createElement('div');
+    appendTextLine(row, 'tiny', `Сохранённая команда ${command.policy} · ${command.decision_id}`);
+    if (command.parameters?.stop_price) appendTextLine(row, 'tiny', `Предложенный стоп: ${command.parameters.stop_price}`);
+    const no = document.createElement('button');
+    no.type = 'button'; no.className = 'btn'; no.textContent = 'После сверки: команда не исполнялась';
+    const status = document.createElement('div');
+    const buttons = [no];
+    const price = document.createElement('input');
+    price.type = 'number'; price.step = 'any'; price.min = '0';
+    const submit = async (executed) => {
+      const fill = finiteNumber(price.value);
+      if (executed && (fill === null || fill <= 0)) {
+        status.textContent = 'Укажите фактическую цену у брокера; текущая котировка не подставляется.'; return;
+      }
+      buttons.forEach(b => { b.disabled = true; });
+      try {
+        await post('/api/ai/decision/ack', {trade_id:context.trade_id,
+          decision_id:command.decision_id, executed,
+          ...(executed ? {execution_price:fill} : {})});
+        status.textContent = 'Фактический результат сохранён. Запросите разбор после сверки остальных команд.';
+        buttons.forEach(b => { b.hidden = true; });
+        await onApplied();
+      } catch (error) {
+        status.textContent = `Не удалось сохранить: ${error.message}`;
+        buttons.forEach(b => { b.disabled = false; });
+      }
+    };
+    no.addEventListener('click', () => submit(false));
+    row.appendChild(no);
+    if (command.execution_status === 'pending_execution') {
+      appendTextLine(row, 'tiny dim',
+        'Только для уже совершённого действия: укажите цену фактического исполнения. Для установленного стопа — текущую цену у брокера. Это запись факта, без отправки приказа.');
+      const yes = document.createElement('button');
+      yes.type = 'button'; yes.className = 'btn'; yes.textContent = 'Записать уже совершённое исполнение';
+      buttons.push(yes); yes.addEventListener('click', () => submit(true));
+      row.append(price, yes);
+    }
+    row.appendChild(status); container.appendChild(row);
+  }
+}
+
 // Pure management-decision UI. The backend remains authoritative.
 export function mountManagementDecision(container, decision, post, onApplied = () => {}) {
   container.replaceChildren();

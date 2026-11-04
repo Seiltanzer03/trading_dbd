@@ -28,6 +28,12 @@ class StaleDecisionError(ValueError):
     """The reviewed economic state no longer matches the live trade."""
 
 
+class BrokerReconciliationRequired(StaleDecisionError):
+    def __init__(self, context):
+        super().__init__('broker_reconciliation_required')
+        self.context = context
+
+
 def _finite(value: Any) -> float | None:
     try:
         out = float(value)
@@ -615,6 +621,42 @@ class PositionLedger:
                 'first_issued_at': row['created_ts'], 'execution_status': row['status'],
                 'role': 'UNRESOLVED_RECOMMENDATION_NON_WIDENING_BOUND'}
 
+    def execution_reconciliation(self, trade: dict, *, ignore_review_id=None) -> dict | None:
+        """Read unresolved published work; absence of an ACK is never a fill."""
+        if trade.get('status') != 'open':
+            return None
+        commands = []
+        with self._lock:
+            for table, key in (('management_decisions', 'decision_id'),
+                               ('llm_shadow_manual_actions', 'action_id')):
+                unresolved = ("status IN ('pending_execution','superseded') AND policy<>'HOLD'"
+                              if table == 'management_decisions' else "status='pending_execution'")
+                rows = self._conn.execute(
+                    f'SELECT {key} AS decision_id,review_id,policy,status,created_ts,payload_json '
+                    f'FROM {table} WHERE trade_id=? AND {unresolved} '
+                    'AND created_ts>=? ORDER BY created_ts DESC LIMIT 32',
+                    (int(trade['id']), _finite(trade.get('opened_at')) or 0.)).fetchall()
+                for row in rows:
+                    if ignore_review_id is not None and row['review_id'] == ignore_review_id:
+                        continue
+                    payload = json.loads(row['payload_json'] or '{}')
+                    commands.append({'decision_id': row['decision_id'], 'policy': row['policy'],
+                        'execution_status': row['status'], 'issued_at': row['created_ts'],
+                        'parameters': payload.get('parameters') or {}})
+            protection = self.stop_execution_context(trade)
+            if protection and not any(c['decision_id'] == protection['action_id'] for c in commands):
+                row = self._conn.execute(
+                    'SELECT review_id FROM llm_shadow_manual_actions WHERE action_id=?',
+                    (protection['action_id'],)).fetchone()
+                if row and (ignore_review_id is None or row['review_id'] != ignore_review_id):
+                    commands.append({'decision_id': protection['action_id'],
+                        'policy': 'UNRESOLVED_STOP', 'execution_status': protection['execution_status'],
+                        'issued_at': protection['first_issued_at'],
+                        'parameters': {'stop_price': protection['proposed_stop_price']}})
+        return {'required': True, 'trade_id': int(trade['id']),
+                'broker_state_verified': False, 'commands': commands,
+                'required_action': 'VERIFY_BROKER_POSITION_AND_RECONCILE_RECEIPTS'} if commands else None
+
     def stop_execution_context(self, trade: dict, *, current_price=None,
                                captured_ts=None) -> dict | None:
         """Recorded protection versus an unresolved proposal, without inferring fills."""
@@ -766,8 +808,7 @@ class PositionLedger:
                                   execution_price=price, execution_r=execution_r)
                 return {"ok": True, "idempotent": False, "action_id": action_id,
                         "execution_status": "executed", "position_state": self.state(trade)}
-            if (row['status'] == 'superseded' and not executed
-                    and row['policy'] in EXTENDED_STOP_POLICIES):
+            if (row['status'] in {'pending_execution', 'superseded'} and not executed):
                 # A factual non-execution receipt is safe even for an old modal.
                 # It cannot authorize stale execution or modify actual geometry.
                 self._conn.execute(
@@ -793,18 +834,6 @@ class PositionLedger:
                     "WHERE action_id=?", (action_id,),
                 )
                 raise StaleDecisionError("trade geometry or position state changed")
-            if not executed:
-                self._conn.execute(
-                    "UPDATE llm_shadow_manual_actions SET status='recommended_not_executed',"
-                    "acknowledged_ts=? WHERE action_id=?", (time.time(), action_id),
-                )
-                self._observe_ack(row, 'recommended_not_executed')
-                return {
-                    "ok": True, "idempotent": False, "action_id": action_id,
-                    "execution_status": "recommended_not_executed",
-                    "position_state": state,
-                }
-
             policy = str(row["policy"])
             parameters = json.loads(row["parameters_json"] or "{}")
             before = float(state["remaining_position_fraction"])
@@ -914,6 +943,17 @@ class PositionLedger:
                         "decision_id": decision_id,
                         "execution_status": "executed",
                         "position_state": self.state(trade)}
+            if (not executed and row["status"] in {"pending_execution", "superseded"}
+                    and row["policy"] in POLICY_EVENTS):
+                self._conn.execute(
+                    "UPDATE management_decisions "
+                    "SET status='recommended_not_executed' WHERE decision_id=?",
+                    (decision_id,))
+                self._observe_ack(row, 'recommended_not_executed')
+                return {"ok": True, "idempotent": False,
+                        "decision_id": decision_id,
+                        "execution_status": "recommended_not_executed",
+                        "position_state": self.state(trade)}
             if row["status"] != "pending_execution":
                 raise StaleDecisionError(f"decision is {row['status']}")
             latest = self._conn.execute(
@@ -928,16 +968,6 @@ class PositionLedger:
                     "UPDATE management_decisions SET status='superseded' "
                     "WHERE decision_id=?", (decision_id,))
                 raise StaleDecisionError("trade geometry or position state changed")
-            if not executed:
-                self._conn.execute(
-                    "UPDATE management_decisions "
-                    "SET status='recommended_not_executed' WHERE decision_id=?",
-                    (decision_id,))
-                self._observe_ack(row, 'recommended_not_executed')
-                return {"ok": True, "idempotent": False,
-                        "decision_id": decision_id,
-                        "execution_status": "recommended_not_executed",
-                        "position_state": state}
             policy = str(row["policy"])
             event_type = POLICY_EVENTS.get(policy)
             if event_type is None:

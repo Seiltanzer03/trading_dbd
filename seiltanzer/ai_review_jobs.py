@@ -11,7 +11,7 @@ import uuid
 from fastapi.responses import JSONResponse
 
 from .ai_api import error_body
-from .position_state import StaleDecisionError
+from .position_state import StaleDecisionError, BrokerReconciliationRequired
 
 _DETACHED = ContextVar('ai_detached_review', default=False)
 _JOB = ContextVar('ai_review_job', default=None)
@@ -120,6 +120,16 @@ class ReviewJobs:
                 await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), 3.)
             except (AIReviewWorkerBusy, asyncio.TimeoutError):
                 return self._pending()
+            except BrokerReconciliationRequired as exc:
+                if job_id != self.job_id:
+                    return await self.poll(job_id)
+                self.invalid = JSONResponse(status_code=409, content={
+                    **error_body('broker_reconciliation_required',
+                        'Требуется сверка с брокером: новая команда не выдана; '
+                        'подтвердите фактическую позицию и судьбу прежних команд.',
+                        'ai-' + self.job_id[:20], retriable=False),
+                    'reconciliation': exc.context})
+                return self.invalid
             except StaleDecisionError:
                 if job_id != self.job_id:
                     return await self.poll(job_id)
