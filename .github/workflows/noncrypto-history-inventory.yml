@@ -132,6 +132,12 @@ jobs:
                 status=dict(line.split(':',1) for line in (proc/'status').read_text().splitlines() if ':' in line)
                 print('APP_PROCESS',json.dumps({'pid':app_pid,'state':status.get('State','').strip(),'rss':status.get('VmRSS','').strip(),'rchar':int(io['rchar']),'read_bytes':int(io['read_bytes']),'write_bytes':int(io['write_bytes'])}),flush=True)
               except FileNotFoundError:pass
+            try:
+              pid=int(subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip())
+              status=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(pid)/'status').read_text().splitlines() if ':' in line)
+              roll=dict(line.split(':',1) for line in (pathlib.Path('/proc')/str(pid)/'smaps_rollup').read_text().splitlines() if ':' in line)
+              print('MEMORY_BREAKDOWN',json.dumps({'pid':pid,**{k:status.get(k,'').strip() for k in ('VmRSS','VmData','RssAnon','RssFile','RssShmem','VmSwap')},'rollup':{k:roll.get(k,'').strip() for k in ('Rss','Pss_Anon','Pss_File','Private_Dirty','Anonymous','Swap')}}),flush=True)
+            except Exception as exc:print('MEMORY_BREAKDOWN_ERROR',type(exc).__name__,flush=True)
             import time
             try:
               started=time.monotonic()
