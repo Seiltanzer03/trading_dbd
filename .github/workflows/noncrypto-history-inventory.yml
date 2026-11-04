@@ -1,67 +1,31 @@
-name: bounded-missing-source-verification
+name: restore-current-approved-source-bundle
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
   contents: read
+  actions: write
 jobs:
-  inspect:
+  refresh:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 2
     steps:
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 3m
-          script: |
-            cd /opt/seiltanzer
-            PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import concurrent.futures,datetime,json,pathlib,time,types,urllib.request
-            from seiltanzer.config import INSTRUMENTS
-            from seiltanzer.data.feeds import _fetch_tradingview_quote
-            from seiltanzer.reference_market_series import fetch_reference_series,validate_reference_series
-            from seiltanzer.passive_learning import _session_state
-            from seiltanzer.edge_family_source_runtime import load_family_source_context
-            root=pathlib.Path('/opt/seiltanzer')
-            def probe(code):
-              inst=INSTRUMENTS[code];start=time.time();out={'instrument':code,'symbol':inst.tradingview_symbol,'archive_session':_session_state(code,start)}
-              try:
-                row=_fetch_tradingview_quote(inst.tradingview_symbol,timeout=5)
-                out['native_quote']={k:row.get(k) for k in ('value','ts','provider_timestamp_verified','update_mode','transport')}
-                out['native_age_sec']=round(time.time()-row['ts'],3)
-              except Exception as error:out['native_error_type']=type(error).__name__
-              try:
-                ref=fetch_reference_series(code,limit=12,timeout=6)
-                out['reference']={k:ref.get(k) for k in ('provider','ticker','observed_ts','received_ts')}
-                out['reference']['runtime_rejection']=validate_reference_series(ref,code,time.time(),runtime=True)
-              except Exception as error:out['reference_error_type']=type(error).__name__
-              return out
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-              for row in pool.map(probe,('GER40','UK100','JPY100')):print('SOURCE_PROBE',json.dumps(row),flush=True)
-            for url in ('https://stoxx.com/document/Indices/Current/HistoricalData/h_v1x.txt','https://www.stoxx.com/document/Indices/Current/HistoricalData/h_v1x.txt'):
-              try:
-                with urllib.request.urlopen(url,timeout=6) as response:
-                  raw=response.read(500001)
-                  row={'url':url,'http':response.status,'bytes':len(raw),'content_type':response.headers.get('Content-Type')}
-                if len(raw)<=500000 and b'Date' in raw[:500]:
-                  lines=raw.decode('utf-8-sig').splitlines()
-                  row.update(header=lines[:3],tail=lines[-3:])
-                print('VDAX_OFFICIAL_PROBE',json.dumps(row),flush=True)
-              except Exception as error:print('VDAX_OFFICIAL_PROBE',json.dumps({'url':url,'error_type':type(error).__name__,'http':getattr(error,'code',None)}),flush=True)
-            body=json.loads((root/'data/research/edge_family_sources_latest.json').read_bytes())
-            print('SOURCE_BUNDLE_FETCH_STATUS',json.dumps({'captured_ts':body.get('captured_ts'),'errors_present':bool(body.get('errors')),'raw_sources':{k:{key:row.get(key) for key in ('fetch_status','http_status','received_ts','error_type')} for k,row in (body.get('raw_sources') or {}).items() if isinstance(row,dict)}}),flush=True)
-            engine=types.SimpleNamespace(settings=types.SimpleNamespace(data_dir=root/'data'))
-            for code in ('NAS100','SP500','US30','GER40','UK100','JPY100','XAU','XAG','EURUSD','USDCAD'):
-              snapshot={'captured_ts':time.time(),'strategy':{'instrument':code}}
-              context=load_family_source_context(engine,snapshot,'e1f4944253127dddc638bdec93b7a8fbbc6080c5')
-              audit=context.get('edge_family_source_bundle_audit') or {}
-              sources=context.get('edge_family_sources') or {}
-              counts={}
-              for item in audit.get('rejected_sources') or []:
-                key=str(item.get('family'))+':'+str(item.get('reason'));counts[key]=counts.get(key,0)+1
-              print('SOURCE_ADMISSION',json.dumps({'instrument':code,'available':audit.get('available'),'reason':audit.get('reason'),'selected':{k:len(v) if isinstance(v,list) else int(bool(v)) for k,v in sources.items()},'rejected_reasons':counts}),flush=True)
-            print('NO_APPLICATION_WRITES_NO_TRADE_NO_ACK_NO_MODEL_SEARCH',flush=True)
-            PY
+      - name: Refresh the existing exact-SHA collector once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json,os,urllib.request
+          root='https://api.github.com/repos/Seiltanzer03/trading_dbd'
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+          with urllib.request.urlopen(urllib.request.Request(root+'/git/ref/heads/main',headers=headers),timeout=15) as response:
+              current=json.load(response)['object']['sha']
+          expected='e1f4944253127dddc638bdec93b7a8fbbc6080c5'
+          assert current==expected,'SUPERSEDED_MAIN_NO_DISPATCH'
+          payload=json.dumps({'ref':'main','inputs':{'expected_sha':expected}}).encode()
+          request=urllib.request.Request(root+'/actions/workflows/edge-family-sources.yml/dispatches',data=payload,headers={**headers,'Content-Type':'application/json'},method='POST')
+          with urllib.request.urlopen(request,timeout=15) as response:
+              assert response.status==204
+          print('EXISTING_SOURCE_REFRESH_DISPATCHED expected_sha='+expected)
+          PY
