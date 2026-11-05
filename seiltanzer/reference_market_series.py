@@ -12,6 +12,7 @@ from .real_input_integrity import simulated_evidence
 
 PROVIDER = 'TradingView chart'
 CONTRACT = 'configured-family-reference-5m-v1'
+MINUTE_CONTRACT = 'configured-decision-reference-1m-v1'
 SYMBOLS = {code: item.tradingview_symbol for code,item in ALL_INSTRUMENTS.items()
            if code not in CRYPTO_INSTRUMENTS and item.tradingview_symbol}
 SYMBOLS.update(XAU='OANDA:XAUUSD',XAG='OANDA:XAGUSD',EURUSD='OANDA:EURUSD',USDCAD='OANDA:USDCAD')
@@ -22,23 +23,26 @@ def number(value):
     return (_finite_number(value) if isinstance(value,(int,float)) and not isinstance(value,bool) else None)
 
 
-def _bar(row):
+def _bar(row,seconds=300):
     if not isinstance(row,list) or len(row)<5:
         raise ValueError('REFERENCE_BAR_SCHEMA_INVALID')
     start,open_,high,low,close = map(number,row[:5])
-    if (any(v is None for v in (start,open_,high,low,close)) or start<=0 or start%300
+    if (any(v is None for v in (start,open_,high,low,close)) or start<=0 or start%seconds
             or min(open_,high,low,close)<=0 or low>min(open_,close) or high<max(open_,close)):
         raise ValueError('REFERENCE_BAR_VALUE_INVALID')
-    return dict(bar_end_ts=start+300,open=open_,high=high,low=low,close=close)
+    return dict(bar_end_ts=start+seconds,open=open_,high=high,low=low,close=close)
 
 
-def validate_reference_series(source,code,cutoff,*,runtime=False):
+def validate_reference_series(source,code,cutoff,*,runtime=False,interval='5m'):
     try:
+        if interval not in ('5m','1m'):return 'REFERENCE_IDENTITY_INVALID'
+        seconds=300 if interval=='5m' else 60
+        contract=CONTRACT if interval=='5m' else MINUTE_CONTRACT
         if (code not in SYMBOLS or number(cutoff) is None or not isinstance(source,dict)
                 or simulated_evidence({k:v for k,v in source.items() if k!='bars'})
-                or source.get('contract_version')!=CONTRACT or source.get('instrument')!=code
+                or source.get('contract_version')!=contract or source.get('instrument')!=code
                 or source.get('provider')!=PROVIDER or source.get('ticker')!=SYMBOLS[code]
-                or source.get('resolved_symbol')!=SYMBOLS[code] or source.get('interval')!='5m'
+                or source.get('resolved_symbol')!=SYMBOLS[code] or source.get('interval')!=interval
                 or source.get('not_broker_execution_bars') is not True
                 or source.get('canonical_execution_quote_replaced') is not False):
             return 'REFERENCE_IDENTITY_INVALID'
@@ -53,12 +57,15 @@ def validate_reference_series(source,code,cutoff,*,runtime=False):
             if not isinstance(row,dict) or simulated_evidence(row):return 'REFERENCE_BAR_INVALID'
             end=number(row.get('bar_end_ts'))
             if end is None:return 'REFERENCE_BAR_INVALID'
-            checked=_bar([end-300,*[row.get(k) for k in ('open','high','low','close')]])
+            checked=_bar([end-seconds,*[row.get(k) for k in ('open','high','low','close')]],seconds)
             if checked!=row or end>min(cutoff,started):return 'REFERENCE_BAR_INVALID'
             ends.append(end)
         if ends!=sorted(set(ends)) or observed!=ends[-1] or not 0<observed<=receipt:
             return 'REFERENCE_CLOCK_INVALID'
-        if runtime and (receipt>cutoff or cutoff-observed>=900 or observed!=(cutoff//300)*300):
+        if interval=='1m' and len(ends)>1 and not any(b-a==60 for a,b in zip(ends,ends[1:])):
+            return 'REFERENCE_MINUTE_CADENCE_UNAVAILABLE'
+        if runtime and (receipt>cutoff or cutoff-observed>=900
+                        or interval=='5m' and observed!=(cutoff//300)*300):
             return 'REFERENCE_LATEST_COMPLETED_BAR_UNAVAILABLE'
     except (ValueError,TypeError,KeyError,OverflowError):
         return 'REFERENCE_INVALID'
@@ -66,12 +73,14 @@ def validate_reference_series(source,code,cutoff,*,runtime=False):
 
 
 def fetch_reference_series(code,*,limit=MAX_BARS,timeout=8.,captured_ts=None,
-                           connect_factory=None,clock=time.time):
+                           connect_factory=None,clock=time.time,interval='5m'):
     if (code not in SYMBOLS or type(limit) is not int or not 1<=limit<=MAX_BARS
-            or number(timeout) is None or not 0<timeout<=20):
+            or number(timeout) is None or not 0<timeout<=20 or interval not in ('5m','1m')):
         raise ValueError('REFERENCE_REQUEST_INVALID')
     if captured_ts is not None and (number(captured_ts) is None or captured_ts<=0):
         raise ValueError('REFERENCE_CUTOFF_INVALID')
+    seconds=300 if interval=='5m' else 60
+    contract=CONTRACT if interval=='5m' else MINUTE_CONTRACT
     from .data.feeds import _tv_frame,_tv_payloads
     if connect_factory is None:
         from websockets.sync.client import connect
@@ -86,7 +95,7 @@ def fetch_reference_series(code,*,limit=MAX_BARS,timeout=8.,captured_ts=None,
         commands=[('set_auth_token',[os.environ.get('TRADINGVIEW_AUTH_TOKEN','unauthorized_user_token')]),
             ('chart_create_session',[session,'']),
             ('resolve_symbol',[session,'sym_1','='+json.dumps(dict(symbol=symbol,adjustment='splits',session='regular'),separators=(',',':'))]),
-            ('create_series',[session,'s1','s1','sym_1','5',limit])]
+            ('create_series',[session,'s1','s1','sym_1',str(seconds//60),limit])]
         for method,params in commands:ws.send(_tv_frame(method,params))
         while time.monotonic()<deadline:
             raw=ws.recv(timeout=max(.1,deadline-time.monotonic()));size+=len(raw.encode() if isinstance(raw,str) else raw)
@@ -114,7 +123,7 @@ def fetch_reference_series(code,*,limit=MAX_BARS,timeout=8.,captured_ts=None,
                     batch=(params[1].get('s1') or {}).get('s') or []
                     if not isinstance(batch,list) or len(batch)>limit:raise ValueError('REFERENCE_ROW_BOUND')
                     for item in batch:
-                        bar=_bar(item.get('v') if isinstance(item,dict) else None);end=bar['bar_end_ts']
+                        bar=_bar(item.get('v') if isinstance(item,dict) else None,seconds);end=bar['bar_end_ts']
                         if end in rows and rows[end]!=bar:raise ValueError('REFERENCE_CONFLICTING_BAR')
                         rows[end]=bar
                         if len(rows)>limit:raise ValueError('REFERENCE_ROW_BOUND')
@@ -125,11 +134,12 @@ def fetch_reference_series(code,*,limit=MAX_BARS,timeout=8.,captured_ts=None,
     if number(receipt) is None or receipt<started:raise ValueError('REFERENCE_RECEIPT_CLOCK_INVALID')
     cutoff=min(started,captured_ts) if captured_ts is not None else started
     bars=[rows[end] for end in sorted(rows) if end<=cutoff]
-    return dict(contract_version=CONTRACT,provider=PROVIDER,instrument=code,ticker=symbol,
-        interval='5m',resolved_symbol=resolved,bars=bars,source_sha256=fingerprint(bars),
+    return dict(contract_version=contract,provider=PROVIDER,instrument=code,ticker=symbol,
+        interval=interval,resolved_symbol=resolved,bars=bars,source_sha256=fingerprint(bars),
         received_ts=receipt,request_started_ts=started,observed_ts=bars[-1]['bar_end_ts'] if bars else None,
         not_broker_execution_bars=True,canonical_execution_quote_replaced=False,
-        reference_scope='INDEPENDENT_FORECAST_REFERENCE_NOT_EXECUTION_QUOTE',
+        reference_scope=('DECISION_METRIC_REFERENCE_NOT_EXECUTION_QUOTE' if interval=='1m' else
+                         'INDEPENDENT_FORECAST_REFERENCE_NOT_EXECUTION_QUOTE'),
         historical_bar_availability='COMPLETED_PROVIDER_BAR_NOT_RECORDED_HISTORICAL_RECEIPT')
 
 
