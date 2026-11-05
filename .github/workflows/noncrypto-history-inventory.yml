@@ -1,4 +1,4 @@
-name: current-model-input-acceptance
+name: decision-metric-stability-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,109 +8,73 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 50
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 3m
+          command_timeout: 45m
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import json,pathlib,sqlite3,subprocess,time,urllib.request
-            expected='b9234b29f3e062889a7dcff84561604778abfc55'
+            import json,os,pathlib,subprocess,time,urllib.request
+            expected='f3298efb4df2be1abfe7e6d2d7680367be9938e7'
+            deadline=time.monotonic()+1500
+            while time.monotonic()<deadline:
+              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+              fresh_process=False;ready=False;pid=None
+              if installed==expected:
+                try:
+                  pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+                  boot=int(next(line.split()[1] for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
+                  start=boot+int(pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[19])/os.sysconf('SC_CLK_TCK')
+                  ref=subprocess.run(['git','symbolic-ref','-q','HEAD'],capture_output=True,text=True).stdout.strip() or 'HEAD'
+                  refpath=pathlib.Path(subprocess.check_output(['git','rev-parse','--git-path',ref],text=True).strip())
+                  commit_clock=int(subprocess.check_output(['git','show','-s','--format=%ct',expected],text=True).strip())
+                  fresh_process=pid!='772479' and start>=max(commit_clock,refpath.stat().st_mtime)
+                  if fresh_process:
+                    with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as response:ready=response.status==200
+                  if fresh_process and ready:break
+                except Exception:pass
+              print('STABILITY_NEW_PROCESS_WAIT',json.dumps({'installed_expected_sha':installed==expected,'pid':pid,'new_process_after_checkout':fresh_process,'http_ready':ready}),flush=True)
+              time.sleep(15)
+            else:raise RuntimeError('EXACT_NEW_PROCESS_NOT_READY_WITHIN_BOUND')
             actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-            print('MODEL_SHA',json.dumps({'expected':expected,'actual':actual,'match':actual==expected}),flush=True)
             assert actual==expected
-            print('MODEL_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'],text=True).strip(),flush=True)
-            root=pathlib.Path('/opt/seiltanzer/data');now=time.time();position={}
-            def read(path):
+            root=pathlib.Path('/opt/seiltanzer/data')
+            def read(route):
               started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:
+              with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=6) as response:
                 raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
-              print('MODEL_HTTP',json.dumps({'path':path,'status':200,'ms':round((time.monotonic()-started)*1000)}),flush=True)
-              return body
-            for route in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status','/api/position'):
-              try:body=read(route)
-              except Exception as error:
-                print('MODEL_HTTP_PENDING',json.dumps({'path':route,'error_type':type(error).__name__}),flush=True);continue
-              if route.endswith('/state'):
-                tick=body['tick'];price=tick['feeds']['price']
-                print('MODEL_CHAIN_FEED',json.dumps({key:(tick['feeds'].get('chain') or {}).get(key) for key in ('status','source','ts','cache_fallback','age_sec')}),flush=True)
-                print('MODEL_LIVE_QUOTE',json.dumps({'instrument':tick['instrument'],**{key:price.get(key) for key in ('status','source','ts','fresh','derived')}}),flush=True)
-              elif route.endswith('worker-status'):
-                print('MODEL_DECISION_INPUTS',json.dumps(body.get('decision_model_inputs')),flush=True)
-                print('MODEL_SOURCE_REFRESH',json.dumps(body.get('decision_family_sources')),flush=True)
-                worker=body.get('worker') or {}
-                print('MODEL_WORKER',json.dumps({key:worker.get(key) for key in ('running','current_phase','core_stage','maintenance_phase','acceptance_pause_active','memory_pressure','memory_pause_active')}),flush=True)
-              elif route.endswith('snapshot/status'):
-                print('MODEL_AI_SNAPSHOT',json.dumps({key:body.get(key) for key in ('ready','building','age_sec','current_trade_id','invalidated_reason','build_ms','family_market_forecasts')}),flush=True)
-              else:
-                position=body
-                reconciliation=body.get('execution_reconciliation') or {}
-                print('MODEL_POSITION_GUARD',json.dumps({'trade_id':body.get('trade_id'),'reconciliation_required':bool(reconciliation),'unresolved_commands':[{key:command.get(key) for key in ('decision_id','policy','execution_status','issued_at','parameters')} for command in reconciliation.get('commands') or []]}),flush=True)
-            for name in ['active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)],'mathematical_edge_latest.json','edge_family_sources_latest.json','edge_family_sources_runtime.json']:
+              return body,round((time.monotonic()-started)*1000,1)
+            deadline=time.monotonic()+600
+            while time.monotonic()<deadline:
+              body,_=read('/api/research/runtime/worker-status');inputs=body.get('decision_model_inputs') or {}
+              state,_=read('/api/state');chain=state['tick']['feeds'].get('chain') or {};now=time.time();stamp=chain.get('ts')
+              if inputs.get('state')=='READY' and inputs.get('available_metrics',0)>=35 and isinstance(stamp,(int,float)) and 0<=now-stamp<=900:break
+              print('STABILITY_WARMING',json.dumps({'inputs':inputs,'chain_status':chain.get('status'),'chain_ts':stamp}),flush=True)
+              time.sleep(15)
+            else:raise RuntimeError('CURRENT_COMPLETE_SOURCE_INPUTS_NOT_READY')
+            samples=[]
+            for index in range(8):
+              body,_=read('/api/research/runtime/worker-status');inputs=body.get('decision_model_inputs') or {}
+              state,latency=read('/api/state');tick=state['tick'];quote=tick['feeds']['price'];chain=tick['feeds'].get('chain') or {};now=time.time()
+              memory=(body.get('worker') or {}).get('memory_pressure') or {}
+              row={'sample':index+1,'observed_ts':now,'instrument':inputs.get('instrument'),'state':inputs.get('state'),'metric_count':inputs.get('metric_count'),'available_metrics':inputs.get('available_metrics'),'metric_capture_ts':inputs.get('captured_ts'),'metric_age_sec':now-inputs['captured_ts'],'ui_tick_ts':tick['ts'],'state_ms':latency,'quote_ts':quote.get('ts'),'quote_status':quote.get('status'),'quote_fresh':quote.get('fresh'),'chain_ts':chain.get('ts'),'chain_status':chain.get('status'),'rss_mib':memory.get('rss_mib'),'memory_pause':memory.get('pause_background'),'source_refresh':body.get('decision_family_sources')}
+              print('STABILITY_SAMPLE',json.dumps(row),flush=True);samples.append(row)
+              if index<7:time.sleep(45)
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts'],text=True).strip()
+            print('STABILITY_SERVICE',pid,flush=True)
+            summary={'samples':len(samples),'span_sec':samples[-1]['observed_ts']-samples[0]['observed_ts'],'available_min':min(row['available_metrics'] for row in samples),'available_max':max(row['available_metrics'] for row in samples),'max_metric_age_sec':max(row['metric_age_sec'] for row in samples),'max_state_ms':max(row['state_ms'] for row in samples),'current_inputs_stable':all(row['state']=='READY' and row['metric_count']==92 and row['available_metrics']>=35 and 0<=row['metric_age_sec']<=55 for row in samples),'live_route_within_3000ms':all(row['state_ms']<3000 for row in samples),'orders_or_ack_sent':False}
+            print('STABILITY_SUMMARY',json.dumps(summary),flush=True)
+            for name in ['mathematical_edge_latest.json','edge_family_sources_latest.json','edge_family_sources_runtime.json','active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)]]:
               path=root/'research'/name;item={'name':name,'exists':path.is_file()}
               if path.is_file() and path.stat().st_size<=12000000:
-                document=json.loads(path.read_bytes());item.update(sha=document.get('published_for_sha'),bytes=path.stat().st_size,age_sec=round(now-path.stat().st_mtime),capture_age_sec=now-document['captured_ts'] if isinstance(document.get('captured_ts'),(int,float)) else None)
-                item['current_generation']=document.get('published_for_sha')==expected
-                if name=='mathematical_edge_latest.json':
-                  item['trained_by_instrument']={code:sum(isinstance(value,dict) and value.get('status')=='TRAINED' for value in rows.values()) for code,rows in (document.get('family_market_models') or {}).items() if isinstance(rows,dict)}
-              print('MODEL_PUBLICATION',json.dumps(item),flush=True)
-            conn=sqlite3.connect('file:'+str(root/'trades.db')+'?mode=ro',uri=True,timeout=.1)
-            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-1024');conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,16000000)
-            deadline=time.monotonic()+1.;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-            try:
-              if position.get('trade_id') is not None:
-                row=conn.execute('SELECT ts,model,snapshot_json FROM ai_verdicts WHERE trade_id=? ORDER BY id DESC LIMIT 1',(position['trade_id'],)).fetchone()
-              else:row=None
-              if row:
-                from seiltanzer.sqlite_json_payloads import unpack_text
-                from seiltanzer.decision_metric_inputs import decision_metric_values
-                snapshot=json.loads(unpack_text(row[2]));manager=snapshot.get('policy_manager') or {};metrics=decision_metric_values(snapshot)
-                shadow=snapshot.get('llm_shadow_decision') or {};contract=shadow.get('input_contract') or {};wire=contract.get('frozen_input_json');packet=json.loads(wire) if isinstance(wire,str) else {}
-                encoded=packet.get('decision_model_metrics') or {}
-                print('MODEL_SAVED_REVIEW',json.dumps({'ts':row[0],'age_sec':now-row[0],'model':row[1],'captured_ts':snapshot.get('captured_ts'),'metrics':None if metrics is None else len(metrics),'available_metrics':None if metrics is None else sum(value.get('available') is True for value in metrics.values()),'llm_status':shadow.get('status'),'provider_input_bytes':len(wire.encode()) if isinstance(wire,str) else None,'provider_metric_count':len(encoded),'provider_metric_provenance':packet.get('decision_model_metric_provenance')}),flush=True)
-                ensemble=manager.get('unified_edge_ensemble') or {}
-                print('MODEL_SAVED_COMPONENTS',json.dumps([{key:value.get(key) for key in ('component_id','available','effective_weight','reason')} for value in ensemble.get('components') or []]),flush=True)
-                profiles={key:{field:(manager.get(key) or {}).get(field) for field in ('available','reason','observed_ts')} for key in ('mathematical_edge','active_edge_provisional_weight','llm_edge_exploratory_weight')}
-                print('MODEL_SAVED_PROFILES',json.dumps(profiles),flush=True)
-                families=(snapshot.get('edge_family_market_context') or {}).get('families') or {}
-                print('MODEL_SAVED_FAMILIES',json.dumps({name:{key:value.get(key) for key in ('available','reason','market_model_trained','forecast_available','forecast_origin_ts')} for name,value in families.items() if isinstance(value,dict)}),flush=True)
-                geometry=snapshot.get('trade_geometry') or {};probabilities={key:geometry.get(key) for key in ('take_first','stop_or_be_first','no_touch')}
-                print('MODEL_SAVED_GEOMETRY',json.dumps(probabilities),flush=True)
-              else:print('MODEL_SAVED_REVIEW','NO_CURRENT_TRADE_REVIEW',flush=True)
-            finally:conn.close()
-            cache=sqlite3.connect('file:'+str(root/'cache.db')+'?mode=ro',uri=True,timeout=.1)
-            cache.execute('PRAGMA query_only=ON');cache.execute('PRAGMA cache_size=-1024')
-            deadline=time.monotonic()+.25;cache.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-            try:
-              for ticker,count,stamp in cache.execute('SELECT ticker,count(*),max(ts) FROM chain_snapshots GROUP BY ticker'):
-                print('MODEL_OPTION_CACHE_AGE',json.dumps({'proxy':ticker,'snapshots':count,'age_sec':time.time()-stamp}),flush=True)
-            finally:cache.close()
-            from types import SimpleNamespace
-            import threading
-            from seiltanzer.config import Settings,INSTRUMENTS
-            from seiltanzer.reference_market_series import fetch_reference_series,validate_reference_series
-            from seiltanzer.decision_metric_inputs import capture_decision_context,pack_decision_metrics,decision_metric_values
-            from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
-            current=read('/api/state')['tick'];code=current['instrument'];quote=current['feeds']['price'];chain=current['feeds'].get('chain') or {}
-            cache=sqlite3.connect('file:'+str(root/'cache.db')+'?mode=ro',uri=True,timeout=.1)
-            cache.execute('PRAGMA query_only=ON');cache.execute('PRAGMA cache_size=-1024')
-            try:record=cache.execute('SELECT ts,data FROM chain_snapshots WHERE ticker=? ORDER BY ts DESC LIMIT 1',(INSTRUMENTS[code].options_proxy,)).fetchone()
-            finally:cache.close()
-            source=fetch_reference_series(code,limit=1800,timeout=5.,interval='1m')
-            clock=time.time();reason=validate_reference_series(source,code,clock,runtime=True,interval='1m')
-            print('MODEL_DIRECT_NATIVE',json.dumps({'bars':len(source['bars']),'reason':reason,'source_receipt':source['received_ts'],'source_observed':source['observed_ts'],'state_tick_ts':current['ts'],'quote_ts':quote['ts'],'capture_now':clock}),flush=True)
-            metrics=json.loads(record[1]) if record else None
-            settings=Settings(data_dir=str(root),demo=False)
-            market=SimpleNamespace(instrument_code=code,demo=False,price=quote,chain={**chain,'metrics':metrics,'ts':record[0] if record else None},daily={},correlation={},intraday_ohlcv=[],intraday_source_authority={},intraday_is_offset=False,decision_minute_reference=source,_intraday_lock=threading.RLock())
-            owner=SimpleNamespace(settings=settings,market=market,passive=SimpleNamespace(settings=settings,cache=None))
-            frozen=capture_market_inputs(owner).market
-            cutoff=time.time();context=capture_decision_context(owner,frozen,captured_ts=cutoff)
-            values=decision_metric_values({'captured_ts':cutoff,'strategy':{'instrument':code},'decision_metric_inputs':pack_decision_metrics(context,code)})
-            print('MODEL_DIRECT_CONTEXT',json.dumps({'count':len(values),'available':sum(v.get('available') is True for v in values.values()),'price_available':(context.get('price_volatility') or {}).get('available'),'price_reason':(context.get('price_volatility') or {}).get('reason'),'option_available':(context.get('option_static') or {}).get('available'),'option_reason':(context.get('option_static') or {}).get('reason'),'option_freeze_reason':getattr(frozen,'option_freeze_reason',None),'minute_freeze_reason':getattr(frozen,'minute_reference_freeze_reason',None),'available_ids':[k for k,v in values.items() if v.get('available')]}),flush=True)
-            print('READ_ONLY_NO_POST_NO_TRADE_NO_ACK_NO_ORDERS_NO_RESEARCH',flush=True)
+                document=json.loads(path.read_bytes());item.update(sha=document.get('published_for_sha'),current=document.get('published_for_sha')==expected,age_sec=time.time()-path.stat().st_mtime)
+              print('STABILITY_PUBLICATION',json.dumps(item),flush=True)
+            position,_=read('/api/position');reconciliation=position.get('execution_reconciliation') or {}
+            print('STABILITY_POSITION',json.dumps({'trade_id':position.get('trade_id'),'reconciliation_required':bool(reconciliation),'commands':reconciliation.get('commands') or []}),flush=True)
+            assert summary['current_inputs_stable'] and summary['live_route_within_3000ms']
             PY
