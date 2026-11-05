@@ -93,7 +93,7 @@ jobs:
           node tests/web/render_budget_smoke.mjs
           node tests/web/llm_edge_researcher_ui_smoke.mjs
       - name: Install Playwright package
-        run: npm install --no-save playwright
+        run: npm install --no-save playwright@1.64.1
       - name: Cache Playwright WebKit
         uses: actions/cache@v4
         with:
