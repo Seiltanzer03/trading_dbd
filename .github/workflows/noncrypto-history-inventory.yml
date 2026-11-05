@@ -96,6 +96,22 @@ jobs:
               body=raw[0] if raw else ''
               parsed=json.loads(body) if body else {}
               print('CORE_OPTION_READER',json.dumps({'rows_read':len(rows),'raw_type':type(body).__name__,'contains_nan':'NaN' in str(body),'contains_infinity':'Infinity' in str(body),'demo':parsed.get('demo'),'keys':sorted(parsed.keys())}),flush=True)
+              from seiltanzer.config import Settings
+              from seiltanzer.decision_metric_inputs import capture_decision_context,pack_decision_metrics,decision_metric_values
+              from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
+              settings=Settings(data_dir=str(root),demo=False)
+              source=rows[-1] if rows else {}
+              with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=5) as response:state=json.load(response)
+              tick=state['tick'];code=tick['instrument']
+              market=SimpleNamespace(instrument_code=code,demo=False,price=tick['feeds']['price'],
+                chain={'metrics':source,'ts':source.get('ts'),'status':'delayed'},daily={},correlation={},
+                intraday_ohlcv=[],intraday_source_authority={},intraday_is_offset=False)
+              owner=SimpleNamespace(settings=settings,market=market,passive=SimpleNamespace(settings=settings,cache=None))
+              frozen=capture_market_inputs(owner).market
+              cutoff=time.time();context=capture_decision_context(owner,frozen,captured_ts=cutoff)
+              values=decision_metric_values({'captured_ts':cutoff,'strategy':{'instrument':code},'decision_metric_inputs':pack_decision_metrics(context,code)})
+              print('CORE_DIRECT_OPTION_CONTEXT',json.dumps({'metrics':len(values),'available':sum(v.get('available') is True for v in values.values()),'freeze_reason':getattr(frozen,'option_freeze_reason',None),'option_static':{k:(context.get('option_static') or {}).get(k) for k in ('available','reason','iv')},'option_v2':{k:(context.get('v2_option_context') or {}).get(k) for k in ('available','reason')},'available_ids':[k for k,v in values.items() if v.get('available')]}),flush=True)
+
             finally:cache.close()
             print('READ_ONLY_NO_NEW_TRADE_NO_ACK_NO_ORDERS_NO_NEW_RESEARCH',flush=True)
             PY
