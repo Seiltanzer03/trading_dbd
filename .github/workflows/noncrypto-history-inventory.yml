@@ -33,11 +33,14 @@ jobs:
             recent=subprocess.check_output(['journalctl','-u','seiltanzer','--since','-30 minutes','--no-pager','-n','180','-o','cat'],text=True)
             for line in recent.splitlines():
               if 'startup' in line.lower() and any(x in line for x in ('storage.','app.','schema.','routes.','boot.')):print('STARTUP_STAGE',line[:900],flush=True)
-            for route in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status'):
+            for route in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status','/api/visual/edge-universe'):
               started=time.monotonic()
               try:
                 with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as response:body=json.loads(response.read(4000000));status=response.status
                 if route.endswith('worker-status'):body={k:body.get(k) for k in ('worker','decision_model_inputs','decision_family_sources')}
+                elif route.endswith('edge-universe'):
+                  features=body.get('canonical_features') or {};items=features.get('items') or {}
+                  body={'instrument':body.get('instrument'),'trade_id':body.get('trade_id'),'observation_t0':features.get('observation_t0'),'total_n':features.get('total_n'),'available_n':features.get('available_n'),'available_ids':[key for key,row in items.items() if row.get('available') and not row.get('stale')],'unavailable':{key:{k:row.get(k) for k in ('reason','availability','source','asof','stale')} for key,row in items.items() if not row.get('available') or row.get('stale')}}
                 elif route.endswith('snapshot/status'):
                   f=body.get('family_market_forecasts') or {};body={k:body.get(k) for k in ('ready','building','age_sec','snapshot_budget','last_error')};body['family_forecasts']={k:f.get(k) for k in ('published_for_sha','available_forecasts_at_capture','families')}
                 else:body={'tick_ts':(body.get('tick') or {}).get('ts'),'instrument':(body.get('tick') or {}).get('instrument'),'feeds':(body.get('tick') or {}).get('feeds')}
@@ -45,3 +48,4 @@ jobs:
               except Exception as error:print('STARTUP_ROUTE_ERROR',route,type(error).__name__,flush=True)
             print('READ_ONLY_RECEIPT',json.dumps({'db_writes':0,'service_restarts':0,'orders':0,'acks':0}),flush=True)
             PY
+
