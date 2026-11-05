@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from seiltanzer import app as app_module
 from seiltanzer.app import _validation_report_from_score
+from seiltanzer.config import Settings
 from seiltanzer.journal import Journal
 
 
@@ -32,7 +33,7 @@ def test_validation_projection_matches_journal_compatibility_contract():
         journal.close()
 
 
-def test_validation_route_computes_q_calibration_once(monkeypatch):
+def test_validation_route_computes_q_calibration_once(monkeypatch,tmp_path):
     score = _score_fixture()
 
     class FakeJournal:
@@ -59,7 +60,7 @@ def test_validation_route_computes_q_calibration_once(monkeypatch):
     # Isolate this route-only fake from real passive collector installation.
     monkeypatch.setattr("seiltanzer.edge_family_passive_capture.install_family_source_capture",
                         lambda _engine: None)
-    app = app_module.create_app(settings=object())  # type: ignore[arg-type]
+    app = app_module.create_app(settings=Settings(demo=False,data_dir=str(tmp_path)))
     endpoint = next(
         route.endpoint for route in app.routes
         if getattr(route, "path", None) == "/api/validation"

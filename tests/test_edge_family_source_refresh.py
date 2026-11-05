@@ -15,7 +15,15 @@ SHA = 'a' * 40
 T0 = time.time() + 30
 
 
-def packet(source='current-related', *, captured=T0-2):
+@pytest.fixture(autouse=True)
+def current_test_clock(monkeypatch):
+    # Collection precedes this file's execution by several minutes in full CI.
+    # Source cutoffs must follow the files actually created by each test.
+    monkeypatch.setitem(globals(),'T0',time.time()+30)
+
+
+def packet(source='current-related', *, captured=None):
+    if captured is None:captured=T0-2
     record = dict(source_id=source, source_verified=True, instrument='NAS100',
                   observed_ts=captured-5, received_ts=captured-1, quality=.8,
                   linked_returns=[dict(leader='ETHUSD', start_ts=captured-305,
