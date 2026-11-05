@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 
 from .config import ALL_INSTRUMENTS
 from .edge_family_source_runtime import CONTRACT,POLICY,PUBLICATION,MAX_BYTES
@@ -89,6 +90,16 @@ class FamilySourceRefresher:
             self.root.mkdir(parents=True,exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=self.root,prefix='.family-source-',suffix='.tmp',delete=False) as handle:
                 temporary=Path(handle.name);handle.write(raw);handle.flush();os.fsync(handle.fileno())
+            # HTTP200/parsed empty bodies are not a usable replacement. Apply
+            # the actual consumer's unchanged source/clock/selected-byte gates.
+            from .edge_family_source_runtime import _load_one
+            cutoff=_stamp(self.clock())
+            owner=SimpleNamespace(settings=SimpleNamespace(data_dir=self.root.parent))
+            if cutoff is None or not any(
+                    _load_one(owner,{'captured_ts':cutoff,'strategy':{'instrument':code}},
+                              sha,temporary.name)['edge_family_source_bundle_audit'].get('source_record_n',0)>0
+                    for code in ALL_INSTRUMENTS):
+                raise ValueError('SOURCE_RUNTIME_NO_ADMISSIBLE_FACTS')
             if self.sha_reader()!=sha:raise ValueError('SOURCE_RUNTIME_GENERATION_CHANGED')
             os.replace(temporary,self.root/'edge_family_sources_runtime.json');temporary=None
             self._status={'state':'PUBLISHED','captured_ts':payload['captured_ts'],'bytes':len(raw),

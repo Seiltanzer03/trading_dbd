@@ -50,7 +50,8 @@ def write(tmp_path, body, *, runtime=False):
     return path
 
 
-def admitted(tmp_path, cutoff=T0):
+def admitted(tmp_path, cutoff=None):
+    if cutoff is None:cutoff=T0
     return load_family_source_context(SimpleNamespace(settings=SimpleNamespace(data_dir=tmp_path)),
         {'captured_ts':cutoff,'strategy':{'instrument':'NAS100'}}, SHA)
 
@@ -233,3 +234,25 @@ def test_older_runtime_window_cannot_displace_newer_offhost_observation(tmp_path
     result=admitted(tmp_path)
     assert source_ids(result)==[prefix+'b'*64]
     assert result['edge_family_sources']['intermarket'][0]['observed_ts']==T0-7
+
+
+@pytest.mark.parametrize('body',[b'{broken',b'[]'])
+def test_http_success_without_usable_facts_cannot_erase_last_good_publication(tmp_path,monkeypatch,body):
+    from seiltanzer.edge_family_source_refresh import FamilySourceRefresher
+    from seiltanzer.edge_family_sources import build_bundle,SourceBudget
+    import seiltanzer.edge_family_sources as sources
+    original=write(tmp_path,packet(captured=T0-600),runtime=True)
+    before=original.read_bytes()
+    assert source_ids(admitted(tmp_path))==['current-related']
+    def fetch(url):
+        if '/candles?' in url:return body
+        raise TimeoutError('fixture source unavailable')
+    def collect(**kwargs):
+        kwargs['fetch']=fetch;kwargs['budget']=SourceBudget(min_interval=0)
+        return build_bundle(**kwargs)
+    monkeypatch.setattr(sources,'build_bundle',collect)
+    refresher=FamilySourceRefresher(tmp_path,expected_sha=SHA,clock=lambda:T0,sha_reader=lambda:SHA)
+    refresher.refresh()
+    assert refresher.status()['state']=='FAILED'
+    assert original.read_bytes()==before
+    assert source_ids(admitted(tmp_path))==['current-related']
