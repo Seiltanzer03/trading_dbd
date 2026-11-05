@@ -113,5 +113,40 @@ jobs:
               print('CORE_DIRECT_OPTION_CONTEXT',json.dumps({'metrics':len(values),'available':sum(v.get('available') is True for v in values.values()),'freeze_reason':getattr(frozen,'option_freeze_reason',None),'option_static':{k:(context.get('option_static') or {}).get(k) for k in ('available','reason','iv')},'option_v2':{k:(context.get('v2_option_context') or {}).get(k) for k in ('available','reason')},'available_ids':[k for k,v in values.items() if v.get('available')]}),flush=True)
 
             finally:cache.close()
+
+            import math,uuid
+            from websockets.sync.client import connect
+            from seiltanzer.data.feeds import _tv_frame,_tv_payloads
+            from seiltanzer.reference_market_series import SYMBOLS
+            code='NAS100';symbol=SYMBOLS[code];session='cs_'+uuid.uuid4().hex[:12]
+            started=time.time();deadline=time.monotonic()+8.;bars={};resolved=False;complete=False;received_bytes=0
+            try:
+              with connect('wss://data.tradingview.com/socket.io/websocket',origin='https://data.tradingview.com',open_timeout=8,close_timeout=1,max_size=1000000) as ws:
+                ws.recv(timeout=5)
+                for method,args in [('set_auth_token',['unauthorized_user_token']),('chart_create_session',[session,'']),('resolve_symbol',[session,'sym_1','='+json.dumps({'symbol':symbol,'adjustment':'splits','session':'regular'})]),('create_series',[session,'s1','s1','sym_1','1',360])]:
+                  ws.send(_tv_frame(method,args))
+                while time.monotonic()<deadline:
+                  raw=ws.recv(timeout=max(.1,deadline-time.monotonic()));received_bytes+=len(raw)
+                  if received_bytes>1000000:raise ValueError('BODY_BOUND')
+                  for item in _tv_payloads(raw):
+                    if item.startswith('~h~'):
+                      ws.send(f'~m~{len(item.encode())}~m~{item}');continue
+                    message=json.loads(item);kind=message.get('m');args=message.get('p') or []
+                    if kind in ('critical_error','series_error','symbol_error','protocol_error'):raise ValueError('PROVIDER_REFUSED')
+                    if not args or args[0]!=session:continue
+                    if kind=='symbol_resolved':
+                      meta=args[2];resolved=meta.get('full_name')==symbol and meta.get('pro_name')==symbol
+                      if not resolved:raise ValueError('RESOLVED_SYMBOL_MISMATCH')
+                    if kind in ('timescale_update','du'):
+                      for record in ((args[1].get('s1') or {}).get('s') or []):
+                        row=record['v'];stamp=float(row[0]);values=[float(x) for x in row[1:5]]
+                        if stamp%60 or not all(math.isfinite(x) and x>0 for x in values):raise ValueError('BAR_VALUE_INVALID')
+                        if stamp+60<=started:bars[stamp+60]=values
+                    if kind=='series_completed' and args[1]=='s1':complete=True
+                  if complete:break
+              print('CORE_NATIVE_MINUTE_PROBE',json.dumps({'instrument':code,'symbol':symbol,'resolved':resolved,'completed':complete,'bars':len(bars),'interval_sec':60,'last_completed_ts':max(bars) if bars else None,'age_sec':time.time()-max(bars) if bars else None,'body_bytes':received_bytes,'execution_quote_changed':False,'published':False}),flush=True)
+            except Exception as error:
+              print('CORE_NATIVE_MINUTE_PROBE',json.dumps({'instrument':code,'error_type':type(error).__name__,'reason':str(error) if isinstance(error,ValueError) else 'TRANSPORT_UNAVAILABLE','execution_quote_changed':False,'published':False}),flush=True)
+
             print('READ_ONLY_NO_NEW_TRADE_NO_ACK_NO_ORDERS_NO_NEW_RESEARCH',flush=True)
             PY
