@@ -122,15 +122,22 @@ def _ml_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _current_values(engine: Any, snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     try:
+        from .decision_metric_inputs import decision_metric_values,pack_decision_metrics
+        max_age=float(getattr(getattr(engine,'settings',None),'ede_context_max_age_sec',900))
+        pinned=decision_metric_values(snapshot,max_age_sec=max_age)
+        if pinned is not None:
+            return pinned
         from .edge_discovery.ai_context import (
             _latest_frozen_context,
-            canonical_current_feature_map,
         )
         instrument = str((snapshot.get("strategy") or {}).get("instrument") or "")
         if not instrument:
             return {}
-        return canonical_current_feature_map(
-            _latest_frozen_context(engine, snapshot), instrument)
+        frozen=_latest_frozen_context(engine,snapshot)
+        if frozen.get('observation_t0') is None:
+            return {}
+        return decision_metric_values({**snapshot,'decision_metric_inputs':
+            pack_decision_metrics(frozen,instrument)},max_age_sec=max_age) or {}
     except Exception:
         return {}
 

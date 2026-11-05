@@ -526,8 +526,9 @@ def _wavelet_block(points: list[dict], captured_ts: float) -> dict:
 def build_market_evidence_v3(engine: PassiveLearningEngine, instrument: str,
                              captured_ts: float, market_price: float,
                              features: dict[str, Any],
-                             provenance: dict[str, Any] | None = None) -> dict[str, Any]:
-    rows = _bars(engine, instrument, captured_ts)
+                             provenance: dict[str, Any] | None = None, *, rows=None) -> dict[str, Any]:
+    if rows is None:
+        rows = _bars(engine, instrument, captured_ts)
     points = _five_minute_points(rows, captured_ts)
     price = _price_block(rows, captured_ts)
     vol = features.get("volatility") or {}

@@ -355,13 +355,14 @@ def _option_scalars(option: dict[str, Any], annual_vol: float | None,
 
 
 def _build_v2(engine: PassiveLearningEngine, instrument: str, captured_ts: float,
-              market_price: float, features: dict[str, Any]) -> dict[str, Any]:
-    with engine._lock:
-        rows = [dict(row) for row in engine._conn.execute(
-            "SELECT bar_start_ts,bar_end_ts,close,high,low,source,quality,kind "
-            "FROM passive_market_bars WHERE instrument=? AND bar_end_ts<=? "
-            "AND bar_end_ts>=? ORDER BY bar_end_ts",
-            (instrument, float(captured_ts)+1e-6, float(captured_ts)-6*3600.0)).fetchall()]
+              market_price: float, features: dict[str, Any], *, rows=None) -> dict[str, Any]:
+    if rows is None:
+        with engine._lock:
+            rows = [dict(row) for row in engine._conn.execute(
+                "SELECT bar_start_ts,bar_end_ts,close,high,low,source,quality,kind "
+                "FROM passive_market_bars WHERE instrument=? AND bar_end_ts<=? "
+                "AND bar_end_ts>=? ORDER BY bar_end_ts",
+                (instrument, float(captured_ts)+1e-6, float(captured_ts)-6*3600.0)).fetchall()]
     intraday = _window_stats(rows, captured_ts)
     wavelet = _wavelet(rows, captured_ts, market_price)
     option_snapshot = _latest_option_snapshot(engine, features, captured_ts)

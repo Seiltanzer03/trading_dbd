@@ -409,7 +409,9 @@ class AISnapshotMaterializer:
             baseline_completed_bar = merge_completed_bar_marker(
                 self._baseline_completed_bar,completed_bar_marker(self.engine))
             market_inputs = capture_market_inputs(self.engine)
-            snapshot = self.builder(self.engine)
+            from .decision_metric_inputs import pinned_decision_context
+            with pinned_decision_context(self.engine,getattr(market_inputs.market,'live_metric_context',None)):
+                snapshot = self.builder(self.engine)
             snapshot_trade = (
                 str(snapshot.get("trade_id"))
                 if isinstance(snapshot, dict) and snapshot.get("trade_id") is not None

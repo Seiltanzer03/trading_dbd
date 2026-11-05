@@ -148,6 +148,13 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
         "edge_regime", "market_regime",
     )
     projection = {key: snapshot[key] for key in root_keys if key in snapshot}
+    from .decision_metric_inputs import decision_metric_values
+    model_metrics=decision_metric_values(snapshot)
+    if model_metrics is not None:
+        # The transport encoding belongs to the server. The LLM receives the
+        # actual observed values, availability and original as-of times.
+        projection['decision_model_metrics']=model_metrics
+        projection['decision_model_metric_provenance']=(snapshot.get('decision_metric_inputs') or {}).get('input_provenance',{})
     projection["policy_manager"] = {
         key: manager[key] for key in manager_keys if key in manager
     }
