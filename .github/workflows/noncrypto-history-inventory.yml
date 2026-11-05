@@ -37,11 +37,14 @@ jobs:
               if path.endswith('worker-status'):
                 print('CORE_RUNTIME_INPUTS',json.dumps(data.get('decision_model_inputs')),flush=True)
                 worker=data.get('worker') or {}
-                print('CORE_RESEARCH_WORKER',json.dumps({k:worker.get(k) for k in ('status','phase','running','last_error','task','busy')}),flush=True)
+                print('CORE_RESEARCH_WORKER',json.dumps({k:worker.get(k) for k in ('current_phase','core_stage','running','last_error','maintenance_phase','acceptance_pause_active')}),flush=True)
               elif path.endswith('/snapshot/status'):
-                print('CORE_AI_MATERIALIZER',json.dumps({k:data.get(k) for k in ('available','state','building','built_at','last_error','invalidated_reason','family_runtime_status')}),flush=True)
+                print('CORE_AI_MATERIALIZER',json.dumps({k:data.get(k) for k in ('ready','building','built_at','last_error','invalidated_reason','market_family_runtime')}),flush=True)
               else:
-                price=(data.get('feeds') or {}).get('price') or {}
+                tick=data.get('tick') or data
+                price=(tick.get('feeds') or {}).get('price') or {}
+                chain=(tick.get('feeds') or {}).get('chain') or {}
+                print('CORE_CHAIN_FEED',json.dumps({k:chain.get(k) for k in ('status','source','ts','cache_fallback','error')}),flush=True)
                 trade=data.get('trade') or data.get('active_trade')
                 print('CORE_LIVE_STATE',json.dumps({'http':200,'elapsed_ms':round((time.monotonic()-started)*1000),'top_keys':sorted(data.keys()),'active_trade_present':bool(trade),'quote':{k:price.get(k) for k in ('status','source','ts','fresh','derived')}}),flush=True)
             complete=True
@@ -78,7 +81,13 @@ jobs:
                 profiles={key:{k:(manager.get(key) or {}).get(k) for k in ('available','reason','observed_ts')} for key in ('mathematical_edge','active_edge_provisional_weight','llm_edge_exploratory_weight')}
                 families=(frozen.get('edge_family_market_context') or {}).get('families') or {}
                 summary={key:{k:value.get(k) for k in ('available','reason','market_model_trained','forecast_available','forecast_origin_ts')} for key,value in families.items() if isinstance(value,dict)}
-                print('CORE_LAST_REAL_AI',json.dumps({'ts':row[0],'model':row[1],'snapshot_ts':frozen.get('captured_ts'),'metrics_pinned':values is not None,'pinned_metrics':None if values is None else len(values),'available_metrics':None if values is None else sum(v.get('available') is True for v in values.values()),'profiles':profiles,'family_context':summary,'has_llm_unavailable_marker':'LLM НЕДОСТУПЕН' in unpack_text(row[3])}),flush=True)
+                print('CORE_LAST_REAL_AI',json.dumps({'ts':row[0],'model':row[1],'instrument':(frozen.get('strategy') or {}).get('instrument'),'snapshot_ts':frozen.get('captured_ts'),'metrics_pinned':values is not None,'pinned_metrics':None if values is None else len(values),'available_metrics':None if values is None else sum(v.get('available') is True for v in values.values()),'profiles':profiles,'family_context':summary,'has_llm_unavailable_marker':'LLM НЕДОСТУПЕН' in unpack_text(row[3])}),flush=True)
             finally:conn.close()
+            cache=sqlite3.connect('file:'+str(root/'cache.db')+'?mode=ro',uri=True,timeout=.1)
+            cache.execute('PRAGMA query_only=ON');cache.execute('PRAGMA cache_size=-1024')
+            try:
+              for ticker,count,bytes_,max_,stamp in cache.execute('SELECT ticker,count(*),sum(length(data)),max(length(data)),max(ts) FROM chain_snapshots GROUP BY ticker'):
+                print('CORE_OPTION_CACHE',json.dumps({'proxy':ticker,'snapshots':count,'total_bytes':bytes_,'max_snapshot_bytes':max_,'latest_ts':stamp,'age_sec':now-stamp}),flush=True)
+            finally:cache.close()
             print('READ_ONLY_NO_NEW_TRADE_NO_ACK_NO_ORDERS_NO_NEW_RESEARCH',flush=True)
             PY
