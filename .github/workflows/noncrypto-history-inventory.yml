@@ -8,23 +8,44 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 35
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 3m
+          command_timeout: 32m
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
             import json,pathlib,sqlite3,subprocess,time,urllib.request
-            expected='197176c76d4c0412abe0785653987093dbc6f1b6'
+            expected='b9234b29f3e062889a7dcff84561604778abfc55'
+            deadline=time.monotonic()+1800
+            while time.monotonic()<deadline:
+              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+              ready=False
+              if installed==expected:
+                try:
+                  with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as response:ready=response.status==200
+                except Exception:pass
+              if ready:break
+              print('MODEL_RELEASE_WAIT',json.dumps({'installed_expected_sha':installed==expected,'http_ready':ready}),flush=True)
+              time.sleep(15)
+            else:raise RuntimeError('EXPECTED_RELEASE_NOT_READY_WITHIN_BOUND')
             actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
             print('MODEL_SHA',json.dumps({'expected':expected,'actual':actual,'match':actual==expected}),flush=True)
             assert actual==expected
             print('MODEL_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'],text=True).strip(),flush=True)
+            deadline=time.monotonic()+240
+            while time.monotonic()<deadline:
+              try:
+                with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=4) as response:data=json.load(response)
+                current=data.get('decision_model_inputs') or {}
+                if current.get('state')=='READY' and current.get('available_metrics',0)>15:break
+              except Exception:current={}
+              print('MODEL_INPUT_WAIT',json.dumps({key:current.get(key) for key in ('state','metric_count','available_metrics')}),flush=True)
+              time.sleep(15)
             root=pathlib.Path('/opt/seiltanzer/data');now=time.time();position={}
             def read(path):
               started=time.monotonic()
@@ -49,7 +70,7 @@ jobs:
               else:
                 position=body
                 reconciliation=body.get('execution_reconciliation') or {}
-                print('MODEL_POSITION_GUARD',json.dumps({'trade_id':body.get('trade_id'),'reconciliation_required':bool(reconciliation),'unresolved_commands':len(reconciliation.get('commands') or [])}),flush=True)
+                print('MODEL_POSITION_GUARD',json.dumps({'trade_id':body.get('trade_id'),'reconciliation_required':bool(reconciliation),'unresolved_commands':[{key:command.get(key) for key in ('decision_id','policy','execution_status','issued_at','parameters')} for command in reconciliation.get('commands') or []]}),flush=True)
             for name in ['active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)],'mathematical_edge_latest.json','edge_family_sources_latest.json','edge_family_sources_runtime.json']:
               path=root/'research'/name;item={'name':name,'exists':path.is_file()}
               if path.is_file() and path.stat().st_size<=12000000:
@@ -82,5 +103,22 @@ jobs:
                 print('MODEL_SAVED_GEOMETRY',json.dumps(probabilities),flush=True)
               else:print('MODEL_SAVED_REVIEW','NO_CURRENT_TRADE_REVIEW',flush=True)
             finally:conn.close()
+            import json,subprocess,time
+            from seiltanzer.config import INSTRUMENTS
+            from seiltanzer.reference_market_series import fetch_reference_series,validate_reference_series,SYMBOLS
+            assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==expected
+            passed=0
+            for code in INSTRUMENTS:
+              started=time.monotonic()
+              try:
+                source=fetch_reference_series(code,limit=480,timeout=5.,interval='1m')
+                now=time.time();reason=validate_reference_series(source,code,now,runtime=True,interval='1m')
+                item={'instrument':code,'symbol':SYMBOLS[code],'available':reason is None,'reason':reason,'bars':len(source['bars']),'observed_ts':source['observed_ts'],'received_ts':source['received_ts'],'age_sec':None if source['observed_ts'] is None else round(now-source['observed_ts'],2),'interval':source['interval'],'not_broker_execution_bars':source['not_broker_execution_bars'],'execution_quote_replaced':source['canonical_execution_quote_replaced']}
+                passed+=reason is None
+              except Exception as error:
+                item={'instrument':code,'symbol':SYMBOLS[code],'available':False,'error_type':type(error).__name__,'execution_quote_replaced':False}
+              item['elapsed_ms']=round((time.monotonic()-started)*1000)
+              print('CONFIGURED_MINUTE_SOURCE',json.dumps(item),flush=True)
+            print('CONFIGURED_MINUTE_TOTAL',json.dumps({'passed':passed,'configured':len(INSTRUMENTS),'source_probe_only':True,'published':False,'trade_changes':False}),flush=True)
             print('READ_ONLY_NO_POST_NO_TRADE_NO_ACK_NO_ORDERS_NO_RESEARCH',flush=True)
             PY
