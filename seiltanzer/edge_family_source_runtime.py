@@ -44,7 +44,7 @@ def _read(path, identity):
     return payload
 
 
-def load_family_source_context(engine, snapshot, expected_sha):
+def _load_one(engine, snapshot, expected_sha, filename):
     """Return frozen admitted facts and a small availability audit, never models."""
     audit = {"contract_version": CONTRACT, "available": False,
              "reason": "SOURCE_BUNDLE_UNAVAILABLE", "network_calls": False,
@@ -62,7 +62,7 @@ def load_family_source_context(engine, snapshot, expected_sha):
         audit["reason"] = "RUNTIME_SHA_UNAVAILABLE"
         return result
     data_dir = Path(getattr(getattr(engine, "settings", None), "data_dir", "."))
-    path = data_dir / "research" / "edge_family_sources_latest.json"
+    path = data_dir / "research" / filename
     try:
         stat = path.stat()
         if not 0 < stat.st_size <= MAX_BYTES:
@@ -163,3 +163,53 @@ def load_family_source_context(engine, snapshot, expected_sha):
         audit["reason"] = str(exc)[:160] if isinstance(exc, ValueError) else "SOURCE_BUNDLE_UNAVAILABLE"
         result["edge_family_sources"] = {}
     return result
+
+
+def _source_lineage(record):
+    """Replace a collector's body revision, keeping independent source identities."""
+    identity=record.get('source_id')
+    if not isinstance(identity,str) or not identity:return None
+    if identity.startswith(('synced-crypto:','coinbase:','cftc:','nyse:calendar:')):
+        parts=identity.split(':')
+        parts=['@body' if len(part)==64 and all(c in '0123456789abcdef' for c in part)
+               else part for part in parts]
+        return (record.get('instrument'),record.get('kind'),':'.join(parts))
+    return (identity,)
+
+
+def load_family_source_context(engine,snapshot,expected_sha):
+    """Admit both immutable documents independently before merging identities."""
+    baseline=_load_one(engine,snapshot,expected_sha,'edge_family_sources_latest.json')
+    runtime=_load_one(engine,snapshot,expected_sha,'edge_family_sources_runtime.json')
+    if not runtime['edge_family_source_bundle_audit']['available']:return baseline
+    if not baseline['edge_family_source_bundle_audit']['available']:return runtime
+    merged=deepcopy(baseline['edge_family_sources'])
+    for family,records in runtime['edge_family_sources'].items():
+        output=merged.setdefault(family,[])
+        for record in records:
+            identity=_source_lineage(record)
+            index=next((i for i,row in enumerate(output) if identity and _source_lineage(row)==identity),None)
+            if index is None:output.append(deepcopy(record))
+            elif (record.get('observed_ts',0),record.get('received_ts',0))>=(
+                    output[index].get('observed_ts',0),output[index].get('received_ts',0)):
+                output[index]=deepcopy(record)
+        if len(output)>128:
+            baseline['edge_family_source_bundle_audit']['runtime_refresh_reason']='COMBINED_SOURCE_RECORD_BOUND'
+            return baseline
+    if len(json.dumps(merged,allow_nan=False).encode())>MAX_SELECTED_BYTES:
+        baseline['edge_family_source_bundle_audit']['runtime_refresh_reason']='COMBINED_SOURCE_BYTE_BOUND'
+        return baseline
+    audit=baseline['edge_family_source_bundle_audit']
+    live=runtime['edge_family_source_bundle_audit']
+    audit['runtime_bundle_captured_ts']=live['bundle_captured_ts']
+    audit['source_record_n']=sum(len(rows) for rows in merged.values())
+    audit['rejected_sources']=(audit['rejected_sources']+live['rejected_sources'])[:16]
+    current=build_edge_family_evidence({'instrument':audit['instrument'],
+        'captured_ts':snapshot['captured_ts'],'edge_family_sources':merged})['families']
+    for family in FAMILIES:
+        row=audit['families'][family];other=live['families'][family]
+        row.update(collected_available=row['collected_available'] or other['collected_available'],
+            available=bool(current[family].get('available')),loaded_record_n=len(merged.get(family,[])),
+            reason=str(current[family].get('reason') or 'NO_ADMISSIBLE_SOURCE')[:200])
+    baseline['edge_family_sources']=merged
+    return baseline

@@ -300,6 +300,8 @@ class MarketData:
         self.intraday_source_authority: dict = {}
         self.family_reference_series: dict | None = None
         self.family_reference_error: str | None = None
+        self.decision_minute_reference: dict | None = None
+        self.decision_minute_reference_error: str | None = None
         self.binance_trade_flow: dict = {}
         self._intraday_lock = threading.RLock()
         self.intraday_is_offset: bool = False
@@ -373,6 +375,8 @@ class MarketData:
             self.intraday_source_authority = {}
             self.family_reference_series = None
             self.family_reference_error = None
+            self.decision_minute_reference = None
+            self.decision_minute_reference_error = None
             self.binance_trade_flow = {}
             self.intraday_is_offset = False
             self.daily = {"bars": None, **_status_dict()}
@@ -939,6 +943,23 @@ class MarketData:
                     # the current bar and TTL; a failed fetch cannot refresh it.
                     self.family_reference_error=type(exc).__name__
 
+    def refresh_decision_minute_reference(self, requested_code: str) -> None:
+        """Separate actual minute inputs; never replace execution or5m model data."""
+        from ..reference_market_series import fetch_reference_series,validate_reference_series,SYMBOLS
+        if self.demo or requested_code not in SYMBOLS:return
+        try:
+            series=fetch_reference_series(requested_code,limit=1800,timeout=5.,interval='1m')
+            reason=validate_reference_series(series,requested_code,time.time(),runtime=True,interval='1m')
+            if reason:raise ValueError(reason)
+            with self._intraday_lock:
+                if self.instrument_code==requested_code and not self.demo:
+                    self.decision_minute_reference=series
+                    self.decision_minute_reference_error=None
+        except Exception as exc:
+            with self._intraday_lock:
+                if self.instrument_code==requested_code:
+                    self.decision_minute_reference_error=type(exc).__name__
+
     def refresh_intraday(self) -> None:
         """1m-бары дня для VWAP (объём нужен; у кэш-индексов его нет — честно None)."""
         with self._intraday_lock:
@@ -978,6 +999,7 @@ class MarketData:
                 pass
             return
         self.refresh_family_reference(requested_code)
+        self.refresh_decision_minute_reference(requested_code)
         try:
             import yfinance as yf
             hist = yf.Ticker(requested_instrument.yahoo).history(period="1d", interval="1m")

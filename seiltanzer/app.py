@@ -375,9 +375,14 @@ def _attach_family_source_bundle(engine, snapshot: dict) -> None:
 def _refresh_intraday_archive(engine) -> None:
     """Persist only bars obtained by the existing configured feed refresh."""
     engine.market.refresh_intraday()
-    recorder = getattr(getattr(engine, "passive", None), "record_configured_intraday_archive", None)
+    passive=getattr(engine,'passive',None)
+    recorder = getattr(passive, "record_configured_intraday_archive", None)
     if callable(recorder):
-        recorder(engine.market)
+        lock=getattr(passive,'_lock',None)
+        if lock is not None and not lock.acquire(blocking=False):return
+        try:recorder(engine.market)
+        finally:
+            if lock is not None:lock.release()
 
 
 def _acknowledged_execution(trade: dict, tick: dict,
@@ -575,6 +580,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     from .decision_metric_inputs import DecisionMetricRuntime
     engine.decision_metric_runtime=DecisionMetricRuntime(engine)
+    from .edge_family_source_refresh import FamilySourceRefresher
+    from .runtime_git_identity import runtime_git_sha
+    engine.family_source_refresher=FamilySourceRefresher(settings.data_dir,expected_sha=runtime_git_sha(),enabled=not settings.demo)
     app.state.settings = settings
     app.state.live_tick_snapshot = live_tick_snapshot
 
@@ -795,6 +803,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         live_executor = ThreadPoolExecutor(
             max_workers=3, thread_name_prefix="live-market")
         metric_executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='decision-metrics')
+        source_executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='decision-sources')
 
         async def live_work(function):
             context = copy_context()
@@ -805,9 +814,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             context=copy_context()
             return await asyncio.get_running_loop().run_in_executor(metric_executor,context.run,function)
 
+        async def source_work(function):
+            context=copy_context()
+            return await asyncio.get_running_loop().run_in_executor(source_executor,context.run,function)
+
         last = {"price": 0.0, "proxy_price": 0.0, "intraday": 0.0, "vols": 0.0,
                 "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0, "bybit": 0.0,
-                'decision_metrics':0.0}
+                'decision_metrics':0.0,'family_sources':0.0}
         running: dict[str, asyncio.Task] = {}
         tick_task: asyncio.Task | None = None
         state_task: asyncio.Task | None = None
@@ -831,6 +844,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "correlation": 30.0 if settings.demo else 300.0,
             "bybit": 15.0,
             'decision_metrics':30.0,
+            'family_sources':30.0,
         }
         jobs = {
             "price": engine.market.refresh_price,
@@ -843,6 +857,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "correlation": engine.market.refresh_correlation,
             "bybit": engine.market.refresh_bybit,
             'decision_metrics':engine.decision_metric_runtime.refresh,
+            'family_sources':engine.family_source_refresher.refresh,
         }
 
         async def calculate_tick():
@@ -892,7 +907,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             last[name]=0.0
                     if name not in running and now - last[name] >= periods[name]:
                         last[name] = now
-                        work = (metric_work(fn) if name=='decision_metrics' else
+                        work = (source_work(fn) if name=='family_sources' else
+                                metric_work(fn) if name=='decision_metrics' else
                                 live_work(fn) if name in {"price", "proxy_price"} else asyncio.to_thread(fn))
                         running[name] = asyncio.create_task(work)
 
@@ -943,6 +959,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             finally:
                 live_executor.shutdown(wait=True)
                 metric_executor.shutdown(wait=True)
+                source_executor.shutdown(wait=True)
 
     async def passive_loop():
         from .background_disk_admission import passive_step

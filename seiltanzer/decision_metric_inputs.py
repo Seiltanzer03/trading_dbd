@@ -108,6 +108,21 @@ def _option_history(engine,proxy,cutoff):
         if connection is not None:connection.close()
 
 
+def _native_minute_rows(market,code,cutoff):
+    from .reference_market_series import validate_reference_series
+    source=getattr(market,'decision_minute_reference',None)
+    if validate_reference_series(source,code,cutoff,runtime=True,interval='1m') is not None:
+        return None,None
+    rows=[dict(bar_start_ts=row['bar_end_ts']-60,**row,quality=1.,kind='reference',
+               source=source['provider']+':'+source['ticker']+':1m') for row in source['bars']
+          if row['bar_end_ts']>=cutoff-30*3600]
+    proof=dict(provider=source['provider'],source_symbol=source['ticker'],target_instrument=code,
+        observed_ts=source['observed_ts'],available_at=source['received_ts'],derived=False,proxy=True,
+        broker_execution_bars=False,authority_role='DECISION_METRIC_REFERENCE_NOT_EXECUTION_QUOTE',
+        contract_version=source['contract_version'],interval='1m',source_sha256=source['source_sha256'])
+    return rows,proof
+
+
 def capture_decision_context(engine,market,*,captured_ts):
     """Build an as-of view of received inputs, without inserting an anchor."""
     from .canonical_market_context import price_quote_available
@@ -123,13 +138,15 @@ def capture_decision_context(engine,market,*,captured_ts):
         return {}
     stamp=_number(quote.get('ts'))
     if stamp is None or not -5<=cutoff-stamp<=30:return {}
-    try:rows=_history(engine,code,cutoff)
-    except (OSError,sqlite3.Error):rows=[]
-    # Match the archive's INSERT OR IGNORE identity. Never rewrite an existing
-    # observation using a later basis adjustment of the same provider bar.
-    merged={row['bar_start_ts']:row for row in rows}
-    for row in _received_bars(market,code,cutoff):merged.setdefault(row['bar_start_ts'],row)
-    rows=sorted(merged.values(),key=lambda row:row['bar_end_ts'])
+    rows,native_proof=_native_minute_rows(market,code,cutoff)
+    if rows is None:
+        try:rows=_history(engine,code,cutoff)
+        except (OSError,sqlite3.Error):rows=[]
+        # Match the archive's INSERT OR IGNORE identity. Never rewrite an existing
+        # observation using a later basis adjustment of the same provider bar.
+        merged={row['bar_start_ts']:row for row in rows}
+        for row in _received_bars(market,code,cutoff):merged.setdefault(row['bar_start_ts'],row)
+        rows=sorted(merged.values(),key=lambda row:row['bar_end_ts'])
     if len(rows)>2000:raise ValueError('LIVE_METRIC_BAR_BOUND')
     daily=getattr(market,'daily',None) or {}
     daily_ts=_number(daily.get('ts'))
@@ -165,11 +182,12 @@ def capture_decision_context(engine,market,*,captured_ts):
     block=build_market_evidence_v3(parent,code,cutoff,quote['value'],features,
         {'options':{'quality':PassiveLearningEngine._quality(chain)}},rows=rows)
     features['g1s_evidence_v3']=block
-    authority=getattr(market,'intraday_source_authority',None)
+    authority=native_proof or getattr(market,'intraday_source_authority',None)
     if not isinstance(authority,dict):authority={}
     provenance={key:value for key,value in authority.items()
         if key in ('provider','source_symbol','target_instrument','observed_ts','available_at',
-                   'derived','proxy','direct_source','broker_execution_bars','authority_role')
+                   'derived','proxy','direct_source','broker_execution_bars','authority_role',
+                   'contract_version','interval','source_sha256')
         and (isinstance(value,(bool,int,float)) or isinstance(value,str) and len(value)<=256)}
     if len(json.dumps(features,allow_nan=False,separators=(',',':')).encode())>MAX_CONTEXT_BYTES:
         raise ValueError('LIVE_METRIC_CONTEXT_BOUND')

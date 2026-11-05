@@ -186,6 +186,7 @@ def test_actual_provider_success_captures_independent_bar_authority(tmp_path, mo
     from seiltanzer.data.feeds import MarketData
     # This regression owns the Yahoo lane; the independent reference is tested separately.
     monkeypatch.setattr(MarketData,'refresh_family_reference',lambda *_:None)
+    monkeypatch.setattr(MarketData,'refresh_decision_minute_reference',lambda *_:None)
     frame = pd.DataFrame(_bars(), columns=["ts", "Open", "High", "Low", "Close", "Volume"])
     frame.index = pd.to_datetime(frame.pop("ts"), unit="s", utc=True)
     symbols = []
@@ -230,6 +231,7 @@ def test_provider_failure_clears_previous_authority(tmp_path, monkeypatch):
         def __init__(self, symbol):
             raise RuntimeError("actual source unavailable")
     monkeypatch.setattr(MarketData,'refresh_family_reference',lambda *_:None)
+    monkeypatch.setattr(MarketData,'refresh_decision_minute_reference',lambda *_:None)
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(Ticker=Ticker))
     cache = DiskCache(str(tmp_path / "cache.db"))
     try:
@@ -248,6 +250,7 @@ def test_returned_history_for_old_instrument_is_discarded(tmp_path, monkeypatch)
     from seiltanzer.data.cache import DiskCache
     from seiltanzer.data.feeds import MarketData
     monkeypatch.setattr(MarketData,'refresh_family_reference',lambda *_:None)
+    monkeypatch.setattr(MarketData,'refresh_decision_minute_reference',lambda *_:None)
     frame = pd.DataFrame(_bars(), columns=["ts", "Open", "High", "Low", "Close", "Volume"])
     frame.index = pd.to_datetime(frame.pop("ts"), unit="s", utc=True)
     cache = DiskCache(str(tmp_path / "cache.db"))

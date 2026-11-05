@@ -148,6 +148,37 @@ def test_independent_llm_receives_readable_metric_values_and_original_source_tim
     assert 'metrics_encoded' not in json.dumps(projection)
 
 
+def test_combined_provider_transport_retains_authoritative_current_metrics(engine,monkeypatch):
+    from test_ai_provider_explanation import _snapshot
+    from test_ai_provider_telemetry import transport
+    from seiltanzer.ai_provider_guard import compact_provider_snapshot
+    from seiltanzer.ai_runtime_report_v20 import request_explanation_with_shadow
+    from seiltanzer.decision_metric_inputs import pack_decision_metrics
+    calls,_,_=transport(monkeypatch)
+    engine.market.intraday_source_authority={'provider':'Yahoo','source_symbol':'^NDX',
+        'observed_ts':T0-60,'available_at':T0-1,'proxy':True,'derived':False}
+    snapshot=_snapshot()
+    snapshot.update(captured_ts=T0+1,strategy={'instrument':'NAS100'},
+        decision_metric_inputs=pack_decision_metrics(capture(engine),'NAS100'))
+    before=deepcopy(snapshot)
+    result=request_explanation_with_shadow(compact_provider_snapshot(snapshot),
+        authoritative_snapshot=snapshot)
+    packet=json.loads(calls[0]['messages'][1]['content'].split('\n',1)[1])
+    assert len(packet['decision_model_metrics'])==92
+    price=packet['decision_model_metrics']['price.ret_5m']
+    assert price['available'] is True
+    assert price['value']==pytest.approx(math.log(20180./20175.))
+    assert price['asof']==T0-60
+    provenance=packet['decision_model_metric_provenance']
+    assert provenance['observed_ts']==T0-60 and provenance['available_at']==T0-1
+    assert provenance['proxy'] is True and provenance['derived'] is False
+    assert 'metrics_encoded' not in json.dumps(packet)
+    assert 'recommendation' not in packet['policy_manager']
+    full=json.loads(result['llm_shadow_decision']['input_contract']['full_input_json'])
+    assert full['decision_model_metrics']['price.ret_5m']==price
+    assert snapshot==before
+
+
 @pytest.mark.parametrize('name',['active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)]])
 def test_each_expert_publication_invalidates_existing_materialization(engine,tmp_path,name):
     from seiltanzer.ai_frozen_expert_inputs import publication_marker
@@ -169,18 +200,20 @@ def test_changed_historical_hypotheses_invalidate_but_timestamp_only_refresh_doe
     assert publication_marker(engine)!=before
 
 
-def test_blocked_metric_producer_does_not_block_live_prices_or_shutdown(tmp_path,monkeypatch):
+@pytest.mark.parametrize('producer',['metrics','sources'])
+def test_blocked_metric_producer_does_not_block_live_prices_or_shutdown(tmp_path,monkeypatch,producer):
     import asyncio
     import time
     from seiltanzer.app import create_app
     from seiltanzer.config import Settings
     from seiltanzer.decision_metric_inputs import DecisionMetricRuntime
+    from seiltanzer.edge_family_source_refresh import FamilySourceRefresher
     entered,release,finished,prices=tuple(threading.Event() for _ in range(4))
     def blocked(self):
         entered.set()
         try:assert release.wait(5)
         finally:finished.set()
-    monkeypatch.setattr(DecisionMetricRuntime,'refresh',blocked)
+    monkeypatch.setattr(DecisionMetricRuntime if producer=='metrics' else FamilySourceRefresher,'refresh',blocked)
     app=create_app(Settings(demo=True,data_dir=str(tmp_path)))
     actual=app.state.engine;initial=deepcopy(app.state.live_tick_snapshot['payload']);count=[]
     def price():

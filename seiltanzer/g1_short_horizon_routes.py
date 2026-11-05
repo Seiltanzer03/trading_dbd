@@ -271,6 +271,8 @@ def install_g1_short_horizon_routes(app: FastAPI) -> None:
             "worker": worker,
             'decision_model_inputs':(app.state.engine.decision_metric_runtime.status()
                 if getattr(app.state.engine,'decision_metric_runtime',None) is not None else None),
+            'decision_family_sources':(app.state.engine.family_source_refresher.status()
+                if getattr(app.state.engine,'family_source_refresher',None) is not None else None),
             "last_result": result_summary,
             "sqlite_access": False,
             "production_authority": False,

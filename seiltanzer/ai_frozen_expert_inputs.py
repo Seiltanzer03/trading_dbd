@@ -53,7 +53,7 @@ def capture_market_inputs(engine, *, include_decision_metrics=True):
     market = SimpleNamespace(instrument_code=getattr(feed, "instrument_code", None),
         demo=getattr(feed, "demo", False), intraday_is_offset=False,
         intraday_ohlcv=[], intraday_source_authority={}, binance_trade_flow={}, chain=None,
-        family_reference_series=None, frozen_inputs_captured_ts=None,
+        family_reference_series=None,decision_minute_reference=None,frozen_inputs_captured_ts=None,
         treasury_context_v1=None,
         price={},daily={},correlation={},live_metric_context=None,
         _intraday_lock=threading.Lock())
@@ -82,6 +82,10 @@ def capture_market_inputs(engine, *, include_decision_metrics=True):
             market.family_reference_series = _bounded_copy(getattr(feed,'family_reference_series',None))
         except (ValueError,TypeError,RecursionError):
             market.reference_freeze_reason='REFERENCE_INPUT_FREEZE_BOUND'
+        try:
+            market.decision_minute_reference=_bounded_copy(getattr(feed,'decision_minute_reference',None))
+        except (ValueError,TypeError,RecursionError):
+            market.minute_reference_freeze_reason='MINUTE_REFERENCE_INPUT_FREEZE_BOUND'
         try:
             market.chain = _bounded_copy(getattr(feed, "chain", None))
         except (ValueError, TypeError, RecursionError):
@@ -141,7 +145,7 @@ def publication_marker(engine):
     if not data_dir:
         return None
     result = []
-    for name in ("mathematical_edge_latest.json", "edge_family_sources_latest.json",
+    for name in ("mathematical_edge_latest.json", "edge_family_sources_latest.json",'edge_family_sources_runtime.json',
                  'active_ml_latest.json',*[f'active_structured_{h}m_latest.json'
                                            for h in (15,30,60,120,240)]):
         try:

@@ -441,7 +441,8 @@ def _independent_provider_facts(snapshot: dict[str, Any], authority: dict[str, A
         for row in authoritative.get("active_management_candidates") or []
         if isinstance(row, dict)
     ][:7]
-    for key in ("edge_family_facts", "shadow_contract", "edge_regime", "market_regime", "research_working_context"):
+    for key in ("edge_family_facts", "shadow_contract", "edge_regime", "market_regime", "research_working_context",
+                "decision_model_metrics", "decision_model_metric_provenance"):
         if key in authoritative:
             projected[key] = authoritative[key]
     from .ai_provider_guard import _bounded
