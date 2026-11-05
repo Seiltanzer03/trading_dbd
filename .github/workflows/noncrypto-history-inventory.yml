@@ -88,6 +88,14 @@ jobs:
             try:
               for ticker,count,bytes_,max_,stamp in cache.execute('SELECT ticker,count(*),sum(length(data)),max(length(data)),max(ts) FROM chain_snapshots GROUP BY ticker'):
                 print('CORE_OPTION_CACHE',json.dumps({'proxy':ticker,'snapshots':count,'total_bytes':bytes_,'max_snapshot_bytes':max_,'latest_ts':stamp,'age_sec':now-stamp}),flush=True)
+              from types import SimpleNamespace
+              from seiltanzer.decision_metric_inputs import _option_history
+              engine=SimpleNamespace(settings=SimpleNamespace(data_dir=root,cache_db=str(root/'cache.db')))
+              rows=_option_history(engine,'QQQ',now)
+              raw=cache.execute('SELECT data FROM chain_snapshots WHERE ticker=? ORDER BY ts DESC LIMIT 1',('QQQ',)).fetchone()
+              body=raw[0] if raw else ''
+              parsed=json.loads(body) if body else {}
+              print('CORE_OPTION_READER',json.dumps({'rows_read':len(rows),'raw_type':type(body).__name__,'contains_nan':'NaN' in str(body),'contains_infinity':'Infinity' in str(body),'demo':parsed.get('demo'),'keys':sorted(parsed.keys())}),flush=True)
             finally:cache.close()
             print('READ_ONLY_NO_NEW_TRADE_NO_ACK_NO_ORDERS_NO_NEW_RESEARCH',flush=True)
             PY
