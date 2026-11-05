@@ -9,3 +9,5 @@ Scope is exactly the existing isolated intraday publication contract: include `d
 3. Normal exact-SHA delivery/readiness/smoke/publications, then repeated actual runtime freshness and API latency. ExistingCLOSE_25 trade142 requires factual broker reconciliation and must never be ACKed by this work.
 
 Ruling: this is the missing consumer boundary in the already approved source-restoration design, with one obvious correction; no new design decision or user approval is needed. Repeating standalone provider probes or changing freshness thresholds would not repair the discarded publication.
+
+Release validation found an independent reproducibility blocker: unversioned Playwright selected1.65.0 while its requiredplaywright-core1.65.0 was unavailable in npm. The original browser attempt and one isolated retry failed before tests. Pin the published stable1.64.1 installer; retain every existing WebKit check/cache key/admission step and rerun mandatory final-tree CI. Product code and the independently reviewed publication correction remain unchanged.
