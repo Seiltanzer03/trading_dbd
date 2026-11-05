@@ -1,4 +1,4 @@
-name: bounded-decision-model-input-trace
+name: bounded-core-input-release-acceptance
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -19,60 +19,56 @@ jobs:
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import json,pathlib,sqlite3,threading,time,types
+            import json,pathlib,sqlite3,subprocess,time,urllib.request
             from seiltanzer.sqlite_json_payloads import unpack_text
-            from seiltanzer.edge_discovery.ai_context import _latest_frozen_context,canonical_current_feature_map
-            from seiltanzer.active_edge_ai_integration import build_active_edge_context
-            root=pathlib.Path('/opt/seiltanzer/data')
-            conn=sqlite3.connect('file:'+str(root/'trades.db')+'?mode=ro',uri=True,timeout=.1)
-            def row_factory(cursor,row):
-              result={col[0]:value for col,value in zip(cursor.description,row)}
-              for key in ('frozen_features_json','features_json'):
-                if key in result:result[key]=unpack_text(result[key])
-              return result
-            conn.row_factory=row_factory
-            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-2048');conn.execute('PRAGMA trusted_schema=OFF')
-            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,4*1024**2)
-            runtime=types.SimpleNamespace(_conn=conn,_lock=threading.RLock())
-            engine=types.SimpleNamespace(short_horizon=runtime,settings=types.SimpleNamespace(data_dir=root,ede_context_max_age_sec=900))
-            now=time.time()
-            for code in ('NAS100','SP500','US30','GER40','UK100','JPY100','XAU','XAG','EURUSD','USDCAD'):
-              deadline=time.monotonic()+1.
-              conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+            expected='197176c76d4c0412abe0785653987093dbc6f1b6'
+            actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+            print('CORE_ACCEPTANCE_SHA',json.dumps({'expected':expected,'actual':actual,'match':actual==expected}),flush=True)
+            assert actual==expected
+            root=pathlib.Path('/opt/seiltanzer/data');now=time.time()
+            print('CORE_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'],text=True).strip(),flush=True)
+            for path in ('/api/state','/api/research/runtime/worker-status'):
+              started=time.monotonic()
               try:
-                passive=conn.execute('SELECT captured_ts FROM passive_market_observations WHERE instrument=? ORDER BY captured_ts DESC LIMIT 1',(code,)).fetchone()
-                frozen=_latest_frozen_context(engine,{'captured_ts':now,'strategy':{'instrument':code}})
-                values=canonical_current_feature_map(frozen,code)
-                available={k:v for k,v in values.items() if v.get('available')}
-                stamp=frozen.get('observation_t0')
-                print('CORE_MODEL_INPUTS',json.dumps({'instrument':code,'passive_age_sec':None if not passive else now-passive['captured_ts'],'frozen_age_sec':None if stamp is None else now-stamp,'registry_metrics':len(values),'available_at_capture':len(available),'within_management_900s':{k:bool(v.get('asof') is not None and 0<=now-v['asof']<=900) for k,v in available.items()},'root_groups':sorted((frozen.get('_raw_frozen') or {}).keys()),'read_reason':frozen.get('_context_read')}),flush=True)
-              except Exception as error:print('CORE_MODEL_INPUTS',json.dumps({'instrument':code,'error_type':type(error).__name__}),flush=True)
-            conn.set_progress_handler(None,0)
-            snapshot={'captured_ts':time.time(),'strategy':{'instrument':'NAS100'}}
-            try:
-              context=build_active_edge_context(engine,snapshot)
-              keys=('measurement_available','available','report_state','source_report_n','expected_report_n','structured_signal_n','ml_signal_n','matched_structured_signal_n','total_active_signal_n','runtime_sha')
-              print('CORE_ACTIVE_EDGE',json.dumps({k:context.get(k) for k in keys}),flush=True)
-            except Exception as error:print('CORE_ACTIVE_EDGE_ERROR',type(error).__name__,flush=True)
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:
+                  raw=response.read(4000001);assert len(raw)<=4000000;data=json.loads(raw)
+              except Exception as error:
+                print('CORE_HTTP_PENDING',json.dumps({'path':path,'error_type':type(error).__name__}),flush=True);continue
+              if path.endswith('worker-status'):
+                print('CORE_RUNTIME_INPUTS',json.dumps(data.get('decision_model_inputs')),flush=True)
+                worker=data.get('worker') or {}
+                print('CORE_RESEARCH_WORKER',json.dumps({k:worker.get(k) for k in ('status','phase','running','last_error','task','busy')}),flush=True)
+              else:
+                price=(data.get('feeds') or {}).get('price') or {}
+                trade=data.get('trade') or data.get('active_trade')
+                print('CORE_LIVE_STATE',json.dumps({'http':200,'elapsed_ms':round((time.monotonic()-started)*1000),'top_keys':sorted(data.keys()),'active_trade_present':bool(trade),'quote':{k:price.get(k) for k in ('status','source','ts','fresh','derived')}}),flush=True)
+            complete=True
             for name in ['active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)]]:
               path=root/'research'/name
               row={'name':name,'exists':path.is_file()}
-              if path.is_file():
-                meta=path.stat();row.update(bytes=meta.st_size,mtime=meta.st_mtime)
-                if meta.st_size<=12000000:
-                  data=json.loads(path.read_bytes());row.update({k:data.get(k) for k in ('created_ts','captured_ts','published_for_sha','contract_version')})
-              print('CORE_ACTIVE_PUBLICATION',json.dumps(row),flush=True)
+              if path.is_file() and path.stat().st_size<=8000000:
+                payload=json.loads(path.read_bytes());age=now-path.stat().st_mtime
+                valid=payload.get('published_for_sha')==expected and 0<=age<=8*3600
+                row.update(sha=payload.get('published_for_sha'),age_sec=round(age),valid_current_generation=valid)
+              else:valid=False
+              complete=complete and valid
+              print('CORE_ACTIVE_REPORT',json.dumps(row),flush=True)
+            print('CORE_ACTIVE_SET',json.dumps({'complete':complete,'expected_reports':6}),flush=True)
+            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
+              path=root/'research'/name
+              row={'name':name,'exists':path.is_file()}
+              if path.is_file() and path.stat().st_size<=12000000:
+                payload=json.loads(path.read_bytes());row.update(sha=payload.get('published_for_sha'),age_sec=round(now-path.stat().st_mtime))
+                if name.startswith('mathematical'):
+                  matrix=payload.get('family_market_models') or {}
+                  row['trained_families_by_instrument']={code:sorted(f for f,m in models.items() if isinstance(m,dict) and m.get('status')=='TRAINED') for code,models in matrix.items() if isinstance(models,dict)}
+              print('CORE_MODEL_PUBLICATION',json.dumps(row),flush=True)
+            conn=sqlite3.connect('file:'+str(root/'trades.db')+'?mode=ro',uri=True,timeout=.1)
+            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-1024');conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,4000000)
+            deadline=time.monotonic()+1.;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
             try:
-              row=conn.execute('SELECT payload_json FROM llm_edge_lifecycle_materialized WHERE singleton_id=1 LIMIT 1').fetchone()
-              data=json.loads(row['payload_json']) if row else {}
-              print('CORE_HISTORICAL_LLM',json.dumps({'status':data.get('status'),'updated_ts':data.get('updated_ts'),'keys':sorted(data.keys()),'researcher':{k:v for k,v in (data.get('researcher') or {}).items() if isinstance(v,(bool,int,float))}}),flush=True)
-            except Exception as error:print('CORE_HISTORICAL_LLM_ERROR',type(error).__name__,flush=True)
-            try:
-              row=conn.execute('SELECT ts,model,snapshot_json FROM ai_verdicts ORDER BY id DESC LIMIT 1').fetchone()
-              if row:
-                data=json.loads(row['snapshot_json']);manager=data.get('policy_manager') or {}
-                print('CORE_LAST_ACTUAL_AI_REVIEW',json.dumps({'ts':row['ts'],'model':row['model'],'snapshot_ts':data.get('captured_ts'),'active_edge':{k:(manager.get('active_edge_provisional_weight') or {}).get(k) for k in ('available','reason')},'math':{k:(manager.get('mathematical_edge') or {}).get(k) for k in ('available','reason')},'historical_llm':{k:(manager.get('llm_edge_exploratory_weight') or {}).get(k) for k in ('available','reason')},'family_context':{k:(data.get('edge_family_market_context') or {}).get(k) for k in ('available','reason')},'budget_exclusions':data.get('edge_family_budget_status'),'snapshot_budget':{k:(data.get('snapshot_budget') or {}).get(k) for k in ('degrade_level','degraded','final_bytes')}}),flush=True)
-            except Exception as error:print('CORE_LAST_ACTUAL_AI_REVIEW_ERROR',type(error).__name__,flush=True)
-            conn.close()
-            print('READ_ONLY_EXISTING_INPUTS_NO_NEW_TRADE_NO_ACK_NO_PROVIDER',flush=True)
+              row=conn.execute('SELECT ts,model FROM ai_verdicts ORDER BY id DESC LIMIT 1').fetchone()
+              print('CORE_LAST_REAL_AI',json.dumps({'ts':row[0],'model':row[1]} if row else {}),flush=True)
+            finally:conn.close()
+            print('READ_ONLY_NO_NEW_TRADE_NO_ACK_NO_ORDERS_NO_NEW_RESEARCH',flush=True)
             PY
