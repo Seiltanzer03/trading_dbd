@@ -66,6 +66,10 @@ def _compact_policy_regime(source: Any) -> dict[str, Any]:
 
 
 def _latest_frozen_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
+    from ..decision_metric_inputs import live_decision_context
+    current=live_decision_context(engine,snapshot)
+    if current is not None:
+        return current
     runtime = getattr(engine, "short_horizon", None)
     instrument = str((snapshot.get("strategy") or {}).get("instrument") or "")
     cutoff = snapshot.get("captured_ts")

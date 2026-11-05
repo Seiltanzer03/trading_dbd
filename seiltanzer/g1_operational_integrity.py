@@ -171,18 +171,19 @@ def _legacy_wavelet_compat(rows: list[dict[str, Any]], captured_ts: float) -> di
 
 def _safe_build_v2(engine: PassiveLearningEngine, instrument: str,
                    captured_ts: float, market_price: float,
-                   features: dict[str, Any]) -> dict[str, Any]:
-    try:
-        with engine._lock:
-            rows = [dict(row) for row in engine._conn.execute(
-                "SELECT bar_start_ts,bar_end_ts,close,high,low,source,quality,kind "
-                "FROM passive_market_bars WHERE instrument=? AND bar_end_ts<=? "
-                "AND bar_end_ts>=? ORDER BY bar_end_ts",
-                (instrument, captured_ts + 1e-6, captured_ts - 6 * 3600.0),
-            ).fetchall()]
-    except Exception as exc:  # noqa: BLE001
-        _record_feature_error(engine, "v2_market_bars", exc)
-        rows = []
+                   features: dict[str, Any], *, rows=None) -> dict[str, Any]:
+    if rows is None:
+        try:
+            with engine._lock:
+                rows = [dict(row) for row in engine._conn.execute(
+                    "SELECT bar_start_ts,bar_end_ts,close,high,low,source,quality,kind "
+                    "FROM passive_market_bars WHERE instrument=? AND bar_end_ts<=? "
+                    "AND bar_end_ts>=? ORDER BY bar_end_ts",
+                    (instrument, captured_ts + 1e-6, captured_ts - 6 * 3600.0),
+                ).fetchall()]
+        except Exception as exc:  # noqa: BLE001
+            _record_feature_error(engine, "v2_market_bars", exc)
+            rows = []
 
     intraday = _call_optional(
         engine, "v2_intraday", _v2.FEATURE_CONTRACT_V2,
@@ -232,12 +233,13 @@ def _safe_build_v2(engine: PassiveLearningEngine, instrument: str,
 def _safe_build_v3(engine: PassiveLearningEngine, instrument: str,
                    captured_ts: float, market_price: float,
                    features: dict[str, Any],
-                   provenance: dict[str, Any] | None = None) -> dict[str, Any]:
-    rows = _call_optional(
-        engine, "v3_market_bars", _v3.MARKET_EVIDENCE_V3,
-        lambda: _v3._bars(engine, instrument, captured_ts),
-        fallback=lambda exc: [],
-    )
+                   provenance: dict[str, Any] | None = None, *, rows=None) -> dict[str, Any]:
+    if rows is None:
+        rows = _call_optional(
+            engine, "v3_market_bars", _v3.MARKET_EVIDENCE_V3,
+            lambda: _v3._bars(engine, instrument, captured_ts),
+            fallback=lambda exc: [],
+        )
     points = _call_optional(
         engine, "v3_5m_points", _v3.MARKET_EVIDENCE_V3,
         lambda: _v3._five_minute_points(rows, captured_ts),

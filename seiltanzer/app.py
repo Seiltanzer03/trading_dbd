@@ -573,6 +573,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="Seiltanzer Terminal", version="0.1.0")
     app.state.engine = engine
+    from .decision_metric_inputs import DecisionMetricRuntime
+    engine.decision_metric_runtime=DecisionMetricRuntime(engine)
     app.state.settings = settings
     app.state.live_tick_snapshot = live_tick_snapshot
 
@@ -792,14 +794,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # so an otherwise responsive terminal does not publish stale quotes.
         live_executor = ThreadPoolExecutor(
             max_workers=3, thread_name_prefix="live-market")
+        metric_executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='decision-metrics')
 
         async def live_work(function):
             context = copy_context()
             return await asyncio.get_running_loop().run_in_executor(
                 live_executor, context.run, function)
 
+        async def metric_work(function):
+            context=copy_context()
+            return await asyncio.get_running_loop().run_in_executor(metric_executor,context.run,function)
+
         last = {"price": 0.0, "proxy_price": 0.0, "intraday": 0.0, "vols": 0.0,
-                "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0, "bybit": 0.0}
+                "daily": 0.0, "chain": 0.0, "iv_surface": 0.0, "correlation": 0.0, "bybit": 0.0,
+                'decision_metrics':0.0}
         running: dict[str, asyncio.Task] = {}
         tick_task: asyncio.Task | None = None
         state_task: asyncio.Task | None = None
@@ -822,6 +830,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "iv_surface": 1.0 if settings.demo else settings.chain_poll_sec,
             "correlation": 30.0 if settings.demo else 300.0,
             "bybit": 15.0,
+            'decision_metrics':30.0,
         }
         jobs = {
             "price": engine.market.refresh_price,
@@ -833,6 +842,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "iv_surface": engine.market.refresh_iv_surface,
             "correlation": engine.market.refresh_correlation,
             "bybit": engine.market.refresh_bybit,
+            'decision_metrics':engine.decision_metric_runtime.refresh,
         }
 
         async def calculate_tick():
@@ -874,9 +884,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # form a retry storm and starve the live request path.
                     state_last_finished = time.monotonic()
                 for name, fn in jobs.items():
+                    if name=='decision_metrics':
+                        if live_tick_snapshot['payload'] is None:
+                            continue
+                        metric_state=engine.decision_metric_runtime.status()
+                        if metric_state.get('instrument')!=engine.market.instrument_code and now-last[name]>=5:
+                            last[name]=0.0
                     if name not in running and now - last[name] >= periods[name]:
                         last[name] = now
-                        work = live_work(fn) if name in {"price", "proxy_price"} else asyncio.to_thread(fn)
+                        work = (metric_work(fn) if name=='decision_metrics' else
+                                live_work(fn) if name in {"price", "proxy_price"} else asyncio.to_thread(fn))
                         running[name] = asyncio.create_task(work)
 
                 # A slow canonical calculation must not suspend the feed
@@ -925,6 +942,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     draining.result()
             finally:
                 live_executor.shutdown(wait=True)
+                metric_executor.shutdown(wait=True)
 
     async def passive_loop():
         from .background_disk_admission import passive_step

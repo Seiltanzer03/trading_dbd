@@ -47,7 +47,7 @@ class _EngineInputView:
         setattr(self._engine, name, value)
 
 
-def capture_market_inputs(engine):
+def capture_market_inputs(engine, *, include_decision_metrics=True):
     """Copy coherent existing bars/proof before expensive snapshot computation."""
     feed = getattr(engine, "market", None)
     market = SimpleNamespace(instrument_code=getattr(feed, "instrument_code", None),
@@ -55,6 +55,7 @@ def capture_market_inputs(engine):
         intraday_ohlcv=[], intraday_source_authority={}, binance_trade_flow={}, chain=None,
         family_reference_series=None, frozen_inputs_captured_ts=None,
         treasury_context_v1=None,
+        price={},daily={},correlation={},live_metric_context=None,
         _intraday_lock=threading.Lock())
     lock = getattr(feed, "_intraday_lock", None)
     acquired = lock is None or lock.acquire(blocking=False)
@@ -63,6 +64,11 @@ def capture_market_inputs(engine):
         return _EngineInputView(engine, market)
     try:
         market.instrument_code = getattr(feed, "instrument_code", None)
+        for name in ('price','daily','correlation'):
+            try:
+                setattr(market,name,_bounded_copy(getattr(feed,name,{})))
+            except (ValueError,TypeError,RecursionError):
+                setattr(market,name+'_freeze_reason','METRIC_INPUT_FREEZE_BOUND')
         market.intraday_is_offset = getattr(feed, "intraday_is_offset", False)
         market.intraday_ohlcv = _bounded_copy(getattr(feed, "intraday_ohlcv", []))
         market.intraday_source_authority = _bounded_copy(getattr(feed, "intraday_source_authority", {}))
@@ -103,6 +109,13 @@ def capture_market_inputs(engine):
     except Exception as exc:
         # An optional parent cannot erase the independently frozen price lane.
         market.treasury_freeze_reason = 'TREASURY_INPUT_FREEZE_UNAVAILABLE:'+type(exc).__name__
+    if include_decision_metrics:
+        runtime=getattr(engine,'decision_metric_runtime',None)
+        if runtime is not None:
+            current=runtime.context_at(market.instrument_code,market.frozen_inputs_captured_ts)
+            if current is not None:
+                from copy import deepcopy
+                market.live_metric_context=deepcopy(current)
     return _EngineInputView(engine, market)
 
 
@@ -123,17 +136,24 @@ def expert_inputs_frozen(snapshot: dict) -> bool:
 
 
 def publication_marker(engine):
-    """Two local stats; no JSON reads, network, or per-tick rebuilding."""
+    """Local publication identities; no JSON reads, network or SQL scans."""
     data_dir = getattr(getattr(engine, "settings", None), "data_dir", None)
     if not data_dir:
         return None
     result = []
-    for name in ("mathematical_edge_latest.json", "edge_family_sources_latest.json"):
+    for name in ("mathematical_edge_latest.json", "edge_family_sources_latest.json",
+                 'active_ml_latest.json',*[f'active_structured_{h}m_latest.json'
+                                           for h in (15,30,60,120,240)]):
         try:
             stat = (Path(data_dir)/"research"/name).stat()
             result.append((name, stat.st_ino, stat.st_size, stat.st_mtime_ns))
         except OSError:
             result.append((name, None))
+    lifecycle=getattr(getattr(engine,'short_horizon',None),'_llm_edge_decision_marker',None)
+    result.append(('historical_llm',lifecycle))
+    runtime=getattr(engine,'decision_metric_runtime',None)
+    if runtime is not None:
+        result.append(('decision_metrics',runtime.generation_marker()))
     return tuple(result)
 
 
@@ -188,6 +208,10 @@ def freeze_expert_inputs(engine, snapshot: dict, *, market_inputs=None) -> None:
     if not getattr(getattr(engine, "settings", None), "data_dir", None):
         return
     market_inputs = market_inputs if market_inputs is not None else capture_market_inputs(engine)
+    current=getattr(market_inputs.market,'live_metric_context',None)
+    if isinstance(current,dict):
+        from .decision_metric_inputs import pack_decision_metrics
+        snapshot['decision_metric_inputs']=pack_decision_metrics(current,market_inputs.market.instrument_code)
     from .app import _attach_family_source_bundle
     from .edge_family_event_reaction import attach_observed_event_reaction_bounded
     from .edge_family_market import attach_market_family_context

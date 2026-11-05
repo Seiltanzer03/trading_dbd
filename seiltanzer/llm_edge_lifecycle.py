@@ -81,6 +81,12 @@ def publish_materialized_lifecycle_cache(runtime: Any, payload_json: str) -> Non
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     setattr(runtime, _MATERIALIZED_CACHE_ATTR, serialized)
     setattr(runtime, _MATERIALIZED_VALIDATED_ATTR, serialized)
+    import hashlib
+    # A clock-only refresh is not a changed model opinion. Preserve actual
+    # hypothesis/candidate changes as an O(1) materializer invalidation input.
+    decisions={key:payload.get(key) for key in ('research_hypotheses','candidates')}
+    runtime._llm_edge_decision_marker=hashlib.sha256(
+        json.dumps(decisions,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     # Keep status latency independent from the number and evidence size of
     # hypotheses in the full immutable lifecycle document.
     setattr(runtime, _MATERIALIZED_STATUS_CACHE_ATTR, {

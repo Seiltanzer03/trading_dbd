@@ -170,6 +170,7 @@ def _strict_authoritative_compaction(snapshot: dict[str, Any]) -> None:
         "validation", "data_quality", "market_state", "hard_risk",
         "risk_constraints", "metric_coverage", "policy_manager", "snapshot_budget",
         "market_regime", "regime", "edge_regime", "edge_family_budget_status", "frozen_expert_inputs",
+        "decision_metric_inputs",
     ) + FAMILY_ROOTS + FAMILY_AUDITS
     compact_root = {
         key: snapshot[key] for key in root_keep
