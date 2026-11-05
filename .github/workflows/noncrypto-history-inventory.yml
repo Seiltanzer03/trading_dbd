@@ -1,4 +1,4 @@
-name: current-terminal-startup-readonly
+name: current-model-input-acceptance
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,35 +8,95 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 2
+    timeout-minutes: 20
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45s
+          command_timeout: 18m
           script: |
-            /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,subprocess,urllib.request
-            root=pathlib.Path('/opt/seiltanzer')
-            print('STARTUP_SHA',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            state=subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','ExecMainStartTimestamp'],text=True).strip()
-            print('STARTUP_SERVICE',state,flush=True)
-            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+            cd /opt/seiltanzer
+            PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
+            import json,pathlib,sqlite3,subprocess,time,urllib.request
+            expected='b9234b29f3e062889a7dcff84561604778abfc55'
+            deadline=time.monotonic()+900
+            while time.monotonic()<deadline:
+              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+              current={};new_runtime=False
+              if installed==expected:
+                try:
+                  with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=4) as response:
+                    raw=response.read(1000001);assert len(raw)<=1000000;body=json.loads(raw)
+                  current=body.get('decision_model_inputs') or {}
+                  new_runtime=isinstance(body.get('decision_family_sources'),dict)
+                  with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4) as response:ready=response.status==200
+                  if ready and new_runtime and current.get('state')=='READY' and current.get('metric_count')==92 and current.get('available_metrics',0)>15:break
+                except Exception:pass
+              print('MODEL_NEW_RUNTIME_WAIT',json.dumps({'installed_expected_sha':installed==expected,'new_runtime_seen':new_runtime,**{key:current.get(key) for key in ('state','metric_count','available_metrics')}}),flush=True)
+              time.sleep(15)
+            else:raise RuntimeError('EXPECTED_NEW_RUNTIME_INPUTS_NOT_READY_WITHIN_BOUND')
+            actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+            print('MODEL_SHA',json.dumps({'expected':expected,'actual':actual,'match':actual==expected}),flush=True)
+            assert actual==expected
+            print('MODEL_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'],text=True).strip(),flush=True)
+            root=pathlib.Path('/opt/seiltanzer/data');now=time.time();position={}
+            def read(path):
+              started=time.monotonic()
+              with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:
+                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
+              print('MODEL_HTTP',json.dumps({'path':path,'status':200,'ms':round((time.monotonic()-started)*1000)}),flush=True)
+              return body
+            for route in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status','/api/position'):
+              try:body=read(route)
+              except Exception as error:
+                print('MODEL_HTTP_PENDING',json.dumps({'path':route,'error_type':type(error).__name__}),flush=True);continue
+              if route.endswith('/state'):
+                tick=body['tick'];price=tick['feeds']['price']
+                print('MODEL_LIVE_QUOTE',json.dumps({'instrument':tick['instrument'],**{key:price.get(key) for key in ('status','source','ts','fresh','derived')}}),flush=True)
+              elif route.endswith('worker-status'):
+                print('MODEL_DECISION_INPUTS',json.dumps(body.get('decision_model_inputs')),flush=True)
+                print('MODEL_SOURCE_REFRESH',json.dumps(body.get('decision_family_sources')),flush=True)
+                worker=body.get('worker') or {}
+                print('MODEL_WORKER',json.dumps({key:worker.get(key) for key in ('running','current_phase','core_stage','maintenance_phase','acceptance_pause_active')}),flush=True)
+              elif route.endswith('snapshot/status'):
+                print('MODEL_AI_SNAPSHOT',json.dumps({key:body.get(key) for key in ('ready','building','age_sec','current_trade_id','invalidated_reason','build_ms','family_market_forecasts')}),flush=True)
+              else:
+                position=body
+                reconciliation=body.get('execution_reconciliation') or {}
+                print('MODEL_POSITION_GUARD',json.dumps({'trade_id':body.get('trade_id'),'reconciliation_required':bool(reconciliation),'unresolved_commands':[{key:command.get(key) for key in ('decision_id','policy','execution_status','issued_at','parameters')} for command in reconciliation.get('commands') or []]}),flush=True)
+            for name in ['active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)],'mathematical_edge_latest.json','edge_family_sources_latest.json','edge_family_sources_runtime.json']:
+              path=root/'research'/name;item={'name':name,'exists':path.is_file()}
+              if path.is_file() and path.stat().st_size<=12000000:
+                document=json.loads(path.read_bytes());item.update(sha=document.get('published_for_sha'),bytes=path.stat().st_size,age_sec=round(now-path.stat().st_mtime),capture_age_sec=now-document['captured_ts'] if isinstance(document.get('captured_ts'),(int,float)) else None)
+                item['current_generation']=document.get('published_for_sha')==expected
+                if name=='mathematical_edge_latest.json':
+                  item['trained_by_instrument']={code:sum(isinstance(value,dict) and value.get('status')=='TRAINED' for value in rows.values()) for code,rows in (document.get('family_market_models') or {}).items() if isinstance(rows,dict)}
+              print('MODEL_PUBLICATION',json.dumps(item),flush=True)
+            conn=sqlite3.connect('file:'+str(root/'trades.db')+'?mode=ro',uri=True,timeout=.1)
+            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-1024');conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,16000000)
+            deadline=time.monotonic()+1.;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
             try:
-              io=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'io').read_text().splitlines())
-              status=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'status').read_text().splitlines() if ':' in line)
-              print('STARTUP_IO',json.dumps({'pid':pid,'read_bytes':int(io['read_bytes']),'rchar':int(io['rchar']),'rss':status.get('VmRSS','').strip(),'swap':status.get('VmSwap','').strip()}),flush=True)
-            except FileNotFoundError:pass
-            result=subprocess.run(['journalctl','-u','seiltanzer','--since','-20 minutes','-n','300','--no-pager','-o','cat'],capture_output=True,text=True,timeout=5)
-            for line in result.stdout.splitlines():
-              if line.startswith('STARTUP_PHASE '):print('STARTUP_PROGRESS',line[:300],flush=True)
-            for route in ('/api/state','/api/research/runtime/worker-status'):
-              try:
-                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=4) as response:
-                  body=json.load(response) if route.endswith('worker-status') else None
-                  print('STARTUP_HTTP',route,response.status,flush=True)
-                  if body is not None:print('STARTUP_RUNTIME',json.dumps({'inputs':body.get('decision_model_inputs'),'sources':body.get('decision_family_sources')}),flush=True)
-              except Exception as error:print('STARTUP_HTTP_PENDING',route,type(error).__name__,flush=True)
+              if position.get('trade_id') is not None:
+                row=conn.execute('SELECT ts,model,snapshot_json FROM ai_verdicts WHERE trade_id=? ORDER BY id DESC LIMIT 1',(position['trade_id'],)).fetchone()
+              else:row=None
+              if row:
+                from seiltanzer.sqlite_json_payloads import unpack_text
+                from seiltanzer.decision_metric_inputs import decision_metric_values
+                snapshot=json.loads(unpack_text(row[2]));manager=snapshot.get('policy_manager') or {};metrics=decision_metric_values(snapshot)
+                shadow=snapshot.get('llm_shadow_decision') or {};contract=shadow.get('input_contract') or {};wire=contract.get('frozen_input_json');packet=json.loads(wire) if isinstance(wire,str) else {}
+                encoded=packet.get('decision_model_metrics') or {}
+                print('MODEL_SAVED_REVIEW',json.dumps({'ts':row[0],'age_sec':now-row[0],'model':row[1],'captured_ts':snapshot.get('captured_ts'),'metrics':None if metrics is None else len(metrics),'available_metrics':None if metrics is None else sum(value.get('available') is True for value in metrics.values()),'llm_status':shadow.get('status'),'provider_input_bytes':len(wire.encode()) if isinstance(wire,str) else None,'provider_metric_count':len(encoded),'provider_metric_provenance':packet.get('decision_model_metric_provenance')}),flush=True)
+                ensemble=manager.get('unified_edge_ensemble') or {}
+                print('MODEL_SAVED_COMPONENTS',json.dumps([{key:value.get(key) for key in ('component_id','available','effective_weight','reason')} for value in ensemble.get('components') or []]),flush=True)
+                profiles={key:{field:(manager.get(key) or {}).get(field) for field in ('available','reason','observed_ts')} for key in ('mathematical_edge','active_edge_provisional_weight','llm_edge_exploratory_weight')}
+                print('MODEL_SAVED_PROFILES',json.dumps(profiles),flush=True)
+                families=(snapshot.get('edge_family_market_context') or {}).get('families') or {}
+                print('MODEL_SAVED_FAMILIES',json.dumps({name:{key:value.get(key) for key in ('available','reason','market_model_trained','forecast_available','forecast_origin_ts')} for name,value in families.items() if isinstance(value,dict)}),flush=True)
+                geometry=snapshot.get('trade_geometry') or {};probabilities={key:geometry.get(key) for key in ('take_first','stop_or_be_first','no_touch')}
+                print('MODEL_SAVED_GEOMETRY',json.dumps(probabilities),flush=True)
+              else:print('MODEL_SAVED_REVIEW','NO_CURRENT_TRADE_REVIEW',flush=True)
+            finally:conn.close()
+            print('READ_ONLY_NO_POST_NO_TRADE_NO_ACK_NO_ORDERS_NO_RESEARCH',flush=True)
             PY
