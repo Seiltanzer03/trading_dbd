@@ -1,4 +1,4 @@
-name: current-release-start-guard-readonly
+name: current-release-guard-query-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -18,41 +18,49 @@ jobs:
           command_timeout: 55s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import hashlib,json,os,pathlib,shutil,subprocess,time,urllib.request
+            import importlib.util,json,pathlib,runpy,sqlite3,time
             root=pathlib.Path('/opt/seiltanzer');data=root/'data'
-            print('RELEASE_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('SERVICE_STATE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','MemoryCurrent'],text=True).splitlines()),flush=True)
-            source=(root/'scripts/history_service_fence.py').read_bytes();installed=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
-            print('GUARD_CODE_MATCH',source==installed,flush=True)
-            print('SOURCE_CLEAN',subprocess.run(['git','-C',str(root),'diff','--quiet','HEAD','--','scripts','seiltanzer']).returncode==0,flush=True)
-            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_bytes':(data/'trades.db').stat().st_size}),flush=True)
-            pointer=None
-            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
-              p=data/name
-              if not os.path.lexists(p):print('GUARD_METADATA',name,'ABSENT',flush=True);continue
-              if p.is_symlink() or p.stat().st_size>65536:print('GUARD_METADATA',name,'UNSAFE_TYPE_OR_SIZE',flush=True);continue
-              v=json.loads(p.read_text())
-              print('GUARD_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','application_sha','phase','service_started')}),flush=True)
-              if name=='json-history.epoch.json':pointer=v
-            if pointer and isinstance(pointer.get('run_id'),str) and pointer['run_id'].isalnum():
-              metadata=data/('json-rebuild-'+pointer['run_id'])
-              for name in ('cutover.active','cutover.preparation.json','cutover.journal.json','cutover.result.json'):
-                p=metadata/name
-                if not os.path.lexists(p):print('JSON_EPOCH',name,'ABSENT',flush=True);continue
-                if p.is_symlink() or p.stat().st_size>65536:print('JSON_EPOCH',name,'UNSAFE_TYPE_OR_SIZE',flush=True);continue
-                v=json.loads(p.read_text());print('JSON_EPOCH',name,json.dumps({k:v.get(k) for k in ('contract','run_id','application_sha','phase','service_started','abort_reason')}),flush=True)
-            started=time.monotonic()
-            result=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)
-            print('ACTUAL_START_GUARD',json.dumps({'exit':result.returncode,'elapsed_sec':round(time.monotonic()-started,3),'result':json.loads(result.stdout)}),flush=True)
-            for route in ('/api/state','/api/research/runtime/worker-status','/api/position'):
-              started=time.monotonic()
-              try:
-                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as r:
-                  body=json.loads(r.read(4000000));status=r.status
-                if route=='/api/research/runtime/worker-status':body={k:body.get(k) for k in ('decision_model_inputs','decision_family_sources')}
-                elif route=='/api/position':body={'trade_id':body.get('trade_id'),'execution_reconciliation':body.get('execution_reconciliation')}
-                else:body={'tick_ts':(body.get('tick') or {}).get('ts'),'instrument':(body.get('tick') or {}).get('instrument')}
-                print('LIVE_ROUTE',route,json.dumps({'http':status,'elapsed_ms':round((time.monotonic()-started)*1000,1),'body':body}),flush=True)
-              except Exception as error:print('LIVE_ROUTE_ERROR',route,type(error).__name__,flush=True)
-            print('READ_ONLY_RECEIPT',json.dumps({'db_writes':0,'service_restarts':0,'orders':0,'acks':0,'guard_changes':0}),flush=True)
+            original_connect=sqlite3.connect
+            class MeasuredConnection(sqlite3.Connection):
+              def execute(self,sql,*args,**kwargs):
+                self.current_sql=sql;self.sql_started=time.monotonic()
+                return super().execute(sql,*args,**kwargs)
+              def set_progress_handler(self,callback,count):
+                if callback is None:return super().set_progress_handler(None,count)
+                def progress():
+                  result=callback()
+                  if result:print('GUARD_INTERRUPTED_QUERY',json.dumps({'sql':getattr(self,'current_sql','')[:700],'query_sec':round(time.monotonic()-getattr(self,'sql_started',time.monotonic()),3)}),flush=True)
+                  return result
+                return super().set_progress_handler(progress,count)
+            def measured_connect(*args,**kwargs):
+              kwargs['factory']=MeasuredConnection
+              return original_connect(*args,**kwargs)
+            sqlite3.connect=measured_connect
+            guard=runpy.run_path('/usr/local/lib/seiltanzer-history-start-guard.py')
+            started=time.monotonic();result=guard['check_start'](data/'trades.db',root)
+            print('UNCHANGED_GUARD_RESULT',json.dumps({'result':result,'elapsed_sec':round(time.monotonic()-started,3)}),flush=True)
+            sqlite3.connect=original_connect
+            spec=importlib.util.spec_from_file_location('_readonly_storage_timing',root/'seiltanzer/history_storage_state.py')
+            storage=importlib.util.module_from_spec(spec);spec.loader.exec_module(storage)
+            conn=sqlite3.connect((data/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=1)
+            conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA trusted_schema=OFF');conn.execute('PRAGMA cache_size=-2048')
+            deadline=time.monotonic()+25;conn.set_progress_handler(lambda:time.monotonic()>=deadline,1000)
+            try:
+              started=time.monotonic();state=storage.read_history_state(conn)
+              print('GUARD_COMPONENT',json.dumps({'component':'marker','elapsed_sec':round(time.monotonic()-started,3)}),flush=True)
+              for table,proof in state['retained_identity'].items():
+                started=time.monotonic();actual=storage.identity_proof(conn,table,proof['max_rowid'])
+                print('GUARD_COMPONENT',json.dumps({'component':table,'row_count':actual['row_count'],'matches':actual==proof,'elapsed_sec':round(time.monotonic()-started,3)}),flush=True)
+              projection=storage._runtime_projection();last=[None,time.monotonic()]
+              def trace(sql):
+                now=time.monotonic()
+                if last[0] is not None:print('PROJECTION_SQL',json.dumps({'sql':last[0][:700],'elapsed_sec':round(now-last[1],3)}),flush=True)
+                last[:]=[sql,now]
+              conn.set_trace_callback(trace);started=time.monotonic()
+              projection.validate_runtime_projection(conn,state['runtime_projection'],retired_rowids=state['retired_rowids']['passive_market_observations'])
+              trace('END')
+              print('GUARD_COMPONENT',json.dumps({'component':'complete_projection','elapsed_sec':round(time.monotonic()-started,3),'matches':True}),flush=True)
+            except Exception as error:print('GUARD_TIMING_ERROR',type(error).__name__,str(error)[:180],flush=True)
+            finally:conn.close()
+            print('READ_ONLY_RECEIPT',json.dumps({'db_writes':0,'service_restarts':0,'guard_changes':0,'orders':0,'acks':0}),flush=True)
             PY
