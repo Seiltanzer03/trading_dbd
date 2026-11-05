@@ -1,4 +1,4 @@
-name: current-release-start-guard-readonly
+name: current-release-startup-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,51 +8,40 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 2
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 55s
+          command_timeout: 35s
           script: |
             /usr/bin/python3 -B -u - <<'PY'
-            import hashlib,json,os,pathlib,shutil,subprocess,time,urllib.request
-            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
+            import json,pathlib,subprocess,time,urllib.request
+            root=pathlib.Path('/opt/seiltanzer')
             print('RELEASE_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
-            print('SERVICE_STATE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','MemoryCurrent'],text=True).splitlines()),flush=True)
-            source=(root/'scripts/history_service_fence.py').read_bytes();installed=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
-            print('GUARD_CODE_MATCH',source==installed,flush=True)
-            print('SOURCE_CLEAN',subprocess.run(['git','-C',str(root),'diff','--quiet','HEAD','--','scripts','seiltanzer']).returncode==0,flush=True)
-            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_bytes':(data/'trades.db').stat().st_size}),flush=True)
-            pointer=None
-            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
-              p=data/name
-              if not os.path.lexists(p):print('GUARD_METADATA',name,'ABSENT',flush=True);continue
-              if p.is_symlink() or p.stat().st_size>65536:print('GUARD_METADATA',name,'UNSAFE_TYPE_OR_SIZE',flush=True);continue
-              v=json.loads(p.read_text())
-              print('GUARD_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','application_sha','phase','service_started')}),flush=True)
-              if name=='json-history.epoch.json':pointer=v
-            if pointer and isinstance(pointer.get('run_id'),str) and pointer['run_id'].isalnum():
-              metadata=data/('json-rebuild-'+pointer['run_id'])
-              for name in ('cutover.active','cutover.preparation.json','cutover.journal.json','cutover.result.json'):
-                p=metadata/name
-                if not os.path.lexists(p):print('JSON_EPOCH',name,'ABSENT',flush=True);continue
-                if p.is_symlink() or p.stat().st_size>65536:print('JSON_EPOCH',name,'UNSAFE_TYPE_OR_SIZE',flush=True);continue
-                v=json.loads(p.read_text());print('JSON_EPOCH',name,json.dumps({k:v.get(k) for k in ('contract','run_id','application_sha','phase','service_started','abort_reason')}),flush=True)
-            started=time.monotonic()
-            result=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)
-            print('ACTUAL_START_GUARD',json.dumps({'exit':result.returncode,'elapsed_sec':round(time.monotonic()-started,3),'result':json.loads(result.stdout)}),flush=True)
-            for route in ('/api/state','/api/research/runtime/worker-status','/api/position'):
+            props=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','ExecMainStartTimestamp','-p','NRestarts','-p','MemoryCurrent','-p','Result'],text=True).strip()
+            print('STARTUP_SERVICE',json.dumps(props.splitlines()),flush=True)
+            pid=dict(x.split('=',1) for x in props.splitlines()).get('MainPID')
+            if pid and pid!='0':
+              p=pathlib.Path('/proc')/pid
+              try:
+                io=dict(x.split(':',1) for x in (p/'io').read_text().splitlines())
+                print('STARTUP_IO',json.dumps({k:int(io[k]) for k in ('rchar','wchar','read_bytes','write_bytes')}),flush=True)
+              except FileNotFoundError:pass
+            recent=subprocess.check_output(['journalctl','-u','seiltanzer','--since','-30 minutes','--no-pager','-n','180','-o','cat'],text=True)
+            for line in recent.splitlines():
+              if 'startup' in line.lower() and any(x in line for x in ('storage.','app.','schema.','routes.','boot.')):print('STARTUP_STAGE',line[:900],flush=True)
+            for route in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status'):
               started=time.monotonic()
               try:
-                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as r:
-                  body=json.loads(r.read(4000000));status=r.status
-                if route=='/api/research/runtime/worker-status':body={k:body.get(k) for k in ('decision_model_inputs','decision_family_sources')}
-                elif route=='/api/position':body={'trade_id':body.get('trade_id'),'execution_reconciliation':body.get('execution_reconciliation')}
-                else:body={'tick_ts':(body.get('tick') or {}).get('ts'),'instrument':(body.get('tick') or {}).get('instrument')}
-                print('LIVE_ROUTE',route,json.dumps({'http':status,'elapsed_ms':round((time.monotonic()-started)*1000,1),'body':body}),flush=True)
-              except Exception as error:print('LIVE_ROUTE_ERROR',route,type(error).__name__,flush=True)
-            print('READ_ONLY_RECEIPT',json.dumps({'db_writes':0,'service_restarts':0,'orders':0,'acks':0,'guard_changes':0}),flush=True)
+                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as response:body=json.loads(response.read(4000000));status=response.status
+                if route.endswith('worker-status'):body={k:body.get(k) for k in ('worker','decision_model_inputs','decision_family_sources')}
+                elif route.endswith('snapshot/status'):
+                  f=body.get('family_market_forecasts') or {};body={k:body.get(k) for k in ('ready','building','age_sec','snapshot_budget','last_error')};body['family_forecasts']={k:f.get(k) for k in ('published_for_sha','available_forecasts_at_capture','families')}
+                else:body={'tick_ts':(body.get('tick') or {}).get('ts'),'instrument':(body.get('tick') or {}).get('instrument'),'feeds':(body.get('tick') or {}).get('feeds')}
+                print('STARTUP_ROUTE',route,json.dumps({'http':status,'ms':round((time.monotonic()-started)*1000,1),'body':body}),flush=True)
+              except Exception as error:print('STARTUP_ROUTE_ERROR',route,type(error).__name__,flush=True)
+            print('READ_ONLY_RECEIPT',json.dumps({'db_writes':0,'service_restarts':0,'orders':0,'acks':0}),flush=True)
             PY
