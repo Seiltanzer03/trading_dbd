@@ -256,6 +256,7 @@ def test_background_metrics_do_not_wait_for_research_lock_and_pin_before_builder
     from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs,freeze_expert_inputs
     from seiltanzer.edge_discovery.ai_context import _latest_frozen_context
     from seiltanzer.active_edge_ai_integration import _current_values
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0)
     engine.canonical_tick_payload=lambda **kwargs:{'ts':T0,'instrument':'NAS100',
         'feeds':{'price':deepcopy(engine.market.price)}}
     runtime=engine.decision_metric_runtime=DecisionMetricRuntime(engine)
@@ -278,6 +279,7 @@ def test_background_metrics_do_not_wait_for_research_lock_and_pin_before_builder
 
 def test_instrument_switch_during_capture_cannot_publish_wrong_metric_vector(engine,monkeypatch):
     from seiltanzer import decision_metric_inputs as module
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0)
     engine.canonical_tick_payload=lambda **kwargs:{'ts':T0,'instrument':'NAS100',
         'feeds':{'price':deepcopy(engine.market.price)}}
     original=module.capture_decision_context
@@ -301,6 +303,7 @@ def received_feed_bars(engine):
 @pytest.mark.parametrize('unreadable_archive',[False,True])
 def test_actual_received_feed_bars_work_when_research_has_not_written_them(engine,monkeypatch,unreadable_archive):
     from seiltanzer import decision_metric_inputs as module
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0)
     engine.short_horizon._conn.execute('UPDATE passive_market_bars SET bar_start_ts=bar_start_ts-3600,bar_end_ts=bar_end_ts-3600')
     engine.short_horizon._conn.commit();received_feed_bars(engine)
     before=engine.short_horizon._conn.total_changes
@@ -322,9 +325,10 @@ def test_actual_received_feed_bars_work_when_research_has_not_written_them(engin
     assert engine.short_horizon._conn.total_changes==before
 
 
-def test_option_cache_contention_cannot_block_available_price_metric_publication(engine,tmp_path):
+def test_option_cache_contention_cannot_block_available_price_metric_publication(engine,tmp_path,monkeypatch):
     from seiltanzer.data.cache import DiskCache
     from seiltanzer.decision_metric_inputs import DecisionMetricRuntime
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0)
     cache=engine.passive.cache=DiskCache(str(tmp_path/'cache.db'))
     engine.market.chain={'ts':T0-1,'metrics':{'proxy':'QQQ','demo':False,'atm_iv':.2}}
     cache.add_chain_snapshot('QQQ',{'proxy':'QQQ','demo':False,'atm_iv':.2},ts=T0-2)

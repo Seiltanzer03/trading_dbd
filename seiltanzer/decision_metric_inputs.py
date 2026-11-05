@@ -294,11 +294,12 @@ class DecisionMetricRuntime:
         if not self._refresh_lock.acquire(blocking=False):return
         try:
             from .ai_frozen_expert_inputs import capture_market_inputs
-            tick=self.engine.canonical_tick_payload(copy_payload=False)
-            captured=_number(tick.get('ts'));code=tick.get('instrument')
             view=capture_market_inputs(self.engine,include_decision_metrics=False)
-            if view.market.instrument_code!=code or captured is None:return
-            view.market.price=deepcopy((tick.get('feeds') or {}).get('price') or {})
+            # A materialized UI tick can predate genuinely received bars/chain.
+            # These inputs belong to their actual copy boundary, not that tick.
+            captured=_number(view.market.frozen_inputs_captured_ts)
+            code=view.market.instrument_code
+            if captured is None:return
             context=capture_decision_context(self.engine,view.market,captured_ts=captured)
             if not context or self.engine.market.instrument_code!=code:return
             values=decision_metric_values({'captured_ts':captured,'strategy':{'instrument':code},
