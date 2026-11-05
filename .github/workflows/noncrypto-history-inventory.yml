@@ -27,7 +27,7 @@ jobs:
             assert actual==expected
             root=pathlib.Path('/opt/seiltanzer/data');now=time.time()
             print('CORE_SERVICE',subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts'],text=True).strip(),flush=True)
-            for path in ('/api/state','/api/research/runtime/worker-status'):
+            for path in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status'):
               started=time.monotonic()
               try:
                 with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=8) as response:
@@ -38,6 +38,8 @@ jobs:
                 print('CORE_RUNTIME_INPUTS',json.dumps(data.get('decision_model_inputs')),flush=True)
                 worker=data.get('worker') or {}
                 print('CORE_RESEARCH_WORKER',json.dumps({k:worker.get(k) for k in ('status','phase','running','last_error','task','busy')}),flush=True)
+              elif path.endswith('/snapshot/status'):
+                print('CORE_AI_MATERIALIZER',json.dumps({k:data.get(k) for k in ('available','state','building','built_at','last_error','invalidated_reason','family_runtime_status')}),flush=True)
               else:
                 price=(data.get('feeds') or {}).get('price') or {}
                 trade=data.get('trade') or data.get('active_trade')
@@ -67,8 +69,16 @@ jobs:
             conn.execute('PRAGMA query_only=ON');conn.execute('PRAGMA cache_size=-1024');conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,4000000)
             deadline=time.monotonic()+1.;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
             try:
-              row=conn.execute('SELECT ts,model FROM ai_verdicts ORDER BY id DESC LIMIT 1').fetchone()
-              print('CORE_LAST_REAL_AI',json.dumps({'ts':row[0],'model':row[1]} if row else {}),flush=True)
+              row=conn.execute('SELECT ts,model,snapshot_json,verdict FROM ai_verdicts ORDER BY id DESC LIMIT 1').fetchone()
+              print('CORE_OPEN_POSITION_COUNT',conn.execute("SELECT COUNT(*) FROM trades WHERE status='open'").fetchone()[0],flush=True)
+              if row:
+                frozen=json.loads(unpack_text(row[2]));manager=frozen.get('policy_manager') or {}
+                from seiltanzer.decision_metric_inputs import decision_metric_values
+                values=decision_metric_values(frozen)
+                profiles={key:{k:(manager.get(key) or {}).get(k) for k in ('available','reason','observed_ts')} for key in ('mathematical_edge','active_edge_provisional_weight','llm_edge_exploratory_weight')}
+                families=(frozen.get('edge_family_market_context') or {}).get('families') or {}
+                summary={key:{k:value.get(k) for k in ('available','reason','market_model_trained','forecast_available','forecast_origin_ts')} for key,value in families.items() if isinstance(value,dict)}
+                print('CORE_LAST_REAL_AI',json.dumps({'ts':row[0],'model':row[1],'snapshot_ts':frozen.get('captured_ts'),'metrics_pinned':values is not None,'pinned_metrics':None if values is None else len(values),'available_metrics':None if values is None else sum(v.get('available') is True for v in values.values()),'profiles':profiles,'family_context':summary,'has_llm_unavailable_marker':'LLM НЕДОСТУПЕН' in unpack_text(row[3])}),flush=True)
             finally:conn.close()
             print('READ_ONLY_NO_NEW_TRADE_NO_ACK_NO_ORDERS_NO_NEW_RESEARCH',flush=True)
             PY
