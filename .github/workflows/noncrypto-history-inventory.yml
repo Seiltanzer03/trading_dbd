@@ -8,35 +8,19 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 4
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 18m
+          command_timeout: 3m
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
             import json,pathlib,sqlite3,subprocess,time,urllib.request
             expected='b9234b29f3e062889a7dcff84561604778abfc55'
-            deadline=time.monotonic()+900
-            while time.monotonic()<deadline:
-              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-              current={};new_runtime=False
-              if installed==expected:
-                try:
-                  with urllib.request.urlopen('http://127.0.0.1:8790/api/research/runtime/worker-status',timeout=4) as response:
-                    raw=response.read(1000001);assert len(raw)<=1000000;body=json.loads(raw)
-                  current=body.get('decision_model_inputs') or {}
-                  new_runtime=isinstance(body.get('decision_family_sources'),dict)
-                  with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=4) as response:ready=response.status==200
-                  if ready and new_runtime and current.get('state')=='READY' and current.get('metric_count')==92 and current.get('available_metrics',0)>15:break
-                except Exception:pass
-              print('MODEL_NEW_RUNTIME_WAIT',json.dumps({'installed_expected_sha':installed==expected,'new_runtime_seen':new_runtime,**{key:current.get(key) for key in ('state','metric_count','available_metrics')}}),flush=True)
-              time.sleep(15)
-            else:raise RuntimeError('EXPECTED_NEW_RUNTIME_INPUTS_NOT_READY_WITHIN_BOUND')
             actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
             print('MODEL_SHA',json.dumps({'expected':expected,'actual':actual,'match':actual==expected}),flush=True)
             assert actual==expected
@@ -54,12 +38,13 @@ jobs:
                 print('MODEL_HTTP_PENDING',json.dumps({'path':route,'error_type':type(error).__name__}),flush=True);continue
               if route.endswith('/state'):
                 tick=body['tick'];price=tick['feeds']['price']
+                print('MODEL_CHAIN_FEED',json.dumps({key:(tick['feeds'].get('chain') or {}).get(key) for key in ('status','source','ts','cache_fallback','age_sec')}),flush=True)
                 print('MODEL_LIVE_QUOTE',json.dumps({'instrument':tick['instrument'],**{key:price.get(key) for key in ('status','source','ts','fresh','derived')}}),flush=True)
               elif route.endswith('worker-status'):
                 print('MODEL_DECISION_INPUTS',json.dumps(body.get('decision_model_inputs')),flush=True)
                 print('MODEL_SOURCE_REFRESH',json.dumps(body.get('decision_family_sources')),flush=True)
                 worker=body.get('worker') or {}
-                print('MODEL_WORKER',json.dumps({key:worker.get(key) for key in ('running','current_phase','core_stage','maintenance_phase','acceptance_pause_active')}),flush=True)
+                print('MODEL_WORKER',json.dumps({key:worker.get(key) for key in ('running','current_phase','core_stage','maintenance_phase','acceptance_pause_active','memory_pressure','memory_pause_active')}),flush=True)
               elif route.endswith('snapshot/status'):
                 print('MODEL_AI_SNAPSHOT',json.dumps({key:body.get(key) for key in ('ready','building','age_sec','current_trade_id','invalidated_reason','build_ms','family_market_forecasts')}),flush=True)
               else:
@@ -98,5 +83,12 @@ jobs:
                 print('MODEL_SAVED_GEOMETRY',json.dumps(probabilities),flush=True)
               else:print('MODEL_SAVED_REVIEW','NO_CURRENT_TRADE_REVIEW',flush=True)
             finally:conn.close()
+            cache=sqlite3.connect('file:'+str(root/'cache.db')+'?mode=ro',uri=True,timeout=.1)
+            cache.execute('PRAGMA query_only=ON');cache.execute('PRAGMA cache_size=-1024')
+            deadline=time.monotonic()+.25;cache.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+            try:
+              for ticker,count,stamp in cache.execute('SELECT ticker,count(*),max(ts) FROM chain_snapshots GROUP BY ticker'):
+                print('MODEL_OPTION_CACHE_AGE',json.dumps({'proxy':ticker,'snapshots':count,'age_sec':time.time()-stamp}),flush=True)
+            finally:cache.close()
             print('READ_ONLY_NO_POST_NO_TRADE_NO_ACK_NO_ORDERS_NO_RESEARCH',flush=True)
             PY
