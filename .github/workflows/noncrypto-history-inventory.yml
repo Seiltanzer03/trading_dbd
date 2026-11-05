@@ -1,4 +1,4 @@
-name: decision-metric-stability-readonly
+name: current-release-start-guard-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,73 +8,51 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 50
+    timeout-minutes: 3
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45m
+          command_timeout: 55s
           script: |
-            cd /opt/seiltanzer
-            PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import json,os,pathlib,subprocess,time,urllib.request
-            expected='f3298efb4df2be1abfe7e6d2d7680367be9938e7'
-            deadline=time.monotonic()+1500
-            while time.monotonic()<deadline:
-              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-              fresh_process=False;ready=False;pid=None
-              if installed==expected:
-                try:
-                  pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-                  boot=int(next(line.split()[1] for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
-                  start=boot+int(pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[19])/os.sysconf('SC_CLK_TCK')
-                  ref=subprocess.run(['git','symbolic-ref','-q','HEAD'],capture_output=True,text=True).stdout.strip() or 'HEAD'
-                  refpath=pathlib.Path(subprocess.check_output(['git','rev-parse','--git-path',ref],text=True).strip())
-                  commit_clock=int(subprocess.check_output(['git','show','-s','--format=%ct',expected],text=True).strip())
-                  fresh_process=pid!='772479' and start>=max(commit_clock,refpath.stat().st_mtime)
-                  if fresh_process:
-                    with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as response:ready=response.status==200
-                  if fresh_process and ready:break
-                except Exception:pass
-              print('STABILITY_NEW_PROCESS_WAIT',json.dumps({'installed_expected_sha':installed==expected,'pid':pid,'new_process_after_checkout':fresh_process,'http_ready':ready}),flush=True)
-              time.sleep(15)
-            else:raise RuntimeError('EXACT_NEW_PROCESS_NOT_READY_WITHIN_BOUND')
-            actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-            assert actual==expected
-            root=pathlib.Path('/opt/seiltanzer/data')
-            def read(route):
+            /usr/bin/python3 -B -u - <<'PY'
+            import hashlib,json,os,pathlib,shutil,subprocess,time,urllib.request
+            root=pathlib.Path('/opt/seiltanzer');data=root/'data'
+            print('RELEASE_HEAD',subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),flush=True)
+            print('SERVICE_STATE',json.dumps(subprocess.check_output(['systemctl','show','seiltanzer','-p','ActiveState','-p','SubState','-p','MainPID','-p','NRestarts','-p','MemoryCurrent'],text=True).splitlines()),flush=True)
+            source=(root/'scripts/history_service_fence.py').read_bytes();installed=pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py').read_bytes()
+            print('GUARD_CODE_MATCH',source==installed,flush=True)
+            print('SOURCE_CLEAN',subprocess.run(['git','-C',str(root),'diff','--quiet','HEAD','--','scripts','seiltanzer']).returncode==0,flush=True)
+            print('CAPACITY',json.dumps({'free_bytes':shutil.disk_usage(data).free,'database_bytes':(data/'trades.db').stat().st_size}),flush=True)
+            pointer=None
+            for name in ('cutover.active','cutover.journal.json','json-history.epoch.json'):
+              p=data/name
+              if not os.path.lexists(p):print('GUARD_METADATA',name,'ABSENT',flush=True);continue
+              if p.is_symlink() or p.stat().st_size>65536:print('GUARD_METADATA',name,'UNSAFE_TYPE_OR_SIZE',flush=True);continue
+              v=json.loads(p.read_text())
+              print('GUARD_METADATA',name,json.dumps({k:v.get(k) for k in ('contract','run_id','application_sha','phase','service_started')}),flush=True)
+              if name=='json-history.epoch.json':pointer=v
+            if pointer and isinstance(pointer.get('run_id'),str) and pointer['run_id'].isalnum():
+              metadata=data/('json-rebuild-'+pointer['run_id'])
+              for name in ('cutover.active','cutover.preparation.json','cutover.journal.json','cutover.result.json'):
+                p=metadata/name
+                if not os.path.lexists(p):print('JSON_EPOCH',name,'ABSENT',flush=True);continue
+                if p.is_symlink() or p.stat().st_size>65536:print('JSON_EPOCH',name,'UNSAFE_TYPE_OR_SIZE',flush=True);continue
+                v=json.loads(p.read_text());print('JSON_EPOCH',name,json.dumps({k:v.get(k) for k in ('contract','run_id','application_sha','phase','service_started','abort_reason')}),flush=True)
+            started=time.monotonic()
+            result=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(data/'trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=15)
+            print('ACTUAL_START_GUARD',json.dumps({'exit':result.returncode,'elapsed_sec':round(time.monotonic()-started,3),'result':json.loads(result.stdout)}),flush=True)
+            for route in ('/api/state','/api/research/runtime/worker-status','/api/position'):
               started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=6) as response:
-                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
-              return body,round((time.monotonic()-started)*1000,1)
-            deadline=time.monotonic()+600
-            while time.monotonic()<deadline:
-              body,_=read('/api/research/runtime/worker-status');inputs=body.get('decision_model_inputs') or {}
-              state,_=read('/api/state');chain=state['tick']['feeds'].get('chain') or {};now=time.time();stamp=chain.get('ts')
-              if inputs.get('state')=='READY' and inputs.get('available_metrics',0)>=35 and isinstance(stamp,(int,float)) and 0<=now-stamp<=900:break
-              print('STABILITY_WARMING',json.dumps({'inputs':inputs,'chain_status':chain.get('status'),'chain_ts':stamp}),flush=True)
-              time.sleep(15)
-            else:raise RuntimeError('CURRENT_COMPLETE_SOURCE_INPUTS_NOT_READY')
-            samples=[]
-            for index in range(8):
-              body,_=read('/api/research/runtime/worker-status');inputs=body.get('decision_model_inputs') or {}
-              state,latency=read('/api/state');tick=state['tick'];quote=tick['feeds']['price'];chain=tick['feeds'].get('chain') or {};now=time.time()
-              memory=(body.get('worker') or {}).get('memory_pressure') or {}
-              row={'sample':index+1,'observed_ts':now,'instrument':inputs.get('instrument'),'state':inputs.get('state'),'metric_count':inputs.get('metric_count'),'available_metrics':inputs.get('available_metrics'),'metric_capture_ts':inputs.get('captured_ts'),'metric_age_sec':now-inputs['captured_ts'],'ui_tick_ts':tick['ts'],'state_ms':latency,'quote_ts':quote.get('ts'),'quote_status':quote.get('status'),'quote_fresh':quote.get('fresh'),'chain_ts':chain.get('ts'),'chain_status':chain.get('status'),'rss_mib':memory.get('rss_mib'),'memory_pause':memory.get('pause_background'),'source_refresh':body.get('decision_family_sources')}
-              print('STABILITY_SAMPLE',json.dumps(row),flush=True);samples.append(row)
-              if index<7:time.sleep(45)
-            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts'],text=True).strip()
-            print('STABILITY_SERVICE',pid,flush=True)
-            summary={'samples':len(samples),'span_sec':samples[-1]['observed_ts']-samples[0]['observed_ts'],'available_min':min(row['available_metrics'] for row in samples),'available_max':max(row['available_metrics'] for row in samples),'max_metric_age_sec':max(row['metric_age_sec'] for row in samples),'max_state_ms':max(row['state_ms'] for row in samples),'current_inputs_stable':all(row['state']=='READY' and row['metric_count']==92 and row['available_metrics']>=35 and 0<=row['metric_age_sec']<=55 for row in samples),'live_route_within_3000ms':all(row['state_ms']<3000 for row in samples),'orders_or_ack_sent':False}
-            print('STABILITY_SUMMARY',json.dumps(summary),flush=True)
-            for name in ['mathematical_edge_latest.json','edge_family_sources_latest.json','edge_family_sources_runtime.json','active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)]]:
-              path=root/'research'/name;item={'name':name,'exists':path.is_file()}
-              if path.is_file() and path.stat().st_size<=12000000:
-                document=json.loads(path.read_bytes());item.update(sha=document.get('published_for_sha'),current=document.get('published_for_sha')==expected,age_sec=time.time()-path.stat().st_mtime)
-              print('STABILITY_PUBLICATION',json.dumps(item),flush=True)
-            position,_=read('/api/position');reconciliation=position.get('execution_reconciliation') or {}
-            print('STABILITY_POSITION',json.dumps({'trade_id':position.get('trade_id'),'reconciliation_required':bool(reconciliation),'commands':reconciliation.get('commands') or []}),flush=True)
-            assert summary['current_inputs_stable'] and summary['live_route_within_3000ms']
+              try:
+                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as r:
+                  body=json.loads(r.read(4000000));status=r.status
+                if route=='/api/research/runtime/worker-status':body={k:body.get(k) for k in ('decision_model_inputs','decision_family_sources')}
+                elif route=='/api/position':body={'trade_id':body.get('trade_id'),'execution_reconciliation':body.get('execution_reconciliation')}
+                else:body={'tick_ts':(body.get('tick') or {}).get('ts'),'instrument':(body.get('tick') or {}).get('instrument')}
+                print('LIVE_ROUTE',route,json.dumps({'http':status,'elapsed_ms':round((time.monotonic()-started)*1000,1),'body':body}),flush=True)
+              except Exception as error:print('LIVE_ROUTE_ERROR',route,type(error).__name__,flush=True)
+            print('READ_ONLY_RECEIPT',json.dumps({'db_writes':0,'service_restarts':0,'orders':0,'acks':0,'guard_changes':0}),flush=True)
             PY
