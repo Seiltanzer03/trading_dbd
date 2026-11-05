@@ -90,5 +90,27 @@ jobs:
               for ticker,count,stamp in cache.execute('SELECT ticker,count(*),max(ts) FROM chain_snapshots GROUP BY ticker'):
                 print('MODEL_OPTION_CACHE_AGE',json.dumps({'proxy':ticker,'snapshots':count,'age_sec':time.time()-stamp}),flush=True)
             finally:cache.close()
+            from types import SimpleNamespace
+            import threading
+            from seiltanzer.config import Settings,INSTRUMENTS
+            from seiltanzer.reference_market_series import fetch_reference_series,validate_reference_series
+            from seiltanzer.decision_metric_inputs import capture_decision_context,pack_decision_metrics,decision_metric_values
+            from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
+            current=read('/api/state')['tick'];code=current['instrument'];quote=current['feeds']['price'];chain=current['feeds'].get('chain') or {}
+            cache=sqlite3.connect('file:'+str(root/'cache.db')+'?mode=ro',uri=True,timeout=.1)
+            cache.execute('PRAGMA query_only=ON');cache.execute('PRAGMA cache_size=-1024')
+            try:record=cache.execute('SELECT ts,data FROM chain_snapshots WHERE ticker=? ORDER BY ts DESC LIMIT 1',(INSTRUMENTS[code].options_proxy,)).fetchone()
+            finally:cache.close()
+            source=fetch_reference_series(code,limit=1800,timeout=5.,interval='1m')
+            clock=time.time();reason=validate_reference_series(source,code,clock,runtime=True,interval='1m')
+            print('MODEL_DIRECT_NATIVE',json.dumps({'bars':len(source['bars']),'reason':reason,'source_receipt':source['received_ts'],'source_observed':source['observed_ts'],'state_tick_ts':current['ts'],'quote_ts':quote['ts'],'capture_now':clock}),flush=True)
+            metrics=json.loads(record[1]) if record else None
+            settings=Settings(data_dir=str(root),demo=False)
+            market=SimpleNamespace(instrument_code=code,demo=False,price=quote,chain={**chain,'metrics':metrics,'ts':record[0] if record else None},daily={},correlation={},intraday_ohlcv=[],intraday_source_authority={},intraday_is_offset=False,decision_minute_reference=source,_intraday_lock=threading.RLock())
+            owner=SimpleNamespace(settings=settings,market=market,passive=SimpleNamespace(settings=settings,cache=None))
+            frozen=capture_market_inputs(owner).market
+            cutoff=time.time();context=capture_decision_context(owner,frozen,captured_ts=cutoff)
+            values=decision_metric_values({'captured_ts':cutoff,'strategy':{'instrument':code},'decision_metric_inputs':pack_decision_metrics(context,code)})
+            print('MODEL_DIRECT_CONTEXT',json.dumps({'count':len(values),'available':sum(v.get('available') is True for v in values.values()),'price_available':(context.get('price_volatility') or {}).get('available'),'price_reason':(context.get('price_volatility') or {}).get('reason'),'option_available':(context.get('option_static') or {}).get('available'),'option_reason':(context.get('option_static') or {}).get('reason'),'option_freeze_reason':getattr(frozen,'option_freeze_reason',None),'minute_freeze_reason':getattr(frozen,'minute_reference_freeze_reason',None),'available_ids':[k for k,v in values.items() if v.get('available')]}),flush=True)
             print('READ_ONLY_NO_POST_NO_TRADE_NO_ACK_NO_ORDERS_NO_RESEARCH',flush=True)
             PY
