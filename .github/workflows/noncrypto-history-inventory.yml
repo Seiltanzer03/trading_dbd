@@ -1,4 +1,4 @@
-name: release-delivery-status-readonly
+name: startup-owner-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -17,10 +17,11 @@ jobs:
           password: ${{ secrets.SSH_PASSWORD }}
           command_timeout: 60s
           script: |
-            cd /opt/seiltanzer
-            date -u '+DELIVERY_STATUS %Y-%m-%dT%H:%M:%SZ'
-            git rev-parse HEAD
-            systemctl show seiltanzer -p MainPID -p NRestarts -p ExecMainStartTimestamp -p ActiveState -p SubState
-            ps -C git,python,python3,rsync,pip,tar,gzip,bash,uvicorn -o pid,ppid,etime,stat,wchan:28,comm
-            df -m / /opt/seiltanzer
-            free -m
+            /usr/bin/python3 -B -u - <<'PY'
+            import subprocess
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+            text=subprocess.check_output(['journalctl','--no-pager','-o','cat','_PID='+pid,'--since','2026-11-06 13:35:20 UTC','-n','250'],text=True)
+            print('STARTUP_OBSERVED_PID',pid)
+            for line in text.splitlines():
+              if line.startswith(('STARTUP_PHASE','Timeout','Thread','Current thread','  File ')):print(line,flush=True)
+            PY
