@@ -1,4 +1,4 @@
-name: startup-owner-readonly
+name: nonblocking-live-thread-probe
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,20 +8,31 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 60s
+          command_timeout: 150s
           script: |
-            /usr/bin/python3 -B -u - <<'PY'
-            import subprocess
-            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-            text=subprocess.check_output(['journalctl','--no-pager','-o','cat','_PID='+pid,'--since','2026-11-06 13:35:20 UTC','-n','250'],text=True)
-            print('STARTUP_OBSERVED_PID',pid)
-            for line in text.splitlines():
-              if line.startswith(('STARTUP_PHASE','Timeout','Thread','Current thread','  File ')):print(line,flush=True)
+            set -eu
+            profiler_tmp=$(mktemp -d /tmp/seiltanzer-stack-probe.XXXXXX)
+            trap 'rm -rf -- "$profiler_tmp"' EXIT
+            /opt/seiltanzer/.venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --target "$profiler_tmp" py-spy==0.4.1 >/dev/null 2>&1
+            STACK_PROBE_BIN="$profiler_tmp/bin/py-spy" /usr/bin/python3 -B -u - <<'PY'
+            import json,os,subprocess,time,urllib.request
+            for index in range(2):
+              pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+              result=subprocess.run([os.environ['STACK_PROBE_BIN'],'dump','--json','--nonblocking','--pid',pid],capture_output=True,text=True,timeout=10)
+              print('STACK_SAMPLE',json.dumps({'sample':index+1,'pid':pid,'ts':time.time(),'returncode':result.returncode}),flush=True)
+              if result.returncode==0:
+                rows=json.loads(result.stdout)
+                for row in rows:
+                  frames=row.get('frames') or []
+                  selected=[{'name':frame.get('name'),'file':frame.get('filename'),'line':frame.get('line') or frame.get('line_number')} for frame in frames if '/seiltanzer/' in (frame.get('filename') or '')]
+                  if selected:print('STACK_THREAD',json.dumps({'thread':row.get('thread_name'),'active':row.get('active'),'owns_gil':row.get('owns_gil'),'frames':selected[:10]}),flush=True)
+              if index==0:time.sleep(10)
+            print('STACK_READ_ONLY',json.dumps({'nonblocking':True,'locals_collected':False,'orders':0,'acks':0,'application_writes':0,'restarts':0}),flush=True)
             PY
