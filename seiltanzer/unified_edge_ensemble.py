@@ -681,8 +681,20 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
                 row["ranking_eligible"], row["ranking_reason"] = False, "NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT"
             elif best_expected - row["expected_net_r"] > band + 1e-8:
                 row["ranking_eligible"], row["ranking_reason"] = False, "EXPECTED_SACRIFICE_EXCEEDS_BUDGET"
-    # Preferences cannot select a Pareto-inferior alternative from the same
-    # priced bank. Never compare different banks or independently anchored MC.
+    # Only same-path paired evidence can establish model Pareto dominance.
+    # Missing evidence or an uncertain expected-return ordering keeps choices.
+    from .unified_candidate_economics import PAIRED_PARETO_CONTRACT
+    def supported_dominator(row,other):
+        comparisons=row.get('pareto_comparisons') or {}
+        if not isinstance(comparisons,dict):return False
+        proof=comparisons.get(other['candidate_id']) or {}
+        if not isinstance(proof,dict):return False
+        lower=number(proof.get('expected_ci95_lower_r'))
+        tail=number(proof.get('matched_seed_tail_gain_lower_r'))
+        return (proof.get('contract_version')==PAIRED_PARETO_CONTRACT
+            and proof.get('bank_id')==row['bank_id'] and proof.get('robust_dominance') is True
+            and lower is not None and tail is not None and lower>=-1e-8 and tail>=-1e-8
+            and (lower>1e-8 or tail>1e-8))
     comparable = [row for row in rows if row['ranking_eligible']
                   and row.get('economics_basis') == 'common_frozen_weighted_option_driver_paths'
                   and row.get('bank_id')]
@@ -692,7 +704,8 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
             and other['expected_net_r'] >= row['expected_net_r']
             and other['cvar10_net_r'] >= row['cvar10_net_r']
             and (other['expected_net_r'] > row['expected_net_r'] + 1e-8
-                 or other['cvar10_net_r'] > row['cvar10_net_r'] + 1e-8)]
+                 or other['cvar10_net_r'] > row['cvar10_net_r'] + 1e-8)
+            and supported_dominator(row,other)]
         if dominators:
             row.update(ranking_eligible=False, ranking_reason='COMMON_BANK_PARETO_DOMINATED',
                        dominated_by_candidate_ids=sorted(dominators))

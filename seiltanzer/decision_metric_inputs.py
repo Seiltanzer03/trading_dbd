@@ -276,6 +276,11 @@ class DecisionMetricRuntime:
 
     def status(self):return dict(self._status)
 
+    def refresh_interval_sec(self):
+        status=self._status
+        return (5. if status.get('instrument')!=self.engine.market.instrument_code
+                or status.get('reason')=='MARKET_INPUT_FREEZE_BUSY' else 30.)
+
     def generation_marker(self):
         if not self._contexts:return None
         context=self._contexts[0]
@@ -292,6 +297,9 @@ class DecisionMetricRuntime:
     def refresh(self):
         if self.engine.settings.demo:return
         if not self._refresh_lock.acquire(blocking=False):return
+        started=time.monotonic();attempted=time.time()
+        busy_n=self._status.get('capture_busy_n',0)
+        self._status={**self._status,'state':'BUILDING','last_attempt_ts':attempted}
         try:
             from .ai_frozen_expert_inputs import capture_market_inputs
             view=capture_market_inputs(self.engine,include_decision_metrics=False)
@@ -299,15 +307,26 @@ class DecisionMetricRuntime:
             # These inputs belong to their actual copy boundary, not that tick.
             captured=_number(view.market.frozen_inputs_captured_ts)
             code=view.market.instrument_code
-            if captured is None:return
+            if captured is None:
+                reason=getattr(view.market,'freeze_reason',None) or 'MARKET_INPUT_CAPTURE_UNAVAILABLE'
+                self._status={**self._status,'state':'DEFERRED','reason':reason,
+                    'capture_busy_n':busy_n+int(reason=='MARKET_INPUT_FREEZE_BUSY')}
+                return
             context=capture_decision_context(self.engine,view.market,captured_ts=captured)
-            if not context or self.engine.market.instrument_code!=code:return
+            if not context or self.engine.market.instrument_code!=code:
+                self._status={**self._status,'state':'DEFERRED','reason':
+                    'INSTRUMENT_CHANGED' if self.engine.market.instrument_code!=code
+                    else 'CURRENT_QUOTE_OR_INPUT_UNAVAILABLE'}
+                return
             values=decision_metric_values({'captured_ts':captured,'strategy':{'instrument':code},
                 'decision_metric_inputs':pack_decision_metrics(context,code)})
             self._contexts=(context,*[row for row in self._contexts[:1] if row.get('instrument')==code])
             self._status={'state':'READY','instrument':code,'captured_ts':captured,
                 'metric_count':len(values),'available_metrics':sum(row.get('available') is True for row in values.values()),
+                'capture_busy_n':busy_n,'last_attempt_ts':attempted,
                 'network_calls':False,'runtime_fitting':False}
         except Exception as exc:
             self._status={**self._status,'state':'DEFERRED','reason':type(exc).__name__}
-        finally:self._refresh_lock.release()
+        finally:
+            self._status={**self._status,'last_refresh_ms':round((time.monotonic()-started)*1000,3)}
+            self._refresh_lock.release()

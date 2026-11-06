@@ -649,15 +649,22 @@ def combine_math_profile(profile, mathematical):
             'basis': 'shared_bounded_historical_edge_and_causal_working_price_model'}
 
 
-def render_math_edge(profile, combined=None, ranking_audit=None):
+def render_math_edge(profile, combined=None, ranking_audit=None, unified_component=None):
     combined = combined or {}
     if not profile.get('probabilities'):
         reason = str(profile.get('reason') or 'UNAVAILABLE')
         detail = (' Нужны 13 последовательных завершённых 5-минутных свечей '
                   'без пропусков и с актуальным временем. Текущая котировка не заменяет '
                   'эту историю.' if reason == 'COMPLETED_CAUSAL_5M_PRICE_FEATURES_UNAVAILABLE' else '')
-        return ('\n\n**МАТЕМАТИЧЕСКИЙ EDGE** —\nВес 0; причина: ' + reason + '.'
-                + detail + ' Расчёт продолжается без этого веса.')
+        component=unified_component or {}
+        preliminary=(component.get('available') is True
+            and str(component.get('reason') or '').startswith('PRELIMINARY_SOURCE_BOUND_RESEARCH_RULES'))
+        weight=number(component.get('effective_weight'))
+        note=(f'\nОтдельный пул предварительных правил в итоговом ансамбле: фактический вес {weight:.1%}. '
+              'Это не обученный прогноз и не вес отсутствующей модели.'
+              if preliminary and weight is not None else '')
+        return ('\n\n**МАТЕМАТИЧЕСКИЙ EDGE** —\nОбученный математический блок: вес 0; причина: ' + reason + '.'
+                + detail + ' Расчёт продолжается без этого веса.' + note)
     ps = profile.get('probabilities') or {}
     def probability(value):
         return f'{value:.1%}' if number(value) is not None else 'UNAVAILABLE'

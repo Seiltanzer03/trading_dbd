@@ -13,6 +13,12 @@ def rows():
 
 def test_common_bank_dominated_stop_cannot_win_from_saturated_scores():
     candidates=rows()
+    # Ranking needs a matched-outcome proof; point means alone cannot establish
+    # dominance. The economics integration tests compute these bounds on paths.
+    candidates[-1]['pareto_comparisons']={'EXIT':{
+        'contract_version':'same-path-weighted-pareto-mc-v1','bank_id':'same',
+        'expected_ci95_lower_r':.002,'matched_seed_tail_gain_lower_r':.5,
+        'robust_dominance':True}}
     # A sparse outside preference must not beat a better common-bank alternative.
     specs=[dict(component_id='quantitative_base', available=True, quality=1., scores={},
                 source_ids=['bank'], evidence_family_ids=['price_path']),

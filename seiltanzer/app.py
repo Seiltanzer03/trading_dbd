@@ -899,13 +899,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # form a retry storm and starve the live request path.
                     state_last_finished = time.monotonic()
                 for name, fn in jobs.items():
+                    period=periods[name]
                     if name=='decision_metrics':
                         if live_tick_snapshot['payload'] is None:
                             continue
-                        metric_state=engine.decision_metric_runtime.status()
-                        if metric_state.get('instrument')!=engine.market.instrument_code and now-last[name]>=5:
-                            last[name]=0.0
-                    if name not in running and now - last[name] >= periods[name]:
+                        period=engine.decision_metric_runtime.refresh_interval_sec()
+                    if name not in running and now - last[name] >= period:
                         last[name] = now
                         work = (source_work(fn) if name=='family_sources' else
                                 metric_work(fn) if name=='decision_metrics' else
