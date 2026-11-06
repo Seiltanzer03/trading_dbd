@@ -126,7 +126,8 @@ def _position_geometry(snapshot: dict, observation_row: Any, context_row: Any,
 def _option_state(snapshot: dict) -> dict:
     manager = snapshot.get("policy_manager") or {}
     state = manager.get("option_derivative_state") or snapshot.get("option_derivative_state") or {}
-    return state if isinstance(state, dict) else {}
+    from .option_metric_transport import unpack_option_state
+    return unpack_option_state(state)
 
 
 def _option_barrier(state: dict) -> dict:

@@ -51,3 +51,19 @@ def test_math_report_distinguishes_preliminary_pool_from_missing_trained_forecas
     assert '2.0%' in text
     assert 'предварительных правил' in text
     assert 'не обученный прогноз' in text
+
+
+def test_a_busy_market_copy_cannot_run_the_heavy_builder_or_publish_ready():
+    import threading
+    engine=FakeEngine();engine.market._intraday_lock=threading.Lock()
+    builds=[]
+    mat=AISnapshotMaterializer(engine,lambda _:(builds.append(1) or snapshot()))
+    engine.market._intraday_lock.acquire()
+    try:
+        mat._build_once()
+        assert builds==[]
+        assert mat.status()['ready'] is False
+        assert mat.status()['invalidated_reason']=='MARKET_INPUT_FREEZE_BUSY'
+    finally:engine.market._intraday_lock.release()
+    mat._build_once()
+    assert mat.status()['ready'] is True

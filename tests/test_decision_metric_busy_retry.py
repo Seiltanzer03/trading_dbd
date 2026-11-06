@@ -43,4 +43,26 @@ def test_unusable_quote_is_reported_instead_of_advertising_old_ready_capture(eng
     runtime.refresh()
     assert runtime.status()['state']=='DEFERRED'
     assert runtime.status()['reason']=='CURRENT_QUOTE_OR_INPUT_UNAVAILABLE'
+    assert runtime.refresh_interval_sec()==5.
     assert runtime.status()['captured_ts']==T0
+
+
+def test_background_copy_waits_for_a_short_publisher_but_default_copy_stays_nonblocking(engine,monkeypatch):
+    from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0)
+    held=threading.Event();release=threading.Event()
+    def publisher():
+        with engine.market._intraday_lock:
+            held.set();release.wait(2)
+    worker=threading.Thread(target=publisher);worker.start()
+    timer=None
+    try:
+        assert held.wait(1)
+        assert capture_market_inputs(engine).market.freeze_reason=='MARKET_INPUT_FREEZE_BUSY'
+        timer=threading.Timer(.001,release.set);timer.start()
+        copied=capture_market_inputs(engine,lock_timeout_sec=.25).market
+        assert copied.frozen_inputs_captured_ts==T0
+        assert copied.price==engine.market.price
+    finally:
+        release.set();worker.join(2)
+        if timer is not None:timer.join(1)

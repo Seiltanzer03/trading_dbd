@@ -267,7 +267,8 @@ def _metric_audit_lines(snapshot: dict) -> list[str]:
     base = list(_BASE_METRIC_AUDIT_LINES(snapshot))
     manager = snapshot.get("policy_manager") or {}
     evidence = manager.get("evidence") or {}
-    state = manager.get("option_derivative_state") or evidence.get("option_derivative_state") or {}
+    from .option_metric_transport import unpack_option_state
+    state = unpack_option_state(manager.get("option_derivative_state") or evidence.get("option_derivative_state") or {})
     metrics = state.get("metrics") or {}
     probability_bounds = {"p_take", "p_stop", "p_no_touch", "h_take", "h_stop"}
     normalized_bounds = {"gex_force", "gex_stiffness"}

@@ -350,7 +350,8 @@ def build_ai_ede_context(engine: Any, snapshot: dict[str, Any]) -> dict[str, Any
     """Attach frozen context after the management action has been calculated."""
     manager = snapshot.get("policy_manager") or {}
     evidence = manager.get("evidence") or {}
-    option_state = (manager.get("option_derivative_state")
+    from ..option_metric_transport import unpack_option_state
+    option_state = unpack_option_state(manager.get("option_derivative_state")
                     or evidence.get("option_derivative_state") or {})
     metrics = option_state.get("metrics") or {}
     frozen = _latest_frozen_context(engine, snapshot)

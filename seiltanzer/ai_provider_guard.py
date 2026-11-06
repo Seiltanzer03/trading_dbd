@@ -108,7 +108,9 @@ def _compact_evidence(source: Any) -> dict[str, Any]:
         "supportive_confirmation_families", "mixed_confirmation_families",
         "adverse_confirmation_count",
     )
-    return {key: _bounded(source[key]) for key in keys if key in source}
+    from .option_metric_transport import unpack_option_state
+    return {key: _bounded(unpack_option_state(source[key]) if key == 'option_derivative_state' else source[key])
+            for key in keys if key in source}
 
 
 def _compact_input_audit(source: Any, *, row_limit: int = 20) -> dict[str, Any]:
@@ -368,6 +370,9 @@ def compact_provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "combined_edge_soft_weight",
     )
     compact_manager = _pick(manager, manager_fields)
+    if 'option_derivative_state' in compact_manager:
+        from .option_metric_transport import unpack_option_state
+        compact_manager['option_derivative_state'] = unpack_option_state(compact_manager['option_derivative_state'])
     compact_manager["policies"] = _compact_policies(manager.get("policies"))
     compact_manager["evidence"] = _compact_evidence(manager.get("evidence"))
     compact_manager["input_audit"] = _compact_input_audit(manager.get("input_audit"))

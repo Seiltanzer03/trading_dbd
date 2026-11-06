@@ -34,6 +34,9 @@ def _at(value: Any, *path: str) -> Any:
         if not isinstance(value, dict):
             return None
         value = value.get(key)
+        if key == 'option_derivative_state':
+            from .option_metric_transport import unpack_option_state
+            value = unpack_option_state(value)
     return value
 
 

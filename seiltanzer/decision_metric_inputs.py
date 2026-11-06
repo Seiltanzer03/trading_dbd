@@ -123,7 +123,7 @@ def _native_minute_rows(market,code,cutoff):
     return rows,proof
 
 
-def capture_decision_context(engine,market,*,captured_ts):
+def capture_decision_context(engine,market,*,captured_ts,option_history_cache=None):
     """Build an as-of view of received inputs, without inserting an anchor."""
     from .canonical_market_context import price_quote_available
     from .config import ALL_INSTRUMENTS
@@ -172,7 +172,16 @@ def capture_decision_context(engine,market,*,captured_ts):
     # Existing feature failure handlers may persist research counters. This
     # read-only capture has its own error state and no writable connection.
     proxy=str((metrics or {}).get('proxy') or '')
-    history=_option_history(engine,proxy,cutoff)
+    history_key=(code,proxy,chain_ts,hashlib.sha256(json.dumps(chain,sort_keys=True,
+        allow_nan=False,separators=(',',':')).encode()).hexdigest()) if proxy and metrics else None
+    cached=option_history_cache or {}
+    history_cached=(history_key is not None and cached.get('key')==history_key
+                    and cached.get('captured_ts',math.inf)<=cutoff)
+    history=deepcopy(cached['rows']) if history_cached else _option_history(engine,proxy,cutoff)
+    if history and history_key is not None and option_history_cache is not None and not history_cached:
+        # One genuine received generation only. The consumer still checks each
+        # original source time; a busy cache writer cannot erase known facts.
+        option_history_cache.update(key=history_key,captured_ts=cutoff,rows=deepcopy(history))
     cache=SimpleNamespace(chain_snapshots=lambda ticker,limit=10:
         history[-limit:] if ticker==proxy else [])
     parent=SimpleNamespace(cache=cache,settings=engine.passive.settings,
@@ -196,7 +205,8 @@ def capture_decision_context(engine,market,*,captured_ts):
         'input_provenance':provenance,
         'v2_option_context':features['g1s_evidence_v2'].get('option_context') or {},
         '_raw_frozen':features,'_context_read':{'available':True,'deferred':False,
-            'cache_used':False,'reason':'LIVE_DECISION_METRICS'}}
+            'cache_used':False,'reason':'LIVE_DECISION_METRICS',
+            'option_history_cache_used':history_cached,'option_history_rows':len(history)}}
 
 
 @contextmanager
@@ -272,6 +282,7 @@ class DecisionMetricRuntime:
     """Two immutable generations for the currently selected instrument only."""
     def __init__(self,engine):
         self.engine=engine;self._contexts=();self._refresh_lock=threading.Lock()
+        self._option_history_cache={}
         self._status={'state':'PENDING','network_calls':False,'runtime_fitting':False}
 
     def status(self):return dict(self._status)
@@ -279,7 +290,7 @@ class DecisionMetricRuntime:
     def refresh_interval_sec(self):
         status=self._status
         return (5. if status.get('instrument')!=self.engine.market.instrument_code
-                or status.get('reason')=='MARKET_INPUT_FREEZE_BUSY' else 30.)
+                or status.get('reason') in {'MARKET_INPUT_FREEZE_BUSY','CURRENT_QUOTE_OR_INPUT_UNAVAILABLE'} else 30.)
 
     def generation_marker(self):
         if not self._contexts:return None
@@ -302,7 +313,7 @@ class DecisionMetricRuntime:
         self._status={**self._status,'state':'BUILDING','last_attempt_ts':attempted}
         try:
             from .ai_frozen_expert_inputs import capture_market_inputs
-            view=capture_market_inputs(self.engine,include_decision_metrics=False)
+            view=capture_market_inputs(self.engine,include_decision_metrics=False,lock_timeout_sec=.25)
             # A materialized UI tick can predate genuinely received bars/chain.
             # These inputs belong to their actual copy boundary, not that tick.
             captured=_number(view.market.frozen_inputs_captured_ts)
@@ -312,7 +323,8 @@ class DecisionMetricRuntime:
                 self._status={**self._status,'state':'DEFERRED','reason':reason,
                     'capture_busy_n':busy_n+int(reason=='MARKET_INPUT_FREEZE_BUSY')}
                 return
-            context=capture_decision_context(self.engine,view.market,captured_ts=captured)
+            context=capture_decision_context(self.engine,view.market,captured_ts=captured,
+                                             option_history_cache=self._option_history_cache)
             if not context or self.engine.market.instrument_code!=code:
                 self._status={**self._status,'state':'DEFERRED','reason':
                     'INSTRUMENT_CHANGED' if self.engine.market.instrument_code!=code
@@ -323,6 +335,10 @@ class DecisionMetricRuntime:
             self._contexts=(context,*[row for row in self._contexts[:1] if row.get('instrument')==code])
             self._status={'state':'READY','instrument':code,'captured_ts':captured,
                 'metric_count':len(values),'available_metrics':sum(row.get('available') is True for row in values.values()),
+                'option_input_reason':getattr(view.market,'option_freeze_reason',None) or (context.get('option_static') or {}).get('reason'),
+                'option_source_ts':_number((getattr(view.market,'chain',None) or {}).get('ts')),
+                'option_history_cache_used':context['_context_read']['option_history_cache_used'],
+                'option_history_rows':context['_context_read']['option_history_rows'],
                 'capture_busy_n':busy_n,'last_attempt_ts':attempted,
                 'network_calls':False,'runtime_fitting':False}
         except Exception as exc:

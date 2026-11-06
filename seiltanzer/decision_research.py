@@ -43,6 +43,7 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
                                   tolerance_sec: float = 1.0) -> None:
     """Reject numeric source timestamps newer than the decision capture."""
     from .ai_provider_decision_packet import restore_decision_rows
+    from .option_metric_transport import is_encoded_option_state, unpack_option_state
     snapshot = restore_decision_rows(snapshot)
     violations: list[str] = []
 
@@ -98,6 +99,10 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
                 and path[2].isdigit() and path[3:] == ("parameters", "deadline_ts")))
 
     def visit(value: Any, path: tuple[str, ...], policy: str | None = None) -> None:
+        if is_encoded_option_state(value):
+            value = unpack_option_state(value)
+            if value.get('reason') == 'INVALID_OPTION_METRIC_TRANSPORT':
+                raise ValueError('invalid frozen option metric transport')
         if isinstance(value, dict):
             policy = value.get("policy", policy)
             for key, child in value.items():

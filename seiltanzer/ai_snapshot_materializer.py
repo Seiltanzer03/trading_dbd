@@ -408,7 +408,11 @@ class AISnapshotMaterializer:
             baseline_publication = publication_marker(self.engine)
             baseline_completed_bar = merge_completed_bar_marker(
                 self._baseline_completed_bar,completed_bar_marker(self.engine))
-            market_inputs = capture_market_inputs(self.engine)
+            market_inputs = capture_market_inputs(self.engine,lock_timeout_sec=.25)
+            if getattr(market_inputs.market,'freeze_reason',None)=='MARKET_INPUT_FREEZE_BUSY':
+                with self._lock:
+                    self._invalidated_reason='MARKET_INPUT_FREEZE_BUSY'
+                raise RuntimeError('MARKET_INPUT_FREEZE_BUSY')
             from .decision_metric_inputs import pinned_decision_context
             with pinned_decision_context(self.engine,getattr(market_inputs.market,'live_metric_context',None)):
                 snapshot = self.builder(self.engine)
