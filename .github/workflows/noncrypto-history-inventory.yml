@@ -1,4 +1,4 @@
-name: post-publication-decision-stability
+name: option-history-admission-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,81 +8,29 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 50
+    timeout-minutes: 3
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45m
+          command_timeout: 65s
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import json,os,pathlib,subprocess,time,urllib.request
-            expected='b0cf9bd4315fb0270bc119af31bdd927c31ec3c9'
-            deadline=time.monotonic()+1500
-            while time.monotonic()<deadline:
-              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-              fresh_process=False;ready=False;pid=None
-              if installed==expected:
-                try:
-                  pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-                  boot=int(next(line.split()[1] for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
-                  start=boot+int(pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[19])/os.sysconf('SC_CLK_TCK')
-                  ref=subprocess.run(['git','symbolic-ref','-q','HEAD'],capture_output=True,text=True).stdout.strip() or 'HEAD'
-                  refpath=pathlib.Path(subprocess.check_output(['git','rev-parse','--git-path',ref],text=True).strip())
-                  commit_clock=int(subprocess.check_output(['git','show','-s','--format=%ct',expected],text=True).strip())
-                  fresh_process=pid!='809126' and start>=max(commit_clock,refpath.stat().st_mtime)
-                  if fresh_process:
-                    with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as response:ready=response.status==200
-                  if fresh_process and ready:break
-                except Exception:pass
-              print('STABILITY_NEW_PROCESS_WAIT',json.dumps({'installed_expected_sha':installed==expected,'pid':pid,'new_process_after_checkout':fresh_process,'http_ready':ready}),flush=True)
-              time.sleep(15)
-            else:raise RuntimeError('EXACT_NEW_PROCESS_NOT_READY_WITHIN_BOUND')
-            actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-            assert actual==expected
-            root=pathlib.Path('/opt/seiltanzer/data')
-            def read(route):
-              started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=6) as response:
-                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
-              return body,round((time.monotonic()-started)*1000,1)
-            deadline=time.monotonic()+600
-            while time.monotonic()<deadline:
-              body,_=read('/api/research/runtime/worker-status');inputs=body.get('decision_model_inputs') or {}
-              state,_=read('/api/state');chain=state['tick']['feeds'].get('chain') or {};now=time.time();stamp=chain.get('ts')
-              ai,_=read('/api/ai/snapshot/status');fm=ai.get('family_market_forecasts') or {}
-              publications=[]
-              for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json'):
-                path=root/'research'/name
-                publications.append(path.is_file() and path.stat().st_size<=12000000 and json.loads(path.read_bytes()).get('published_for_sha')==expected)
-              if all(publications) and fm.get('published_for_sha')==expected and fm.get('available_forecasts_at_capture',0)>0 and inputs.get('state')=='READY' and inputs.get('available_metrics',0)>=35 and isinstance(stamp,(int,float)) and 0<=now-stamp<=900:break
-              print('STABILITY_WARMING',json.dumps({'inputs':inputs,'chain_status':chain.get('status'),'chain_ts':stamp,'current_publications':all(publications),'family_sha':fm.get('published_for_sha'),'forecasts_at_capture':fm.get('available_forecasts_at_capture')}),flush=True)
-              time.sleep(15)
-            else:raise RuntimeError('CURRENT_COMPLETE_SOURCE_INPUTS_NOT_READY')
-            samples=[]
-            for index in range(8):
-              body,_=read('/api/research/runtime/worker-status');inputs=body.get('decision_model_inputs') or {}
-              state,latency=read('/api/state');tick=state['tick'];quote=tick['feeds']['price'];chain=tick['feeds'].get('chain') or {};now=time.time()
-              memory=(body.get('worker') or {}).get('memory_pressure') or {}
-              ai,_=read('/api/ai/snapshot/status');fm=ai.get('family_market_forecasts') or {}
-              row={'sample':index+1,'observed_ts':now,'instrument':inputs.get('instrument'),'state':inputs.get('state'),'capture_reason':inputs.get('reason'),'capture_busy_n':inputs.get('capture_busy_n'),'last_attempt_ts':inputs.get('last_attempt_ts'),'last_refresh_ms':inputs.get('last_refresh_ms'),'metric_count':inputs.get('metric_count'),'available_metrics':inputs.get('available_metrics'),'metric_capture_ts':inputs.get('captured_ts'),'metric_age_sec':now-inputs['captured_ts'],'ui_tick_ts':tick['ts'],'state_ms':latency,'quote_ts':quote.get('ts'),'quote_status':quote.get('status'),'quote_fresh':quote.get('fresh'),'chain_ts':chain.get('ts'),'chain_status':chain.get('status'),'rss_mib':memory.get('rss_mib'),'memory_pause':memory.get('pause_background'),'source_refresh':body.get('decision_family_sources'),'ai_ready':ai.get('ready'),'ai_building':ai.get('building'),'ai_error':ai.get('last_error'),'ai_pending_reason':ai.get('invalidated_reason'),'forecasts_at_capture':fm.get('available_forecasts_at_capture'),'forecast_capture_ts':fm.get('captured_ts'),'forecast_reasons':{k:v.get('reason') for k,v in (fm.get('families') or {}).items()}}
-              print('STABILITY_SAMPLE',json.dumps(row),flush=True);samples.append(row)
-              if index<7:time.sleep(45)
-            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts'],text=True).strip()
-            print('STABILITY_SERVICE',pid,flush=True)
-            summary={'samples':len(samples),'span_sec':samples[-1]['observed_ts']-samples[0]['observed_ts'],'available_min':min(row['available_metrics'] for row in samples),'available_max':max(row['available_metrics'] for row in samples),'max_metric_age_sec':max(row['metric_age_sec'] for row in samples),'max_state_ms':max(row['state_ms'] for row in samples),'max_quote_age_sec':max(row['observed_ts']-row['quote_ts'] for row in samples),'canonical_quote_fresh':all(row['quote_fresh'] is True and 0<=row['observed_ts']-row['quote_ts']<=30 for row in samples),'snapshot_budget_failures':sum('byte budget' in (row['ai_error'] or '').lower() for row in samples),'current_inputs_stable':all(row['state']=='READY' and row['metric_count']==92 and row['available_metrics']>=35 and 0<=row['metric_age_sec']<=55 for row in samples),'live_route_within_3000ms':all(row['state_ms']<3000 for row in samples),'ready_zero_forecasts':any(row['ai_ready'] and row['forecasts_at_capture']==0 for row in samples),'orders_or_ack_sent':False}
-            print('STABILITY_SUMMARY',json.dumps(summary),flush=True)
-            for name in ['mathematical_edge_latest.json','edge_family_sources_latest.json','edge_family_sources_runtime.json','active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)]]:
-              path=root/'research'/name;item={'name':name,'exists':path.is_file()}
-              if path.is_file() and path.stat().st_size<=12000000:
-                document=json.loads(path.read_bytes());item.update(sha=document.get('published_for_sha'),current=document.get('published_for_sha')==expected,age_sec=time.time()-path.stat().st_mtime)
-              print('STABILITY_PUBLICATION',json.dumps(item),flush=True)
-            snapshot,_=read('/api/ai/snapshot/status');forecasts=snapshot.get('family_market_forecasts') or {}
-            print('STABILITY_AI_STATUS',json.dumps({'ready':snapshot.get('ready'),'building':snapshot.get('building'),'last_error':snapshot.get('last_error'),'snapshot_budget':snapshot.get('snapshot_budget'),'family_sha':forecasts.get('published_for_sha'),'available_forecasts':forecasts.get('available_forecasts_at_capture'),'family_reasons':{k:v.get('reason') for k,v in (forecasts.get('families') or {}).items()}}),flush=True)
-            position,_=read('/api/position');reconciliation=position.get('execution_reconciliation') or {}
-            print('STABILITY_POSITION',json.dumps({'trade_id':position.get('trade_id'),'reconciliation_required':bool(reconciliation),'commands':reconciliation.get('commands') or []}),flush=True)
-            assert summary['current_inputs_stable'] and summary['live_route_within_3000ms'] and not summary['ready_zero_forecasts'] and summary['canonical_quote_fresh'] and summary['snapshot_budget_failures']==0
+            import json,pathlib,sqlite3,time
+            from types import SimpleNamespace
+            from seiltanzer.decision_metric_inputs import _option_history
+            root=pathlib.Path('/opt/seiltanzer/data');engine=SimpleNamespace(settings=SimpleNamespace(data_dir=root,cache_db=root/'cache.db'))
+            for index in range(4):
+              cutoff=time.time();started=time.monotonic();rows=_option_history(engine,'EWG',cutoff)
+              print('OPTION_HISTORY_READ',json.dumps({'sample':index+1,'cutoff':cutoff,'elapsed_ms':round((time.monotonic()-started)*1000,2),'rows':len(rows),'oldest_ts':rows[0]['ts'] if rows else None,'newest_ts':rows[-1]['ts'] if rows else None,'json_bytes':len(json.dumps(rows).encode())}),flush=True)
+              if index<3:time.sleep(10)
+            conn=sqlite3.connect((root/'cache.db').resolve().as_uri()+'?mode=ro',uri=True,timeout=.05)
+            try:
+              conn.execute('PRAGMA query_only=ON');deadline=time.monotonic()+1.;conn.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+              rows=conn.execute('SELECT COUNT(*),SUM(n),MAX(n),MIN(ts),MAX(ts) FROM (SELECT ts,length(data) n FROM chain_snapshots WHERE ticker=? AND ts<=? ORDER BY ts DESC LIMIT 120)',('EWG',time.time())).fetchone()
+              print('OPTION_HISTORY_METADATA',json.dumps({'rows':rows[0],'total_bytes':rows[1],'max_row_bytes':rows[2],'oldest_ts':rows[3],'newest_ts':rows[4]}),flush=True)
+            finally:conn.close()
             PY
