@@ -663,10 +663,13 @@ def normalize_structured_report(text: str, snapshot: dict) -> str:
     if not any(line.startswith("**EDE CAUSAL MARKET CONTEXT**") for line in lines): lines.extend(["", "**EDE CAUSAL MARKET CONTEXT** —", *_ede_context_lines(snapshot)])
     if not any(line.startswith("**FULL METRIC AUDIT**") for line in lines): lines.extend(["", "**FULL METRIC AUDIT** —", *_metric_audit_lines(snapshot)])
     from .mathematical_edge import render_math_edge
+    unified = manager.get("unified_edge_ensemble") or {}
+    math_component=next((row for row in unified.get('components') or []
+                         if row.get('component_id')=='mathematical_edge'),None)
     math_section = render_math_edge(manager.get('mathematical_edge') or {},
         manager.get('combined_edge_soft_weight'),
-        (manager.get('selection_rule') or {}).get('combined_edge_soft_weight'))
-    unified = manager.get("unified_edge_ensemble") or {}
+        (manager.get('selection_rule') or {}).get('combined_edge_soft_weight'),
+        unified_component=math_component)
     if unified:
         lines = _unified_command_sections(lines, snapshot)
         primary = _primary_economics(snapshot)

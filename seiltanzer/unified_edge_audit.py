@@ -142,7 +142,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "admission_reason", "operational_block_reason",
             "expected_net_r", "cvar10_net_r", "delta_expected_r", "score",
             "component_contributions", "component_scores", "intervention_cost_r",
-            "ranking_eligible", "ranking_reason", "dominated_by_candidate_ids", "delta_cvar_r",
+            "ranking_eligible", "ranking_reason", "dominated_by_candidate_ids", "pareto_comparisons", "delta_cvar_r",
             "execution_cost_r", "economics_basis", "source",
             "working_family_contributions",
             'model_family_contributions',
@@ -356,7 +356,14 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
         if row.get('dominated_by_candidate_ids'):
             lines.append('Исключён до голосования: в том же сценарном банке лучше или равны '
                          'Expected net и CVaR10 net у ' + ', '.join(row['dominated_by_candidate_ids'])
-                         + '; хотя бы одна метрика строго лучше. Это модельное сравнение, не доказанная прибыль.')
+                         + '; парная нижняя MC/seed-граница Expected и прирост CVaR неотрицательны, '
+                         'хотя бы одна граница положительна. Границы отражают погрешность симуляции, не уверенность в рынке.')
+        for other,proof in (row.get('pareto_comparisons') or {}).items():
+            lines.append('Парное Pareto-сравнение с ' + str(other) + ': нижняя MC/seed-граница ΔExpected '
+                         + _format(proof.get('expected_ci95_lower_r'),'R') + '; прирост CVaR по seed '
+                         + _format(proof.get('matched_seed_tail_gain_lower_r'),'R') + '; '
+                         + ('доминирование подтверждено в модели.' if proof.get('robust_dominance') is True
+                            else 'точечное превосходство не даёт основания исключать этот вариант.'))
         utility = row.get('quant_utility') or {}
         sacrifice = row.get('expected_sacrifice_check') or {}
         if row.get('ranking_reason') == 'EXPECTED_SACRIFICE_EXCEEDS_BUDGET' and sacrifice:

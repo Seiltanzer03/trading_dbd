@@ -29,6 +29,7 @@ SEEDS = (0xA17E, 0xB17E)
 PATHS_PER_SEED = 600
 STEPS = 160
 STATISTICS_BASIS = "COMMON_BANK_NET_OUTCOMES_NOT_CALIBRATED_PHYSICAL_P"
+PAIRED_PARETO_CONTRACT = 'same-path-weighted-pareto-mc-v1'
 
 
 def _number(value):
@@ -144,6 +145,31 @@ def _weighted_cvar(values, weights, alpha=.10):
     w = weights[order]
     mass = np.minimum(w, np.maximum(alpha - (np.cumsum(w) - w), 0.))
     return float(np.sum(values[order] * mass) / alpha)
+
+
+def _paired_expected_bound(paired, weights, groups):
+    """Same-path covariance and seed sensitivity, never market confidence."""
+    def estimate(values, mass):
+        mass=mass/mass.sum()
+        mean=float(np.sum(mass*values))
+        supported=values[mass>0]
+        if np.all(supported==supported[0]):return mean,mean
+        n=1./np.sum(mass**2)
+        # Do not floor n_eff-1 at one: that would shrink uncertainty when
+        # almost all mass belongs to one path. Rounding to n_eff==1 for
+        # nonconstant supported outcomes leaves the bound unavailable.
+        if n<=1.:return mean,None
+        se=math.sqrt(float(np.sum(mass*(values-mean)**2))/(n-1.))
+        return mean,mean-1.96*se
+    mean,lower=estimate(paired,weights)
+    if lower is None:return mean,None
+    for group in np.unique(groups):
+        mask=groups==group
+        if weights[mask].sum()>0:
+            group_lower=estimate(paired[mask],weights[mask])[1]
+            if group_lower is None:return mean,None
+            lower=min(lower,group_lower)
+    return mean,lower
 
 
 def _net_statistics(values, weights, current_r):
@@ -302,6 +328,7 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
     if floor is None:
         floor = _number(rule.get("cvar_floor_r"))
     result = {}
+    net_outcomes, seed_cvars = {}, {}
     for row in candidates:
         identity = str(row.get("candidate_id") or row.get("policy") or "")
         try:
@@ -359,6 +386,29 @@ def price_unified_candidates(snapshot: dict, candidates: list[dict]) -> dict:
             "bank_id": bank["bank_id"], "path_count": bank["path_count"],
             "horizon_minutes": inputs.horizon_minutes,
         }
+        net_outcomes[identity]=net
+        seed_cvars[identity]=group_cvars or [cvar]
+    # Price once, compare matched outcomes once, and reuse in every ablation.
+    # A point estimate cannot prove a non-inferior expected return when its
+    # paired MC/seed lower bound is negative. Existing benefit/risk gates remain.
+    for identity,row in result.items():
+        if not row.get('available'):continue
+        comparisons={}
+        for other_id,other in result.items():
+            if (other_id==identity or not other.get('available')
+                    or other['expected_net_r']<row['expected_net_r']
+                    or other['cvar10_net_r']<row['cvar10_net_r']
+                    or not (other['expected_net_r']>row['expected_net_r']+1e-8
+                            or other['cvar10_net_r']>row['cvar10_net_r']+1e-8)):
+                continue
+            delta,lower=_paired_expected_bound(net_outcomes[other_id]-net_outcomes[identity],weights,groups)
+            tail=min(a-b for a,b in zip(seed_cvars[other_id],seed_cvars[identity]))
+            comparisons[other_id]={'contract_version':PAIRED_PARETO_CONTRACT,
+                'bank_id':bank['bank_id'],'expected_delta_r':delta,
+                'expected_ci95_lower_r':lower,
+                'matched_seed_tail_gain_lower_r':tail,
+                'robust_dominance':lower is not None and lower>=-1e-8 and tail>=-1e-8 and (lower>1e-8 or tail>1e-8)}
+        if comparisons:row['pareto_comparisons']=comparisons
     return {"version": VERSION, "available": True,
             "reason": "COMMON_FROZEN_SCENARIO_NET_ECONOMICS", "candidates": result,
             "shared_scenario_bank": True, "method": "single_bank_execution_simulator_replay",

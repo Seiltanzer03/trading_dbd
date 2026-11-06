@@ -426,6 +426,18 @@ class AISnapshotMaterializer:
             freeze_expert_inputs(self.engine, snapshot, market_inputs=market_inputs)
             from .edge_family_market import family_runtime_status
             family_status=family_runtime_status(snapshot)
+            if (family_status.get('available_forecasts_at_capture')==0 and any(
+                    row.get('trained_model_valid') is True
+                    and row.get('target_provider')=='TradingView chart'
+                    and str(row.get('reason') or '').split(';')[0]=='REFERENCE_LATEST_COMPLETED_BAR_UNAVAILABLE'
+                    for row in (family_status.get('families') or {}).values())):
+                # A trained reference model awaiting its current closed bar is
+                # an input warmup, not a ready zero-forecast recommendation.
+                # Keep original clocks and use the existing bounded retry guard.
+                with self._lock:
+                    self._family_runtime_status=family_status
+                    self._invalidated_reason='CURRENT_REFERENCE_MODEL_INPUTS_PENDING'
+                raise RuntimeError('CURRENT_REFERENCE_MODEL_INPUTS_PENDING')
             final_trade = self.current_trade() or current_trade_row or {}
             completion_instrument, completion_quote_available, _ = self._current_quote()
             completion_r = self._current_r(final_trade)
