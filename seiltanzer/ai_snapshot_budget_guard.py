@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 import json
 from .unified_edge_audit import compact_unified_ensemble
+from .option_metric_transport import pack_option_state, unpack_option_state, is_encoded_option_state
 from .operational_edge_compaction import compact_operational_edges, compact_evidence_lineage, FAMILY_ROOTS, FAMILY_AUDITS
 
 _INSTALLED = False
@@ -83,6 +84,7 @@ def _compact_scalars(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
 
 def _compact_option_metric_audit(value: Any) -> dict[str, Any]:
     """Retain bounded observed metric rows; never infer a missing derivative."""
+    value = unpack_option_state(value)
     if not isinstance(value, dict):
         return {}
     scalar = lambda item: item is None or isinstance(item, (bool, int, float)) or isinstance(item, str) and len(item) <= 256
@@ -229,6 +231,10 @@ def _emergency_authoritative_compaction(snapshot: dict[str, Any], ai_verdict: An
             manager[key] = (ai_verdict._impl._bounded_gate(manager[key])
                             if key == "gate" else bound(manager[key]))
     snapshot["policy_manager"] = manager
+    if 'option_derivative_state' in manager:
+        manager['option_derivative_state'] = pack_option_state(manager['option_derivative_state'])
+        if is_encoded_option_state(manager['option_derivative_state']):
+            snapshot.setdefault('snapshot_budget', {})['option_metrics_transport'] = 'LOSSLESS_JSON_ZLIB_SHA256'
 
 
 def install_ai_snapshot_budget_guard() -> None:

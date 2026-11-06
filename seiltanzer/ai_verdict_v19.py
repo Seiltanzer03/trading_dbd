@@ -552,7 +552,10 @@ def _material_change_lines(manager: dict, key: str) -> list[str]:
 
 
 def _metric_audit_lines(snapshot: dict) -> list[str]:
-    manager = snapshot.get("policy_manager") or {}; evidence = manager.get("evidence") or {}; state = manager.get("option_derivative_state") or evidence.get("option_derivative_state") or {}; metrics = state.get("metrics") or {}
+    from .option_metric_transport import unpack_option_state
+    manager = snapshot.get("policy_manager") or {}; evidence = manager.get("evidence") or {}
+    state = unpack_option_state(manager.get("option_derivative_state") or evidence.get("option_derivative_state") or {})
+    metrics = state.get("metrics") or {}
     order = ("p_take", "p_stop", "p_no_touch", "barrier_ev", "bop", "q10", "q50", "q90", "width", "tail_log_ratio", "h_take", "h_stop", "hazard_log_ratio", "iv", "rv", "vrp", "skew", "term_slope", "gex_force", "gex_stiffness", "distance_to_zero_gamma")
     lines = ["Текущие значения и производные разделены: отсутствующее значение не приравнивается к нулю; fallback/proxy должен быть явно помечен источником и качеством."]
     for name in order:

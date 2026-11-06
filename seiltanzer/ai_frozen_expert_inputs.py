@@ -47,8 +47,11 @@ class _EngineInputView:
         setattr(self._engine, name, value)
 
 
-def capture_market_inputs(engine, *, include_decision_metrics=True):
+def capture_market_inputs(engine, *, include_decision_metrics=True, lock_timeout_sec=0.):
     """Copy coherent existing bars/proof before expensive snapshot computation."""
+    if (not isinstance(lock_timeout_sec, (int, float)) or isinstance(lock_timeout_sec, bool)
+            or not math.isfinite(lock_timeout_sec) or not 0 <= lock_timeout_sec <= .25):
+        raise ValueError('MARKET_INPUT_LOCK_WAIT_BOUND')
     feed = getattr(engine, "market", None)
     market = SimpleNamespace(instrument_code=getattr(feed, "instrument_code", None),
         demo=getattr(feed, "demo", False), intraday_is_offset=False,
@@ -58,7 +61,8 @@ def capture_market_inputs(engine, *, include_decision_metrics=True):
         price={},daily={},correlation={},live_metric_context=None,
         _intraday_lock=threading.Lock())
     lock = getattr(feed, "_intraday_lock", None)
-    acquired = lock is None or lock.acquire(blocking=False)
+    acquired = lock is None or (lock.acquire(timeout=lock_timeout_sec) if lock_timeout_sec
+                               else lock.acquire(blocking=False))
     if not acquired:
         market.freeze_reason = "MARKET_INPUT_FREEZE_BUSY"
         return _EngineInputView(engine, market)

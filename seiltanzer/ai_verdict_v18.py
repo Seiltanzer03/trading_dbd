@@ -222,8 +222,10 @@ def _enforce_snapshot_budget(snapshot: dict) -> None:
         manager["evidence"].update(compact_evidence_lineage(original_evidence))
         manager["input_audit"] = _bounded(
             _compact_input_audit(manager.get("input_audit") or {}))
-        manager["option_derivative_state"] = _bounded(
-            manager.get("option_derivative_state") or {})
+        from .option_metric_transport import is_encoded_option_state
+        if not is_encoded_option_state(manager.get('option_derivative_state')):
+            manager["option_derivative_state"] = _bounded(
+                manager.get("option_derivative_state") or {})
         manager["gate"] = _bounded_gate(manager.get("gate") or {})
         policies = manager.get("policies") or {}
         manager["policies"] = {

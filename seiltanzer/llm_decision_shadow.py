@@ -158,6 +158,14 @@ def _shadow_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
     projection["policy_manager"] = {
         key: manager[key] for key in manager_keys if key in manager
     }
+    from .option_metric_transport import unpack_option_state
+    if 'option_derivative_state' in projection['policy_manager']:
+        projection['policy_manager']['option_derivative_state'] = unpack_option_state(manager['option_derivative_state'])
+    if isinstance(projection['policy_manager'].get('evidence'), dict):
+        evidence = dict(projection['policy_manager']['evidence'])
+        if 'option_derivative_state' in evidence:
+            evidence['option_derivative_state'] = unpack_option_state(evidence['option_derivative_state'])
+        projection['policy_manager']['evidence'] = evidence
     from .research_working_context import prompt_research_context
     preliminary = prompt_research_context(snapshot)
     if preliminary:
