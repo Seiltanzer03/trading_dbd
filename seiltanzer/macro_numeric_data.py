@@ -124,6 +124,21 @@ def _latest_common(series_maps: list[dict[tuple[int, int], float]]) -> tuple[int
     return max(common)
 
 
+def _bls_missing_reference(payload: dict, series_id: str, period: tuple[int,int]) -> dict | None:
+    """Preserve an explicit official missing observation, never an omitted row."""
+    series=[row for row in payload['Results']['series'] if isinstance(row,dict) and row.get('seriesID')==series_id]
+    if len(series)!=1:return None
+    rows=[row for row in series[0].get('data',[]) if isinstance(row,dict) and _bls_period(row)==period]
+    if len(rows)!=1 or rows[0].get('value')!='-':return None
+    notes=rows[0].get('footnotes')
+    if not isinstance(notes,list):return None
+    missing=[dict(note) for note in notes if isinstance(note,dict) and note.get('code')=='X'
+             and isinstance(note.get('text'),str) and note['text'].strip()]
+    if not missing:return None
+    return {'reason':'OFFICIAL_REFERENCE_OBSERVATION_UNAVAILABLE','series_id':series_id,
+        'reference_period':_period_key(*period),'official_marker':'-','footnotes':missing}
+
+
 def build_bls_releases(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Create CPI and employment release facts from one official BLS response."""
     data = parse_bls_payload(payload)
@@ -132,16 +147,32 @@ def build_bls_releases(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     hn = data[BLS_SERIES["cpi_headline_nsa"]]
     cn = data[BLS_SERIES["cpi_core_nsa"]]
     cpi_period = _latest_common([hs, cs, hn, cn])
+    cpi_ids={BLS_SERIES[name] for name in ('cpi_headline_sa','cpi_core_sa','cpi_headline_nsa','cpi_core_nsa')}
+    reported_period=cpi_period
+    for series in payload['Results']['series']:
+        if not isinstance(series,dict) or series.get('seriesID') not in cpi_ids:continue
+        for row in series.get('data') or []:
+            period=_bls_period(row) if isinstance(row,dict) else None
+            if period is not None:reported_period=max(reported_period,period)
+    if reported_period!=cpi_period:raise ValueError('BLS_CPI_HISTORY_INCOMPLETE')
     year, month = cpi_period
     prev = (year - 1, 12) if month == 1 else (year, month - 1)
     prev2 = (prev[0] - 1, 12) if prev[1] == 1 else (prev[0], prev[1] - 1)
     year_ago = (year - 1, month)
     required_cpi = [
-        (hs, prev), (cs, prev), (hn, year_ago), (cn, year_ago),
+        (hs, prev), (cs, prev),
         (hs, prev2), (cs, prev2),
     ]
     if any(key not in mapping for mapping, key in required_cpi):
         raise ValueError("BLS_CPI_HISTORY_INCOMPLETE")
+    unavailable={}
+    for field,series_id,mapping in (
+            ('headline_yoy_pct',BLS_SERIES['cpi_headline_nsa'],hn),
+            ('core_yoy_pct',BLS_SERIES['cpi_core_nsa'],cn)):
+        if year_ago not in mapping:
+            gap=_bls_missing_reference(payload,series_id,year_ago)
+            if gap is None:raise ValueError('BLS_CPI_HISTORY_INCOMPLETE')
+            unavailable[field]=gap
     headline_mom = _pct_change(hs[cpi_period], hs[prev])
     core_mom = _pct_change(cs[cpi_period], cs[prev])
     prev_headline_mom = _pct_change(hs[prev], hs[prev2])
@@ -151,8 +182,8 @@ def build_bls_releases(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "period": _period_key(year, month),
         "headline_mom_pct": headline_mom,
         "core_mom_pct": core_mom,
-        "headline_yoy_pct": _pct_change(hn[cpi_period], hn[year_ago]),
-        "core_yoy_pct": _pct_change(cn[cpi_period], cn[year_ago]),
+        "headline_yoy_pct": _pct_change(hn[cpi_period], hn[year_ago]) if year_ago in hn else None,
+        "core_yoy_pct": _pct_change(cn[cpi_period], cn[year_ago]) if year_ago in cn else None,
         "headline_mom_change_pp": (
             headline_mom - prev_headline_mom
             if headline_mom is not None and prev_headline_mom is not None else None
@@ -170,6 +201,8 @@ def build_bls_releases(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "consensus_available": False,
         "surprise_computed": False,
     }
+
+    if unavailable:cpi['unavailable_fields']=unavailable
 
     nfp = data[BLS_SERIES["nfp_level_k"]]
     ur = data[BLS_SERIES["unemployment_rate_pct"]]
