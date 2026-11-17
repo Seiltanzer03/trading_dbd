@@ -701,39 +701,14 @@ def attach_market_family_context(engine, snapshot):
                 features,proof=flow['features'],flow['feature_provenance']
             if family == 'positioning' and any(any(n.startswith('positioning.option_') for n in head.get('feature_names', []))
                     for head in model['heads'].values()):
-                from .edge_family_option_interest import interest_observation
-                from .passive_learning import PassiveLearningEngine
-                chain=getattr(feed,'chain',None)
-                interest=None
-                if isinstance(chain,dict):
-                    receipt=number(chain.get('ts'))
-                    if receipt is not None and receipt<=origin:
-                        metrics=chain.get('metrics')
-                        try:
-                            interest=interest_observation(code=code,metrics=metrics,source_id=chain.get('source'),
-                                observed_ts=receipt,received_ts=receipt,quality=PassiveLearningEngine._quality(chain),
-                                source_sha256=fingerprint(metrics))
-                        except (ValueError,TypeError,OverflowError):
-                            pass
+                from .option_family_inputs import option_family_input
+                interest=option_family_input(engine,snapshot,code,'positioning',origin,cutoff)
                 if interest is None or cutoff-interest['captured_ts']>1800:
                     context.setdefault('rejected_models',{})[family]='ACTUAL_CONFIGURED_OPTION_INTEREST_UNAVAILABLE';continue
                 features,proof=interest['features'],interest['feature_provenance']
             if family == 'option' and any('option.iv' in head.get('feature_names', []) for head in model['heads'].values()):
-                from .edge_family_native_history import option_observation
-                from .passive_learning import PassiveLearningEngine
-                chain = getattr(feed, 'chain', None)
-                option = None
-                if isinstance(chain, dict):
-                    option_received = number(chain.get('ts'))
-                    metrics = chain.get('metrics')
-                    if option_received is not None and option_received <= origin:
-                        try:
-                            option = option_observation(code=code, metrics=metrics,
-                                source_id=chain.get('source'), observed_ts=option_received,
-                                received_ts=option_received, quality=PassiveLearningEngine._quality(chain),
-                                source_sha256=fingerprint(metrics))
-                        except (ValueError, TypeError, OverflowError):
-                            pass  # Invalid optional input cannot remove other experts.
+                from .option_family_inputs import option_family_input
+                option=option_family_input(engine,snapshot,code,'option',origin,cutoff)
                 if option is None or cutoff-option['captured_ts'] > 1800:
                     context.setdefault('rejected_models', {})[family] = 'ACTUAL_CONFIGURED_OPTION_INPUT_UNAVAILABLE'; continue
                 features, proof = option['features'], option['feature_provenance']

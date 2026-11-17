@@ -83,3 +83,18 @@ def test_a_report_copy_cannot_mutate_the_retained_received_history(engine,monkey
     monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0+30)
     runtime.refresh()
     assert runtime.context_at('NAS100',T0+30)['option_static']['delta']==.2
+
+
+def test_runtime_pins_original_family_receipts_when_latest_chain_arrives_after_origin(engine,monkeypatch,option_runtime):
+    runtime,_=option_runtime
+    original=runtime.context_at('NAS100',T0)['option_family_inputs']['option']
+    assert original['features']=={'option.iv':.3}
+    original['features']['option.iv']=.99
+    engine.market.chain['ts']=T0+15
+    engine.market.chain['metrics']['implied_move']['sigma_annual']=.7
+    engine.market.price['ts']=T0+29
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0+30)
+    runtime.refresh()
+    actual=runtime.context_at('NAS100',T0+30)['option_family_inputs']['option']
+    assert actual['features']=={'option.iv':.3}
+    assert actual['feature_provenance']['option.iv']['received_ts']==T0-5

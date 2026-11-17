@@ -123,7 +123,7 @@ def _native_minute_rows(market,code,cutoff):
     return rows,proof
 
 
-def capture_decision_context(engine,market,*,captured_ts,option_history_cache=None):
+def capture_decision_context(engine,market,*,captured_ts,option_history_cache=None,option_family_cache=None):
     """Build an as-of view of received inputs, without inserting an anchor."""
     from .canonical_market_context import price_quote_available
     from .config import ALL_INSTRUMENTS
@@ -200,7 +200,10 @@ def capture_decision_context(engine,market,*,captured_ts,option_history_cache=No
         and (isinstance(value,(bool,int,float)) or isinstance(value,str) and len(value)<=256)}
     if len(json.dumps(features,allow_nan=False,separators=(',',':')).encode())>MAX_CONTEXT_BYTES:
         raise ValueError('LIVE_METRIC_CONTEXT_BOUND')
-    return {**block,'observation_t0':cutoff,
+    from .option_family_inputs import freeze_option_family_inputs
+    family_inputs=(freeze_option_family_inputs(option_family_cache,code,chain,cutoff)
+                   if option_family_cache is not None else {})
+    return {**block,'observation_t0':cutoff,'option_family_inputs':family_inputs,
         'max_age_sec':getattr(engine.settings,'ede_context_max_age_sec',900),
         'input_provenance':provenance,
         'v2_option_context':features['g1s_evidence_v2'].get('option_context') or {},
@@ -283,6 +286,7 @@ class DecisionMetricRuntime:
     def __init__(self,engine):
         self.engine=engine;self._contexts=();self._refresh_lock=threading.Lock()
         self._option_history_cache={}
+        self._option_family_cache={}
         self._status={'state':'PENDING','network_calls':False,'runtime_fitting':False}
 
     def status(self):return dict(self._status)
@@ -324,7 +328,8 @@ class DecisionMetricRuntime:
                     'capture_busy_n':busy_n+int(reason=='MARKET_INPUT_FREEZE_BUSY')}
                 return
             context=capture_decision_context(self.engine,view.market,captured_ts=captured,
-                                             option_history_cache=self._option_history_cache)
+                                             option_history_cache=self._option_history_cache,
+                                             option_family_cache=self._option_family_cache)
             if not context or self.engine.market.instrument_code!=code:
                 self._status={**self._status,'state':'DEFERRED','reason':
                     'INSTRUMENT_CHANGED' if self.engine.market.instrument_code!=code
