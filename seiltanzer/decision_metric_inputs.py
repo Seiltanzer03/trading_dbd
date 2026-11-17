@@ -221,10 +221,14 @@ def pinned_decision_context(engine,context):
 
 
 def live_decision_context(engine,snapshot):
+    from .ai_frozen_expert_inputs import _EngineInputView
     code=(snapshot.get('strategy') or {}).get('instrument')
     cutoff=_number(snapshot.get('captured_ts'))
     pinned=_PINNED.get();owner=getattr(engine,'_engine',engine)
-    if pinned is not None and pinned[0]==id(owner):context=pinned[1]
+    # Expert attachment outlives the builder's pin. Preserve the frozen view,
+    # including explicit absence, instead of consulting a later generation.
+    if isinstance(engine,_EngineInputView):context=engine.market.live_metric_context
+    elif pinned is not None and pinned[0]==id(owner):context=pinned[1]
     else:
         runtime=getattr(owner,'decision_metric_runtime',None)
         context=runtime.context_at(code,cutoff) if runtime is not None else None

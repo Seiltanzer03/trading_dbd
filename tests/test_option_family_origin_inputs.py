@@ -111,3 +111,42 @@ def test_pinned_origin_facts_are_revalidated_before_consumption(damage):
     context={'instrument':'NAS100','observation_t0':captured,'option_family_inputs':{'option':prior}}
     with pinned_decision_context(engine,context):
         assert option_family_input(engine,snapshot,'NAS100','option',T0,T0+30) is None
+
+
+@pytest.mark.parametrize('family',['option','positioning'])
+def test_slow_builder_cannot_replace_the_frozen_option_context_with_later_runtime(family,monkeypatch):
+    from types import SimpleNamespace
+    from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
+    from seiltanzer.decision_metric_inputs import DecisionMetricRuntime
+    from seiltanzer.option_family_inputs import option_family_input
+    prior=native_input(family,chain(T0-60))
+    context={'instrument':'NAS100','observation_t0':T0+30,'option_family_inputs':{family:prior}}
+    engine=SimpleNamespace(market=SimpleNamespace(instrument_code='NAS100',demo=False,chain=chain(T0+15)))
+    runtime=engine.decision_metric_runtime=DecisionMetricRuntime(engine)
+    runtime._contexts=(context,)
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0+30)
+    frozen=capture_market_inputs(engine)
+    snapshot={'captured_ts':T0+30,'strategy':{'instrument':'NAS100'}}
+    with pinned_decision_context(engine,frozen.market.live_metric_context):
+        runtime._contexts=({'instrument':'NAS100','observation_t0':T0+65},
+                           {'instrument':'NAS100','observation_t0':T0+35})
+    # Production attaches experts after the builder's pin has ended.
+    actual=option_family_input(frozen,snapshot,'NAS100',family,T0,T0+30)
+    assert actual==prior
+    assert all(row['received_ts']==T0-60 for row in actual['feature_provenance'].values())
+
+
+def test_absent_frozen_option_context_cannot_be_backfilled_from_later_runtime(monkeypatch):
+    from types import SimpleNamespace
+    from seiltanzer.ai_frozen_expert_inputs import capture_market_inputs
+    from seiltanzer.decision_metric_inputs import DecisionMetricRuntime
+    from seiltanzer.option_family_inputs import option_family_input
+    engine=SimpleNamespace(market=SimpleNamespace(instrument_code='NAS100',demo=False,chain=chain(T0+15)))
+    runtime=engine.decision_metric_runtime=DecisionMetricRuntime(engine)
+    monkeypatch.setattr('seiltanzer.ai_frozen_expert_inputs.time.time',lambda:T0+30)
+    frozen=capture_market_inputs(engine)
+    assert frozen.market.live_metric_context is None
+    runtime._contexts=({'instrument':'NAS100','observation_t0':T0+30,
+        'option_family_inputs':{'option':native_input('option',chain(T0-60))}},)
+    snapshot={'captured_ts':T0+30,'strategy':{'instrument':'NAS100'}}
+    assert option_family_input(frozen,snapshot,'NAS100','option',T0,T0+30) is None
