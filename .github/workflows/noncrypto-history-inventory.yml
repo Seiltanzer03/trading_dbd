@@ -1,4 +1,4 @@
-name: current-terminal-preflight-readonly
+name: terminal-network-path-readonly
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,49 +8,29 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 2
     steps:
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 65s
-          script: |
-            cd /opt/seiltanzer
-            .venv/bin/python -B -u - <<'PY'
-            import json,pathlib,subprocess,time,urllib.request
-            root=pathlib.Path('/opt/seiltanzer')
-            sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-            service=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','-p','NRestarts','-p','ActiveState','-p','ExecMainStartTimestamp'],text=True).strip()
-            print('CURRENT_PROCESS',json.dumps({'observed_ts':time.time(),'sha':sha,'service':service}),flush=True)
-            def read(route):
-                started=time.monotonic()
-                with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=5) as response:
-                    raw=response.read(4000001)
-                    assert len(raw)<=4000000
-                    return json.loads(raw),round((time.monotonic()-started)*1000,2)
-            for route in ('/api/state','/api/research/runtime/worker-status','/api/ai/snapshot/status','/api/position'):
-                try:
-                    body,elapsed=read(route)
-                    if route.endswith('/state'):
-                        tick=body.get('tick') or {};price=(tick.get('feeds') or {}).get('price') or {}
-                        value={'tick_ts':tick.get('ts'),'quote_ts':price.get('ts'),'quote_fresh':price.get('fresh'),'quote_status':price.get('status')}
-                    elif route.endswith('worker-status'):
-                        value={'decision_model_inputs':body.get('decision_model_inputs'),'decision_family_sources':body.get('decision_family_sources')}
-                    elif route.endswith('snapshot/status'):
-                        family=body.get('family_market_forecasts') or {}
-                        value={k:body.get(k) for k in ('ready','building','last_error','snapshot_budget','invalidated_reason')}
-                        value['families']=family
-                    else:
-                        reconciliation=body.get('execution_reconciliation') or {}
-                        value={'trade_id':body.get('trade_id'),'instrument':body.get('instrument'),'reconciliation_required':bool(reconciliation),'commands':reconciliation.get('commands') or []}
-                    print('CURRENT_API',json.dumps({'route':route,'elapsed_ms':elapsed,'value':value}),flush=True)
-                except Exception as error:
-                    print('CURRENT_API_ERROR',json.dumps({'route':route,'error_type':type(error).__name__}),flush=True)
-            for name in ('mathematical_edge_latest.json','edge_family_sources_latest.json','active_ml_latest.json',*[f'active_structured_{h}m_latest.json' for h in (15,30,60,120,240)]):
-                path=root/'data'/'research'/name
-                if path.is_file() and path.stat().st_size<=12000000:
-                    data=json.loads(path.read_bytes())
-                    print('CURRENT_PUBLICATION',json.dumps({'name':name,'published_for_sha':data.get('published_for_sha'),'same_installed_sha':data.get('published_for_sha')==sha,'age_sec':round(time.time()-path.stat().st_mtime,1)}),flush=True)
-            PY
+      - name: Check only the requested service and SSH port
+        run: |
+          python3 -u - <<'PY'
+          import concurrent.futures,json,socket,time,urllib.request
+          def ssh():
+              started=time.monotonic()
+              try:
+                  with socket.create_connection(('94.241.171.182',22),timeout=8):pass
+                  return {'route':'SSH22','tcp_connected':True,'elapsed_ms':round((time.monotonic()-started)*1000,1)}
+              except Exception as error:
+                  return {'route':'SSH22','tcp_connected':False,'error_type':type(error).__name__,'elapsed_ms':round((time.monotonic()-started)*1000,1)}
+          def http():
+              started=time.monotonic()
+              try:
+                  with urllib.request.urlopen('http://94.241.171.182:8790/api/state',timeout=8) as response:
+                      raw=response.read(4000001);assert len(raw)<=4000000
+                      body=json.loads(raw);status=response.status
+                  quote=((body.get('tick') or {}).get('feeds') or {}).get('price') or {}
+                  return {'route':'HTTP8790/api/state','http_status':status,'elapsed_ms':round((time.monotonic()-started)*1000,1),'quote_age_sec':time.time()-quote['ts'],'quote_fresh':quote.get('fresh')}
+              except Exception as error:
+                  return {'route':'HTTP8790/api/state','error_type':type(error).__name__,'http_status':getattr(error,'code',None),'elapsed_ms':round((time.monotonic()-started)*1000,1)}
+          with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+              for result in pool.map(lambda fn:fn(),(ssh,http)):print('NETWORK_PATH',json.dumps(result),flush=True)
+          PY
