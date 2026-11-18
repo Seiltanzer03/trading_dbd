@@ -1,4 +1,4 @@
-name: focused-current-input-diagnostic
+name: bounded-numeric-reader-acceptance
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,55 +8,83 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 8
+    timeout-minutes: 50
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 5m
+          command_timeout: 45m
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import concurrent.futures,json,pathlib,sqlite3,subprocess,time,urllib.request
-            from collections import Counter
-            from seiltanzer.edge_discovery.ai_context import canonical_current_feature_map
-            from seiltanzer.sqlite_json_payloads import unpack_text
-            expected='2f2681ed2685ddfd0bbca6fe1c58c5272306d0af'
-            assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==expected
-            root=pathlib.Path('/opt/seiltanzer/data')
+            import json,os,pathlib,sqlite3,subprocess,time,urllib.request
+            expected='bd8a51369e8a4e7f82b3cbfa14c5a6d9f2d23a6a'
+            deadline=time.monotonic()+1500
+            while time.monotonic()<deadline:
+              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+              fresh=False;ready=False;pid=None
+              if installed==expected:
+                try:
+                  pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+                  boot=int(next(line.split()[1] for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
+                  start=boot+int(pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[19])/os.sysconf('SC_CLK_TCK')
+                  ref=subprocess.run(['git','symbolic-ref','-q','HEAD'],capture_output=True,text=True).stdout.strip() or 'HEAD'
+                  refpath=pathlib.Path(subprocess.check_output(['git','rev-parse','--git-path',ref],text=True).strip())
+                  commit_clock=int(subprocess.check_output(['git','show','-s','--format=%ct',expected],text=True).strip())
+                  fresh=start>=max(commit_clock,refpath.stat().st_mtime)
+                  if fresh:
+                    with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as response:ready=response.status==200
+                  if ready:break
+                except Exception:pass
+              print('NUMERIC_READER_PROCESS_WAIT',json.dumps({'installed_expected_sha':installed==expected,'new_process':fresh,'http_ready':ready,'pid':pid}),flush=True)
+              time.sleep(15)
+            else:raise RuntimeError('EXACT_NEW_PROCESS_NOT_READY')
             def read(route):
-             started=time.monotonic()
-             try:
+              started=time.monotonic()
               with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=6) as response:
-               raw=response.read(4000001);assert len(raw)<=4000000;value=json.loads(raw)
-              if route.endswith('worker-status'):value={'inputs':value.get('decision_model_inputs'),'worker':value.get('worker')}
-              elif route.endswith('/api/state'):
-               tick=value.get('tick') or {};value={'instrument':tick.get('instrument'),'tick_ts':tick.get('ts'),'chain':(tick.get('feeds') or {}).get('chain')}
-              elif 'macro/latest' in route:
-               value={'status':value.get('status'),'period':value.get('period'),'official_source_verified':value.get('official_source_verified'),'unavailable_fields':(value.get('payload') or {}).get('unavailable_fields')}
-              return {'route':route,'ms':round(1000*(time.monotonic()-started),1),'result':value}
-             except Exception as error:return {'route':route,'ms':round(1000*(time.monotonic()-started),1),'error':type(error).__name__+': '+str(error)}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-             for result in pool.map(read,['/api/state','/api/research/runtime/worker-status','/api/research/macro/latest?family=CPI']):print('INPUT_DIAG_HTTP',json.dumps(result),flush=True)
-            connection=sqlite3.connect((root/'trades.db').resolve().as_uri()+'?mode=ro',uri=True,timeout=.05)
-            connection.execute('PRAGMA query_only=ON');connection.execute('PRAGMA cache_size=-1024')
-            deadline=time.monotonic()+1
-            connection.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-            try:
-             started=time.monotonic()
-             row=connection.execute("SELECT captured_ts,length(frozen_features_json),substr(frozen_features_json,1,2000001) FROM g1s_observations WHERE instrument='SP500' AND captured_ts<=? ORDER BY captured_ts DESC LIMIT 1",(time.time(),)).fetchone()
-             if row:
-              stamp,size,raw=row;assert size<=2000000
-              frozen=json.loads(unpack_text(raw));context=dict(frozen.get('g1s_evidence_v3') or {})
-              context.update(observation_t0=stamp,v2_option_context=(frozen.get('g1s_evidence_v2') or {}).get('option_context') or {},_raw_frozen=frozen)
-              values=canonical_current_feature_map(context,'SP500')
-              print('INPUT_DIAG_FROZEN',json.dumps({'captured_ts':stamp,'age_sec':time.time()-stamp,'read_ms':round(1000*(time.monotonic()-started),1),'metric_n':len(values),'available_n':sum(x.get('available') is True for x in values.values()),'families':{k:{'available':v.get('available'),'reason':v.get('reason'),'quality':v.get('quality')} for k,v in context.items() if isinstance(v,dict) and k not in ('_raw_frozen','v2_option_context')},'unavailable':{k:{q:v.get(q) for q in ('reason','availability','stale','asof','family','training_eligible')} for k,v in values.items() if v.get('available') is not True}}),flush=True)
-             started=time.monotonic()
-             row=connection.execute("SELECT family,period,available_at,length(payload_json) FROM macro_numeric_releases WHERE family='CPI' AND available_at<=? ORDER BY available_at DESC,created_ts DESC LIMIT 1",(time.time(),)).fetchone()
-             print('INPUT_DIAG_CPI_SQL',json.dumps({'read_ms':round(1000*(time.monotonic()-started),1),'row':row}),flush=True)
-            except Exception as error:print('INPUT_DIAG_SQL_ERROR',type(error).__name__,str(error),flush=True)
-            finally:connection.close()
-            print('INPUT_DIAG_DONE',json.dumps({'orders_or_ack_sent':False,'database_writes':False,'provider_calls':False}),flush=True)
+                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
+              return body,round(1000*(time.monotonic()-started),1)
+            root=pathlib.Path('/opt/seiltanzer/data')
+            deadline=time.monotonic()+600
+            while time.monotonic()<deadline:
+              receipt=root/'research'/'official_macro_offhost_latest.json'
+              try:
+                assert receipt.is_file() and receipt.stat().st_size<=12000000
+                bundle=json.loads(receipt.read_bytes())
+                current=bundle.get('published_for_sha')==expected or bundle.get('expected_sha')==expected
+                cpi,latency=read('/api/research/macro/latest?family=CPI')
+                if current and cpi.get('status')=='VALID' and cpi.get('official_source_verified') is True:break
+              except Exception as error:
+                print('NUMERIC_READER_WARMING',type(error).__name__,str(error),flush=True)
+              time.sleep(15)
+            else:raise RuntimeError('CURRENT_OFFICIAL_NUMERIC_RELEASE_UNAVAILABLE')
+            samples=[]
+            for index in range(5):
+              cutoff=time.time()
+              cpi,latency=read('/api/research/macro/latest?family=CPI&captured_ts='+str(cutoff))
+              payload=cpi.get('payload') or {};missing=payload.get('unavailable_fields') or {}
+              assert cpi.get('status')=='VALID' and cpi.get('official_source_verified') is True
+              assert 0<cpi['available_at']<=cutoff and cpi['fetched_at']<=cutoff
+              assert payload.get('headline_mom_pct') is not None and payload.get('core_mom_pct') is not None
+              for field,gap in missing.items():
+                assert payload.get(field) is None and gap.get('official_marker')=='-' and gap.get('reason')=='OFFICIAL_REFERENCE_OBSERVATION_UNAVAILABLE'
+              connection=sqlite3.connect((root/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=.05)
+              try:
+                connection.execute('PRAGMA query_only=ON')
+                connection.execute('PRAGMA cache_size=-1024')
+                end=time.monotonic()+.25
+                connection.set_progress_handler(lambda:time.monotonic()>end,1000)
+                row=connection.execute('SELECT available_at,source_sha256,payload_json FROM macro_numeric_releases WHERE release_id=?',(cpi['release_id'],)).fetchone()
+                assert row is not None and row[0]==cpi['available_at'] and row[1]==cpi['source_sha256'] and json.loads(row[2])==payload
+              finally:connection.close()
+              state,state_ms=read('/api/state');worker,_=read('/api/research/runtime/worker-status');inputs=worker.get('decision_model_inputs') or {}
+              row={'sample':index+1,'cpi_ms':latency,'state_ms':state_ms,'period':cpi.get('period'),'available_at':cpi.get('available_at'),'fetched_at':cpi.get('fetched_at'),'source_sha256':cpi.get('source_sha256'),'missing_fields':sorted(missing),'available_metrics':inputs.get('available_metrics'),'inputs_state':inputs.get('state')}
+              print('NUMERIC_READER_SAMPLE',json.dumps(row),flush=True);samples.append(row)
+              if index<4:time.sleep(3)
+            assert all(row['cpi_ms']<3000 and row['state_ms']<3000 for row in samples)
+            print('NUMERIC_READER_SUMMARY',json.dumps({'samples':len(samples),'max_cpi_ms':max(row['cpi_ms'] for row in samples),'max_state_ms':max(row['state_ms'] for row in samples),'original_committed_records_verified':True,'broader_35_metric_acceptance_claimed':False,'orders_or_ack_sent':False}),flush=True)
+            position,_=read('/api/position');recon=position.get('execution_reconciliation') or {}
+            print('NUMERIC_READER_POSITION',json.dumps({'trade_id':position.get('trade_id'),'reconciliation_required':bool(recon),'commands':recon.get('commands') or []}),flush=True)
             PY
