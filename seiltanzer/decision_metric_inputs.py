@@ -83,8 +83,10 @@ def _received_bars(market,code,cutoff):
     return rows
 
 
-def _option_history(engine,proxy,cutoff):
+def _option_history(engine,proxy,cutoff,*,read_status=None):
     """One bounded independent read, shared by V2 and V3; never take the writer lock."""
+    status=read_status if read_status is not None else {}
+    status.update(deferred=False,reason='OPTION_HISTORY_READ')
     if not proxy:return []
     path=Path(getattr(engine.settings,'cache_db',Path(engine.settings.data_dir)/'cache.db'))
     connection=None
@@ -98,12 +100,24 @@ def _option_history(engine,proxy,cutoff):
             'WHERE ticker=? AND ts<=? ORDER BY ts DESC LIMIT 120',(proxy,cutoff))
         for stamp,length,raw in cursor:
             size+=length
-            if length>2_000_000 or size>8_000_000 or time.monotonic()>deadline:return []
+            if length>2_000_000 or size>8_000_000:
+                status['reason']='OPTION_HISTORY_SIZE_BOUND';return []
+            if time.monotonic()>deadline:
+                status.update(deferred=True,reason='OPTION_HISTORY_READ_DEADLINE');return []
             payload=json.loads(raw,parse_constant=_invalid_constant)
             if not isinstance(payload,dict):return []
             output.append({**payload,'ts':stamp})
         return list(reversed(output))
-    except (OSError,sqlite3.Error,ValueError,TypeError):return []
+    except sqlite3.Error as exc:
+        code=getattr(exc,'sqlite_errorcode',0) or 0
+        if code&255 in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED):
+            status.update(deferred=True,reason='OPTION_HISTORY_READ_BUSY')
+        elif code&255==sqlite3.SQLITE_INTERRUPT:
+            status.update(deferred=True,reason='OPTION_HISTORY_READ_DEADLINE')
+        else:status['reason']='OPTION_HISTORY_READ_UNAVAILABLE'
+        return []
+    except (OSError,ValueError,TypeError):
+        status['reason']='OPTION_HISTORY_READ_UNAVAILABLE';return []
     finally:
         if connection is not None:connection.close()
 
@@ -177,7 +191,8 @@ def capture_decision_context(engine,market,*,captured_ts,option_history_cache=No
     cached=option_history_cache or {}
     history_cached=(history_key is not None and cached.get('key')==history_key
                     and cached.get('captured_ts',math.inf)<=cutoff)
-    history=deepcopy(cached['rows']) if history_cached else _option_history(engine,proxy,cutoff)
+    history_read={'deferred':False,'reason':'OPTION_HISTORY_GENERATION_CACHE'}
+    history=deepcopy(cached['rows']) if history_cached else _option_history(engine,proxy,cutoff,read_status=history_read)
     if history and history_key is not None and option_history_cache is not None and not history_cached:
         # One genuine received generation only. The consumer still checks each
         # original source time; a busy cache writer cannot erase known facts.
@@ -204,12 +219,14 @@ def capture_decision_context(engine,market,*,captured_ts,option_history_cache=No
     family_inputs=(freeze_option_family_inputs(option_family_cache,code,chain,cutoff)
                    if option_family_cache is not None else {})
     return {**block,'observation_t0':cutoff,'option_family_inputs':family_inputs,
+        'option_source_identity':option_family_cache.get('identity') if option_family_cache is not None else None,
         'max_age_sec':getattr(engine.settings,'ede_context_max_age_sec',900),
         'input_provenance':provenance,
         'v2_option_context':features['g1s_evidence_v2'].get('option_context') or {},
         '_raw_frozen':features,'_context_read':{'available':True,'deferred':False,
             'cache_used':False,'reason':'LIVE_DECISION_METRICS',
-            'option_history_cache_used':history_cached,'option_history_rows':len(history)}}
+            'option_history_cache_used':history_cached,'option_history_rows':len(history),
+            'option_history_reason':history_read['reason'],'option_history_deferred':history_read['deferred']}}
 
 
 @contextmanager
@@ -298,7 +315,9 @@ class DecisionMetricRuntime:
     def refresh_interval_sec(self):
         status=self._status
         return (5. if status.get('instrument')!=self.engine.market.instrument_code
-                or status.get('reason') in {'MARKET_INPUT_FREEZE_BUSY','CURRENT_QUOTE_OR_INPUT_UNAVAILABLE'} else 30.)
+                or status.get('reason') in {'MARKET_INPUT_FREEZE_BUSY','CURRENT_QUOTE_OR_INPUT_UNAVAILABLE',
+                    'OPTION_HISTORY_READ_BUSY','OPTION_HISTORY_READ_DEADLINE'}
+                or status.get('option_history_reason') in {'OPTION_HISTORY_READ_BUSY','OPTION_HISTORY_READ_DEADLINE'} else 30.)
 
     def generation_marker(self):
         if not self._contexts:return None
@@ -339,6 +358,19 @@ class DecisionMetricRuntime:
                     'INSTRUMENT_CHANGED' if self.engine.market.instrument_code!=code
                     else 'CURRENT_QUOTE_OR_INPUT_UNAVAILABLE'}
                 return
+            previous=self._contexts[0] if self._contexts else None
+            previous_max_age=_number(previous.get('max_age_sec',900)) if previous is not None else None
+            history_read=context['_context_read']
+            if (history_read['option_history_deferred'] and previous is not None
+                    and previous.get('option_source_identity') is not None
+                    and previous['option_source_identity']==context.get('option_source_identity')
+                    and previous.get('instrument')==code
+                    and previous_max_age is not None and previous_max_age>0
+                    and 0<=captured-previous['observation_t0']<=min(900,previous_max_age)):
+                self._status={**self._status,'state':'DEFERRED','reason':history_read['option_history_reason'],
+                    'option_history_reason':history_read['option_history_reason'],
+                    'pending_option_source_ts':_number((view.market.chain or {}).get('ts'))}
+                return
             values=decision_metric_values({'captured_ts':captured,'strategy':{'instrument':code},
                 'decision_metric_inputs':pack_decision_metrics(context,code)})
             self._contexts=(context,*[row for row in self._contexts[:1] if row.get('instrument')==code])
@@ -348,6 +380,7 @@ class DecisionMetricRuntime:
                 'option_source_ts':_number((getattr(view.market,'chain',None) or {}).get('ts')),
                 'option_history_cache_used':context['_context_read']['option_history_cache_used'],
                 'option_history_rows':context['_context_read']['option_history_rows'],
+                'option_history_reason':history_read['option_history_reason'],
                 'capture_busy_n':busy_n,'last_attempt_ts':attempted,
                 'network_calls':False,'runtime_fitting':False}
         except Exception as exc:
