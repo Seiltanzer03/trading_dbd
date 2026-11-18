@@ -324,7 +324,7 @@ def install_macro_data_factory_routes(app: FastAPI) -> None:
         cutoff = time.time() if captured_ts is None else float(captured_ts)
         family_key = str(family or "").upper()
         if family_key in {"CPI", "NFP", "ISM_MANUFACTURING", "ISM_SERVICES"}:
-            return numeric_store.latest_admissible(family_key, cutoff)
+            return numeric_store.latest_admissible(family_key, cutoff, nonblocking=True)
         return factory.latest_admissible(cutoff, family=family_key)
 
     app.add_api_route(

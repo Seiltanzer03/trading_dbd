@@ -15,11 +15,13 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -412,6 +414,19 @@ class NumericMacroStore:
         self._conn = runtime._conn
         self._lock = runtime._lock
         self._ensure_table()
+        # Resolve once under the owner's lock; HTTP never waits on that lock.
+        with self._lock:
+            filename = next((row[2] for row in self._conn.execute('PRAGMA database_list')
+                             if row[1] == 'main'), '')
+        self._read_path = Path(filename).resolve() if filename else None
+        self._read_identity = self._database_identity()
+
+    def _database_identity(self):
+        try:
+            info = self._read_path.stat() if self._read_path is not None else None
+            return (info.st_dev, info.st_ino) if info is not None else None
+        except OSError:
+            return None
 
     def _ensure_table(self) -> None:
         with self._lock, self._conn:
@@ -498,9 +513,12 @@ class NumericMacroStore:
             "period": write.period,
         }
 
-    def latest_admissible(self, family: str, captured_ts: float) -> dict[str, Any]:
+    def latest_admissible(self, family: str, captured_ts: float, *,
+                          nonblocking: bool = False) -> dict[str, Any]:
         if family not in SUPPORTED_FAMILIES:
             raise ValueError("UNSUPPORTED_NUMERIC_MACRO_FAMILY")
+        if nonblocking:
+            return self._bounded_latest(family, float(captured_ts))
         with self._lock:
             row = self._conn.execute(
                 "SELECT release_id,period,source,source_url,fetched_at,available_at," 
@@ -510,6 +528,10 @@ class NumericMacroStore:
                 "ORDER BY available_at DESC, created_ts DESC LIMIT 1",
                 (family, float(captured_ts)),
             ).fetchone()
+        return self._release_record(family, float(captured_ts), row)
+
+    @staticmethod
+    def _release_record(family, captured_ts, row):
         if not row:
             return {"status": "UNAVAILABLE", "family": family, "reason": "NO_CAUSAL_RELEASE"}
         receipt = json.loads(row[8]) if row[8] else {}
@@ -529,6 +551,63 @@ class NumericMacroStore:
             "official_source_verified": True,
             "contract_version": NUMERIC_MACRO_CONTRACT_VERSION,
         }
+
+    def _bounded_latest(self, family, captured_ts):
+        def unavailable(reason):
+            return {'status': 'UNAVAILABLE', 'family': family, 'reason': reason}
+
+        # In-memory stores cannot be reopened. Keep the same real connection,
+        # but fail immediately while its owner is busy.
+        if self._read_path is None:
+            if not self._lock.acquire(blocking=False):
+                return unavailable('NUMERIC_MACRO_RELEASE_STORE_BUSY')
+            try:
+                return self.latest_admissible(family, captured_ts)
+            finally:
+                self._lock.release()
+        if self._read_identity is None or self._database_identity() != self._read_identity:
+            return unavailable('NUMERIC_MACRO_RELEASE_DATABASE_CHANGED')
+        connection = None
+        try:
+            connection = sqlite3.connect(self._read_path.as_uri() + '?mode=ro',
+                                         uri=True, timeout=.05)
+            connection.execute('PRAGMA query_only=ON')
+            connection.execute('PRAGMA cache_size=-1024')
+            deadline = time.monotonic() + .25
+            connection.set_progress_handler(lambda: time.monotonic() > deadline, 1000)
+            columns = ('release_id', 'period', 'source', 'source_url', 'fetched_at',
+                       'available_at', 'payload_json', 'source_sha256',
+                       'latest_source_receipt_json', 'first_source_receipt_json')
+            selection = ','.join(name if name in ('fetched_at', 'available_at')
+                                 else f'substr({name},1,131073)' for name in columns)
+            row = connection.execute(
+                f'SELECT {selection} FROM macro_numeric_releases '
+                'WHERE family=? AND available_at<=? '
+                'ORDER BY available_at DESC,created_ts DESC LIMIT 1',
+                (family, captured_ts)).fetchone()
+            if self._database_identity() != self._read_identity:
+                return unavailable('NUMERIC_MACRO_RELEASE_DATABASE_CHANGED')
+            if row and sum(len(value.encode('utf8')) for value in row
+                           if isinstance(value, str)) > 131072:
+                return unavailable('NUMERIC_MACRO_RELEASE_READ_SIZE_BOUND')
+            record = self._release_record(family, captured_ts, row)
+            if record['status'] == 'VALID' and not isinstance(record['payload'], dict):
+                raise ValueError('NUMERIC_MACRO_PAYLOAD_NOT_OBJECT')
+            _json(record)  # Corrupt/nonfinite stored JSON cannot become a valid HTTP record.
+            return record
+        except sqlite3.Error as exc:
+            code = (getattr(exc, 'sqlite_errorcode', 0) or 0) & 255
+            reason = ('NUMERIC_MACRO_RELEASE_READ_BUSY'
+                      if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                      else 'NUMERIC_MACRO_RELEASE_READ_DEADLINE'
+                      if code == sqlite3.SQLITE_INTERRUPT
+                      else 'NUMERIC_MACRO_RELEASE_READ_UNAVAILABLE')
+            return unavailable(reason)
+        except (ValueError, TypeError, KeyError, OSError, RecursionError):
+            return unavailable('NUMERIC_MACRO_RELEASE_READ_INVALID')
+        finally:
+            if connection is not None:
+                connection.close()
 
     def bundle(self, captured_ts: float) -> dict[str, Any]:
         releases = {family: self.latest_admissible(family, captured_ts) for family in SUPPORTED_FAMILIES}
