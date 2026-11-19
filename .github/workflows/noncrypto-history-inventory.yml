@@ -1,4 +1,4 @@
-name: locate-terminal-gateway-timeouts
+name: verify-installed-terminal-load
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,41 +8,101 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 28
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 2m
+          command_timeout: 25m
           script: |
             cd /opt/seiltanzer
             /usr/bin/python3 -B -u - <<'PY'
-            import collections,json,pathlib,re,subprocess
-            def read(*args):
-                return subprocess.run(args,capture_output=True,text=True,timeout=8).stdout
-            print('TERMINAL_LISTENERS',read('ss','-ltnp','( sport = :8790 or sport = :80 or sport = :443 )'))
-            for unit in ('caddy','nginx','seiltanzer'):
-                print('TERMINAL_UNIT',unit,read('systemctl','show',unit,'-p','ActiveState','-p','MainPID','-p','NRestarts').replace('\n',' '))
-                raw=read('journalctl','-u',unit,'--since','-12 hours','--grep=504|i/o timeout|deadline exceeded|STARTUP_PHASE|ASGI application|lock timeout','-n','180','-o','cat','--no-pager')
-                counts=collections.Counter()
-                for line in raw.splitlines():
-                    if line.startswith('STARTUP_PHASE phase='):
-                        print('TERMINAL_START',line[:140])
-                        continue
-                    try: rec=json.loads(line)
-                    except ValueError:
-                        signature=re.search(r'\b(504|i/o timeout|deadline exceeded|ASGI application|lock timeout)\b',line)
-                        if signature:counts[signature.group(0)]+=1
-                        continue
-                    if not isinstance(rec,dict):continue
-                    request=rec.get('request') or {}
-                    uri=request.get('uri','').split('?',1)[0]
-                    if not re.fullmatch(r'/[A-Za-z0-9/_-]{0,120}',uri):uri='unknown'
-                    result=dict(route=uri,status=rec.get('status'),duration=rec.get('duration'),ts=rec.get('ts'),timed_out='timeout' in str(rec.get('msg','')).lower())
-                    print('TERMINAL_PROXY_EVENT',unit,json.dumps(result))
-                print('TERMINAL_LOG_COUNTS',unit,json.dumps(counts))
-            print('TERMINAL_FREE',read('df','--output=avail','-h','/').splitlines()[-1])
-            print('TERMINAL_CPU',read('ps','-eo','pid,comm,pcpu,rss','--sort=-pcpu').splitlines()[:10])
+            from concurrent.futures import ThreadPoolExecutor
+            import json, os, pathlib, subprocess, time, urllib.request
+
+            expected='a85b57d1899e0e071619848818e86a1ad36ed892'
+            worktree=pathlib.Path('/opt/seiltanzer')
+            origin='http://127.0.0.1:8790'
+
+            def emit(event, data):
+                print(event, json.dumps(data, ensure_ascii=True), flush=True)
+
+            def stdout(*args):
+                return subprocess.check_output(args, text=True, timeout=5).strip()
+
+            def read(path, timeout=3.):
+                start=time.monotonic()
+                with urllib.request.urlopen(origin+path,timeout=timeout) as response:
+                    raw=response.read(2500001)
+                    assert response.status==200 and len(raw)<=2500000,(path,response.status)
+                return raw,round(1000*(time.monotonic()-start),1)
+
+            def read_json(path):
+                raw,elapsed=read(path)
+                return json.loads(raw),elapsed
+
+            until=time.monotonic()+1350
+            while time.monotonic()<until:
+                if stdout('git','rev-parse','HEAD')==expected:
+                    pid=stdout('systemctl','show','seiltanzer','-p','MainPID','--value')
+                    try:
+                        boot=int(next(line.split()[1] for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
+                        ticks=int(pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[19])
+                        ref=subprocess.run(['git','symbolic-ref','-q','HEAD'],capture_output=True,text=True,timeout=5).stdout.strip() or 'HEAD'
+                        ref_path=pathlib.Path(stdout('git','rev-parse','--git-path',ref))
+                        assert boot+ticks/os.sysconf('SC_CLK_TCK') >= ref_path.stat().st_mtime
+                        state,_=read_json('/api/state')
+                        if isinstance(state.get('journal'),list) and isinstance(state.get('tick'),dict):
+                            break
+                    except (OSError,ValueError,AssertionError,subprocess.SubprocessError):
+                        pass
+                time.sleep(10)
+            else:
+                raise RuntimeError('EXACT_RELEASE_NOT_READY')
+            emit('LOAD_RELEASE',dict(sha=expected,pid=int(pid)))
+
+            page,page_ms=read('/')
+            module,module_ms=read('/static/js/app.js')
+            assert b'id="terminal-loading"' in page
+            assert b'loadJournalWhileWaiting' in module
+            assert module==(worktree/'seiltanzer/web/js/app.js').read_bytes()
+            emit('LOAD_INSTALLED_FRONTEND',dict(page_ms=page_ms,module_ms=module_ms))
+
+            routes=('/api/state','/api/journal','/api/position')
+            maximum={path:0 for path in routes}
+            for index in range(5):
+                with ThreadPoolExecutor(max_workers=3) as pool:
+                    results=dict(zip(routes,pool.map(read_json,routes)))
+                for path,(_,ms) in results.items():
+                    maximum[path]=max(maximum[path],ms)
+                    assert ms<3000,(path,ms)
+                state,_=results['/api/state']
+                journal,_=results['/api/journal']
+                position,_=results['/api/position']
+                assert isinstance(journal,list) and isinstance(state.get('journal'),list)
+                assert isinstance(state.get('tick'),dict) and 'trade_id' in position
+                active=position['trade_id']
+                tick_trade=(state['tick'].get('trade') or {}).get('id')
+                emit('LOAD_SAMPLE',dict(sample=index+1,journal_rows=len(journal),state_rows=len(state['journal']),
+                     position_trade_id=active,state_trade_id=tick_trade,
+                     journal_contains_position=active is None or any(row.get('id')==active and row.get('status')=='open' for row in journal),
+                     ms={path:val[1] for path,val in results.items()}))
+                if index<4:
+                    time.sleep(2)
+            emit('LOAD_ROUTE_SUMMARY',dict(samples=5,max_ms=maximum))
+
+            ai,_=read_json('/api/ai/snapshot/status')
+            families=ai.get('family_market_forecasts') or {}
+            emit('LOAD_CURRENT_FORECAST_RECEIPT',dict(instrument=ai.get('current_instrument'),ready=ai.get('ready'),
+                 building=ai.get('building'),reason=ai.get('invalidated_reason'),receipt_sha=families.get('published_for_sha'),
+                 available=families.get('available_forecasts_at_capture'),
+                 families={name:row.get('reason') for name,row in (families.get('families') or {}).items()}))
             PY
+      - name: Verify public page and journal
+        run: |
+          set -euo pipefail
+          for route in / /api/state /api/position /api/journal; do
+            curl -fsS --connect-timeout 3 --max-time 3 -o /dev/null -w "PUBLIC_LOAD $route status=%{http_code} total_seconds=%{time_total} bytes=%{size_download}\n" "http://94.241.171.182:8790$route"
+          done
