@@ -1,4 +1,4 @@
-name: diagnose-deploy-history-fence
+name: inspect-current-service-start
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -19,32 +19,18 @@ jobs:
           script: |
             cd /opt/seiltanzer
             /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,re,stat,subprocess,time
-            root=pathlib.Path('/opt/seiltanzer')
-            print('FENCE_DIAG_SHA',subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),flush=True)
-            for guard in [root/'scripts/history_service_fence.py',pathlib.Path('/usr/local/lib/seiltanzer-history-start-guard.py')]:
-             started=time.monotonic()
-             result=subprocess.run(['/usr/bin/python3',str(guard),'--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=10)
-             print('FENCE_DIAG_CHECK',json.dumps({'guard':str(guard),'returncode':result.returncode,'elapsed_ms':round(1000*(time.monotonic()-started),1),'result':result.stdout.strip()[:1000],'error_class':result.stderr.splitlines()[-1][:180] if result.stderr else None}),flush=True)
-            def metadata(directory):
-             for name in ('cutover.active','cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.abort.json','json-history.epoch.json'):
-              path=directory/name;item={'path':str(path),'exists':path.exists()}
-              try:
-               info=path.lstat();item.update(size=info.st_size,mtime=info.st_mtime,mode=oct(stat.S_IMODE(info.st_mode)),regular=stat.S_ISREG(info.st_mode))
-               if stat.S_ISREG(info.st_mode) and info.st_size<=65536:
-                try:
-                 value=json.loads(path.read_bytes())
-                 if isinstance(value,dict):item['fields']={key:value[key] for key in ('contract','phase','run_id','application_sha','service_started','pid','started_at','reason','abort_reason') if key in value}
-                except ValueError:item['json']=False
-              except FileNotFoundError:pass
-              print('FENCE_DIAG_FILE',json.dumps(item),flush=True)
-            metadata(root/'data')
-            pointer=root/'data/json-history.epoch.json'
-            if pointer.is_file() and pointer.stat().st_size<=65536:
+            import json,pathlib,subprocess,time
+            print('START_DIAG_SHA',subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),flush=True)
+            print('START_DIAG_SERVICE',subprocess.run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','Result','-p','MemoryCurrent'],capture_output=True,text=True,timeout=5).stdout,flush=True)
+            pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+            for i in range(2):
              try:
-              run_id=json.loads(pointer.read_bytes()).get('run_id')
-              if isinstance(run_id,str) and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_-]{0,63}',run_id):metadata(root/'data'/('json-rebuild-'+run_id))
-             except ValueError:pass
-            print('FENCE_DIAG_UNITS',subprocess.run(['systemctl','list-units','--all','--type=service','--no-legend','seiltanzer*history*'],capture_output=True,text=True,timeout=5).stdout[:5000],flush=True)
-            print('FENCE_DIAG_SERVICE',subprocess.run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts'],capture_output=True,text=True,timeout=5).stdout,flush=True)
+              io=dict(line.split(':',1) for line in pathlib.Path('/proc',pid,'io').read_text().splitlines())
+              ticks=pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()
+              print('START_DIAG_PROGRESS',json.dumps({'pid':pid,'state':ticks[0],'utime':ticks[11],'stime':ticks[12],'read_bytes':io.get('read_bytes'),'rchar':io.get('rchar')}),flush=True)
+             except OSError as error:print('START_DIAG_PROGRESS_ERROR',type(error).__name__,flush=True)
+             if i==0:time.sleep(5)
+            lines=subprocess.run(['journalctl','-u','seiltanzer','--since','-18 minutes','-n','150','-o','cat','--no-pager'],capture_output=True,text=True,timeout=5).stdout.splitlines()
+            for line in lines:
+             if any(key in line for key in ('STARTUP_PHASE','ExecCondition','seiltanzer.service:','Timeout (','File "/opt/seiltanzer/seiltanzer/storage_','File "/opt/seiltanzer/seiltanzer/__main__','start_allowed','reason":')):print('START_DIAG_JOURNAL',line[:650],flush=True)
             PY
