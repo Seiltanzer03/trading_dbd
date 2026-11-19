@@ -472,7 +472,10 @@ def verify_ai_verdict() -> None:
     verify_management_ack_guard_contract()
     verify_trade_settlement_contract()
     verify_isolated_unified_management_contract()
-    wait_for_ai_snapshot_ready()
+    position = assert_route('/api/position')
+    pending = (position or {}).get('execution_reconciliation') or {}
+    if pending.get('required') is not True:
+        wait_for_ai_snapshot_ready()
 
     # Every individual POST must remain below the reverse-proxy budget. If the
     # market crosses a review trigger between the status read and POST, a fast
@@ -488,7 +491,7 @@ def verify_ai_verdict() -> None:
             position = assert_route('/api/position')
             verify_execution_reconciliation_contract(body, position)
             print('AI_VERDICT_RECONCILIATION_CONTRACT PASS new_command=False broker_state_verified=False llm_availability_not_proven=True')
-            break
+            return
         if (code == 503 and isinstance(body, dict)
                 and isinstance(body.get("error"), dict)
                 and body["error"].get("code") == "authoritative_price_unavailable"):
