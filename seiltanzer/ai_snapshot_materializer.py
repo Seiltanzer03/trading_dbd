@@ -647,13 +647,24 @@ def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
             request.state.ai_request_trace = trace
             try:
                 with trace.span('preflight'):
-                    reason = materializer._event_reason()
-                    if reason:
-                        if reason != "NO_ACTIVE_TRADE":
-                            materializer.request_refresh(reason)
-                        response = _warming_response({**materializer.status(), "reason": reason})
+                    # A known unresolved command is actionable user input,
+                    # independent of a slow snapshot. Do not hide its existing
+                    # factual-execution controls behind retryable warmup.
+                    trade = materializer.current_trade()
+                    position = getattr(engine, 'position', None)
+                    unresolved = (position.execution_reconciliation(trade)
+                                  if trade is not None and position is not None else None)
+                    if unresolved:
+                        from .ai_api import reconciliation_response
+                        response = reconciliation_response(unresolved, trace.request_id)
                     else:
-                        response = None
+                        reason = materializer._event_reason()
+                        if reason:
+                            if reason != "NO_ACTIVE_TRADE":
+                                materializer.request_refresh(reason)
+                            response = _warming_response({**materializer.status(), "reason": reason})
+                        else:
+                            response = None
                 if response is None:
                     response = await call_next(request)
                     # Preserve the race backstop and log the actual converted status.

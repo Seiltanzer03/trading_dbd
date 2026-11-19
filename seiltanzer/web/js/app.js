@@ -1163,8 +1163,10 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
   } catch (err) {
     const status = err.status ? ` · HTTP ${err.status}` : '';
     const req = err.requestId ? `\nID: ${err.requestId}` : '';
-    out.textContent = `ИИ-РАЗБОР НЕДОСТУПЕН${status}: ${err.message}${req}`;
-    if (err.code === 'broker_reconciliation_required' && err.reconciliation) {
+    const needsReconciliation = err.code === 'broker_reconciliation_required' && err.reconciliation;
+    const title = needsReconciliation ? 'ПОДТВЕРДИТЕ СОСТОЯНИЕ ПОЗИЦИИ' : `ИИ-РАЗБОР НЕДОСТУПЕН${status}`;
+    out.textContent = `${title}: ${err.message}${req}`;
+    if (needsReconciliation) {
       $('#ai-edge-management').replaceChildren();
       $('#ai-shadow-action').replaceChildren();
       mountBrokerReconciliation($('#ai-management-execution'), err.reconciliation, apiPost,

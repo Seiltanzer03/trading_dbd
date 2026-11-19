@@ -61,6 +61,16 @@ def error_body(code: str, message: str, req_id: str, *, retriable: bool) -> dict
     }
 
 
+def reconciliation_response(context: dict, req_id: str):
+    """The same factual-state requirement at preflight and publication guards."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=409, content={
+        **error_body('broker_reconciliation_required',
+            'Требуется сверка с брокером: подтвердите фактическую позицию и судьбу прежних команд. '
+            'Новая торговая команда не выдана.', req_id, retriable=False),
+        'reconciliation': context}, headers={'Cache-Control': 'no-store'})
+
+
 def success_body(result: dict, req_id: str, *, degraded: bool = False,
                  provider_failure: dict | None = None) -> dict:
     body = {
