@@ -22,27 +22,12 @@ jobs:
             import json,pathlib,re,stat,subprocess,time
             root=pathlib.Path('/opt/seiltanzer')
             print('FENCE_DIAG_SHA',subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),flush=True)
-            import sqlite3
-            guard=root/'scripts/history_service_fence.py'
-            namespace=dict(__name__='_read_only_fence_diagnostic',__file__=str(guard))
-            exec(compile(guard.read_bytes(),str(guard),'exec'),namespace)
-            original_connect=sqlite3.connect
-            trace_started=time.monotonic();previous=[trace_started];sequence=[0]
-            def trace(sql):
-             now=time.monotonic();sequence[0]+=1
-             label=' '.join(sql.split()).split(' WHERE ')[0][:130]
-             print('FENCE_QUERY_TIMING',json.dumps({'n':sequence[0],'elapsed_ms':round(1000*(now-trace_started),1),'previous_interval_ms':round(1000*(now-previous[0]),1),'statement':label}),flush=True);previous[0]=now
-            def connect(*args,**kwargs):
-             connection=original_connect(*args,**kwargs);connection.set_trace_callback(trace);return connection
-            sqlite3.connect=connect
-            try:
-             value=namespace['check_start'](root/'data/trades.db',root)
-             print('FENCE_TRACE_RESULT',json.dumps({'elapsed_ms':round(1000*(time.monotonic()-trace_started),1),'result':value}),flush=True)
-            finally:sqlite3.connect=original_connect
-            for index in range(2):
-             started=time.monotonic()
-             result=subprocess.run(['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=10)
-             print('FENCE_DIAG_CHECK',json.dumps({'attempt':index+1,'guard':'installed','returncode':result.returncode,'elapsed_ms':round(1000*(time.monotonic()-started),1),'result':result.stdout.strip()[:1000]}),flush=True)
+            import resource
+            for kind,prefix in [('normal',[]),('priority_read',['/usr/bin/nice','-n','-10']),('normal_again',[])]:
+             started=time.monotonic();cpu=resource.getrusage(resource.RUSAGE_CHILDREN)
+             result=subprocess.run(prefix+['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=12)
+             after=resource.getrusage(resource.RUSAGE_CHILDREN);elapsed=time.monotonic()-started
+             print('FENCE_CPU_CHECK',json.dumps({'kind':kind,'returncode':result.returncode,'wall_ms':round(1000*elapsed,1),'user_cpu_ms':round(1000*(after.ru_utime-cpu.ru_utime),1),'system_cpu_ms':round(1000*(after.ru_stime-cpu.ru_stime),1),'result':result.stdout.strip()[:1000],'stderr':result.stderr.strip()[:180]}),flush=True)
             def metadata(directory):
              for name in ('cutover.active','cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.abort.json','json-history.epoch.json'):
               path=directory/name;item={'path':str(path),'exists':path.exists()}
