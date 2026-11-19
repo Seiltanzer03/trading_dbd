@@ -1,4 +1,4 @@
-name: inspect-current-nas100-evidence
+name: replay-nas100-provider-preparation
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -6,133 +6,69 @@ on:
 permissions:
   contents: read
 jobs:
-  examine:
+  replay:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 3m
+          command_timeout: 2m
           script: |
             set -eu
             cd /opt/seiltanzer
             test "$(git rev-parse HEAD)" = '57e3448676ea648310a45a8d5c2f222784df6b28'
             .venv/bin/python -B -u - <<'PY'
             import contextlib
+            import hashlib
             import json
-            import pathlib
             import re
             import sqlite3
-            import subprocess
-            import time
             import urllib.request
 
-            from seiltanzer.option_metric_transport import unpack_option_state
+            from seiltanzer.ai_provider_guard import compact_provider_snapshot
+            from seiltanzer.ai_runtime_report_v20 import _provider_decision_inputs, INDEPENDENT_INPUT_MAX_BYTES
 
-            report_ts = 1795116363.2902696
-            request_id = 'ai-cdf8074b239c4cd3a064'
-            now = time.time()
+            origin = 1795116363.2902696
+            with contextlib.closing(sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True, timeout=2.)) as db:
+                db.execute('PRAGMA query_only=ON')
+                ids = db.execute("SELECT id FROM trades WHERE instrument='NAS100' ORDER BY id DESC LIMIT 8").fetchall()
+                matching = []
+                for (trade_id,) in ids:
+                    rows = db.execute('SELECT captured_ts,snapshot_json,snapshot_sha256 FROM decision_snapshots WHERE trade_id=? AND captured_ts BETWEEN ? AND ? AND length(snapshot_json)<=2000000 ORDER BY captured_ts LIMIT 8', (trade_id, origin - 2, origin + 180)).fetchall()
+                    for captured, raw, digest in rows:
+                        snap = json.loads(raw)
+                        clock = (snap.get('market_refresh') or {}).get('original_snapshot_ts') or captured
+                        if abs(clock - origin) < .1:
+                            assert hashlib.sha256(raw.encode()).hexdigest() == digest
+                            matching.append(snap)
+            assert len(matching) == 1
+            snapshot = matching[0]
+            size = lambda x: len(json.dumps(x, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',',':')).encode())
+            ranked = lambda obj: dict(sorted(((key,size(value)) for key,value in obj.items()), key=lambda row:row[1], reverse=True)[:15])
 
-            def emit(name, payload):
-                print(name + '=' + json.dumps(payload), flush=True)
+            projected = compact_provider_snapshot(snapshot)
+            packet, full, aliases = _provider_decision_inputs(projected, snapshot)
+            metric_state = packet['policy_manager'].get('option_derivative_state') or {}
+            print('NAS_ARCHIVED_PROVIDER_PACKET=' + json.dumps(dict(
+                full_bytes=size(full), wire_bytes=size(packet), cap=INDEPENDENT_INPUT_MAX_BYTES,
+                limit_exceeded=size(packet)>INDEPENDENT_INPUT_MAX_BYTES,
+                tier=(projected.get('provider_projection') or {}).get('compaction_tier'),
+                root=ranked(packet), manager=ranked(packet['policy_manager']),
+                option_state=ranked(metric_state), provenance=ranked(packet.get('decision_model_metric_provenance') or {}),
+                family_wire_bytes=ranked(packet.get('edge_family_facts') or {}))), flush=True)
 
-            def connect(name):
-                uri = pathlib.Path('/opt/seiltanzer/data', name).as_uri() + '?mode=ro'
-                connection = sqlite3.connect(uri, uri=True, timeout=2)
-                connection.row_factory = sqlite3.Row
-                connection.execute('PRAGMA query_only=ON')
-                return contextlib.closing(connection)
-
-            def get(path, cap):
-                with urllib.request.urlopen('http://127.0.0.1:8790' + path, timeout=5) as response:
-                    raw = response.read(cap + 1)
-                if len(raw) > cap:
-                    raise ValueError('READ_RESPONSE_LIMIT:' + path)
-                return json.loads(raw)
-
-            def metric_summary(value):
-                state = unpack_option_state(value) or {}
-                metrics = state.get('metrics') or {}
-                row = metrics.get('p_take') or {}
-                return dict(metrics=len(metrics), samples=row.get('sample_count'), span_min=row.get('time_span_minutes'),
-                    confidence=row.get('confidence'), derivative_available=row.get('available'), reason=row.get('reason'))
-
-            state = get('/api/state', 2_500_000)
-            tick = state.get('tick') or {}
-            current = tick.get('trade') or {}
-            position = get('/api/position', 150_000)
-            status = get('/api/ai/snapshot/status', 150_000)
-            families = status.get('family_market_forecasts') or {}
-            emit('CURRENT_OPTION_EVIDENCE', dict(instrument=current.get('instrument'), active=position.get('trade_id') is not None,
-                snapshot_ready=status.get('ready'), snapshot_error_present=bool(status.get('last_error')),
-                authoritative_budget_overflow='exceeds hard byte budget' in (status.get('last_error') or ''), forecasts=families.get('available_forecasts_at_capture'),
-                chain_status=((tick.get('feeds') or {}).get('chain') or {}).get('status'),
-                metrics=metric_summary(tick.get('option_derivative_state'))))
-
-            archived_trade = None
-            with connect('trades.db') as trades:
-                candidates = trades.execute("SELECT id,instrument,opened_at,closed_at,status FROM trades WHERE instrument='NAS100' ORDER BY id DESC LIMIT 15").fetchall()
-                for trade in candidates:
-                    rows = trades.execute('SELECT captured_ts,snapshot_json FROM decision_snapshots WHERE trade_id=? AND captured_ts BETWEEN ? AND ? AND length(snapshot_json)<=2000000 ORDER BY captured_ts LIMIT 8',
-                        (trade['id'], report_ts - 2, report_ts + 180)).fetchall()
-                    for row in rows:
-                        snapshot = json.loads(row['snapshot_json'])
-                        market_refresh = snapshot.get('market_refresh') or {}
-                        origin = market_refresh.get('original_snapshot_ts') or row['captured_ts']
-                        if abs(origin - report_ts) > .1:
-                            continue
-                        archived_trade = trade['id']
-                        manager = snapshot.get('policy_manager') or {}
-                        ensemble = manager.get('unified_edge_ensemble') or {}
-                        chosen = next((c for c in ensemble.get('candidates') or [] if c.get('candidate_id') == ensemble.get('selected_candidate_id')), {})
-                        emit('ARCHIVED_REPORT_EVIDENCE', dict(found=True, instrument=trade['instrument'], opened_before_capture_sec=round(report_ts-trade['opened_at'], 1),
-                            current_trade=trade['id']==position.get('trade_id'), trade_status=trade['status'],
-                            runtime_code_sha=snapshot.get('runtime_code_sha'), has_ede_context=bool(snapshot.get('ede_causal_context')),
-                            forecast_bank=(ensemble.get('scenario_bank') or {}).get('source'),
-                            policy=ensemble.get('selected_policy'), benefit_basis=(chosen.get('benefit_assessment') or {}).get('basis'),
-                            metrics=metric_summary(manager.get('option_derivative_state') or (manager.get('evidence') or {}).get('option_derivative_state'))))
-                        break
-                    if archived_trade is not None:
-                        break
-            if archived_trade is None:
-                emit('ARCHIVED_REPORT_EVIDENCE', dict(found=False))
-
-            with connect('cache.db') as cache:
-                for label, trade_id in (('report', archived_trade), ('active', position.get('trade_id'))):
-                    if trade_id is None:
-                        continue
-                    row = cache.execute('SELECT ts,data FROM kv WHERE key=? AND length(data)<=1000000',
-                        ('option_shadow_state:v1:' + str(trade_id),)).fetchone()
-                    history = (json.loads(row['data']).get('observations') or []) if row else []
-                    emit('PERSISTED_OPTION_HISTORY', dict(scope=label, observations=len(history),
-                        span_min=round((history[-1]['ts']-history[0]['ts'])/60, 2) if history else None,
-                        started_after_original_capture_sec=round(history[0]['ts']-report_ts, 1) if label=='report' and history else None,
-                        latest_age_sec=round(now-history[-1]['ts'], 1) if history else None))
-
-            result = subprocess.run(['journalctl','-u','seiltanzer','--since','@'+str(int(report_ts)-90),
-                '--until','@'+str(int(report_ts)+240),'-n','5000','--no-pager','-o','cat'], capture_output=True, text=True, timeout=18)
-            traces = []
-            reasons = []
-            follow = False
-            for line in result.stdout.splitlines():
-                if request_id in line:
-                    follow = 'ai_verdict_event' in line and 'provider' in line
-                    try:
-                        value = json.loads(line[line.index('{'):])
-                    except (ValueError, TypeError):
-                        continue
-                    if str(value.get('stage','')).startswith('provider'):
-                        traces.append({key:value[key] for key in ('stage','event','elapsed_ms','duration_ms','exception_class','provider_reason','status_code','finish_reason','input_bytes','output_bytes') if key in value})
-                    continue
-                if follow:
-                    if line.startswith('RuntimeError:') or line.startswith('ValueError:') or 'HTTPStatusError:' in line:
-                        safe = re.search(r'(OpenRouter HTTP [1-5]\d\d|OpenRouter connection failed: \w+|provider_[a-z0-9_]+|combined_provider_[a-z0-9_]+|[A-Z_]{8,})', line)
-                        if safe:
-                            reasons.append(safe.group())
-                    if 'ai_verdict_event' in line or 'INFO:' in line:
-                        follow = False
-            emit('ORIGINAL_PROVIDER_DIAGNOSTIC', dict(journal_read=result.returncode==0, traces=traces[:34], safe_reasons=list(dict.fromkeys(reasons))[:8]))
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status', timeout=5) as response:
+                raw = response.read(150001)
+            assert len(raw)<=150000
+            status=json.loads(raw)
+            receipt=status.get('family_market_forecasts') or {}
+            error=status.get('last_error') or ''
+            match=re.fullmatch(r'(?:RuntimeError|ValueError):([A-Z][A-Z0-9_]{4,80})',error)
+            print('NAS_CURRENT_BUILD_REASON=' + json.dumps(dict(ready=status.get('ready'),
+                invalidation=status.get('invalidated_reason'), error_class=error.split(':',1)[0] if ':' in error else None,
+                controlled_error=match.group(1) if match else None,
+                forecast_families={name: (row.get('reason') or '').split(';')[0] for name,row in (receipt.get('families') or {}).items()})), flush=True)
             PY
