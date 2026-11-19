@@ -152,7 +152,7 @@ def test_incomplete_or_invalid_geometry_never_proves_barrier(variant):
 def test_smoke_accepts_exact_barrier_contract_after_positive_actions(monkeypatch,kind,current,barrier):
     calls = _install_smoke_replies(monkeypatch,400,body(kind,current,barrier),3.)
     smoke.verify_ai_verdict()
-    assert calls == ["isolated_12_action_contract"]
+    assert calls == ["isolated_12_action_contract", "ai_verdict_post"]
 
 
 @pytest.mark.parametrize("variant", ["authority", "confirmed", "nan", "bool", "string",
@@ -179,6 +179,7 @@ def test_smoke_rejects_invalid_barrier_negative(monkeypatch,variant):
     elif variant == "ok_zero": result["ok"] = 0
     elif variant == "retriable": result["error"]["retriable"] = True
     elif variant == "request_id": result["error"]["request_id"] = "invalid"
-    _install_smoke_replies(monkeypatch,422 if variant=="422" else 400,result,
+    calls = _install_smoke_replies(monkeypatch,422 if variant=="422" else 400,result,
                           12000. if variant=="slow" else 3.)
     with pytest.raises(AssertionError): smoke.verify_ai_verdict()
+    assert calls == ["isolated_12_action_contract", "ai_verdict_post"]

@@ -127,16 +127,22 @@ def _install_smoke_replies(monkeypatch, code, body, elapsed):
         smoke, "verify_isolated_unified_management_contract",
         lambda: calls.append("isolated_12_action_contract"))
     monkeypatch.setattr(smoke, "wait_for_ai_snapshot_ready", lambda: {})
-    monkeypatch.setattr(
-        smoke, "request",
-        lambda *_args, **_kwargs: (code, deepcopy(body), elapsed))
+    def request(path, *, method="GET", **_kwargs):
+        if path == "/api/position":
+            assert method == "GET"
+            return 200, {"execution_reconciliation": {"required": False}}, 1.
+        assert (path, method) == ("/api/ai/verdict", "POST")
+        calls.append("ai_verdict_post")
+        return code, deepcopy(body), elapsed
+
+    monkeypatch.setattr(smoke, "request", request)
     return calls
 
 
 def test_smoke_accepts_only_fast_exact_quote_unavailable_contract(monkeypatch):
     calls = _install_smoke_replies(monkeypatch, 503, _negative_body(), 3.)
     smoke.verify_ai_verdict()
-    assert calls == ["isolated_12_action_contract"]
+    assert calls == ["isolated_12_action_contract", "ai_verdict_post"]
 
 
 @pytest.mark.parametrize("code,elapsed,error_code", [
@@ -151,9 +157,10 @@ def test_smoke_still_rejects_slow_arbitrary_or_unrecognized_failures(
         monkeypatch, code, elapsed, error_code):
     body = _negative_body()
     body["error"]["code"] = error_code
-    _install_smoke_replies(monkeypatch, code, body, elapsed)
+    calls = _install_smoke_replies(monkeypatch, code, body, elapsed)
     with pytest.raises(AssertionError):
         smoke.verify_ai_verdict()
+    assert calls == ["isolated_12_action_contract", "ai_verdict_post"]
 
 
 @pytest.mark.parametrize("mutation", [
@@ -180,9 +187,10 @@ def test_smoke_rejects_malformed_quote_unavailable_contract(monkeypatch, mutatio
         body["error"]["retriable"] = 1
     else:
         body["error"]["message"] = ""
-    _install_smoke_replies(monkeypatch, 503, body, 3.)
+    calls = _install_smoke_replies(monkeypatch, 503, body, 3.)
     with pytest.raises(AssertionError):
         smoke.verify_ai_verdict()
+    assert calls == ["isolated_12_action_contract", "ai_verdict_post"]
 
 
 @pytest.mark.parametrize("field", [
@@ -193,6 +201,7 @@ def test_smoke_rejects_malformed_quote_unavailable_contract(monkeypatch, mutatio
 def test_smoke_rejects_any_published_result_in_quote_unavailable_response(monkeypatch, field):
     body = _negative_body()
     body[field] = {}
-    _install_smoke_replies(monkeypatch, 503, body, 3.)
+    calls = _install_smoke_replies(monkeypatch, 503, body, 3.)
     with pytest.raises(AssertionError):
         smoke.verify_ai_verdict()
+    assert calls == ["isolated_12_action_contract", "ai_verdict_post"]
