@@ -1,4 +1,4 @@
-name: bounded-numeric-reader-acceptance
+name: diagnose-ai-review-errors
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,83 +8,44 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 50
+    timeout-minutes: 8
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 45m
+          command_timeout: 5m
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import json,os,pathlib,sqlite3,subprocess,time,urllib.request
-            expected='bd8a51369e8a4e7f82b3cbfa14c5a6d9f2d23a6a'
-            deadline=time.monotonic()+1500
-            while time.monotonic()<deadline:
-              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-              fresh=False;ready=False;pid=None
-              if installed==expected:
-                try:
-                  pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
-                  boot=int(next(line.split()[1] for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
-                  start=boot+int(pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[19])/os.sysconf('SC_CLK_TCK')
-                  ref=subprocess.run(['git','symbolic-ref','-q','HEAD'],capture_output=True,text=True).stdout.strip() or 'HEAD'
-                  refpath=pathlib.Path(subprocess.check_output(['git','rev-parse','--git-path',ref],text=True).strip())
-                  commit_clock=int(subprocess.check_output(['git','show','-s','--format=%ct',expected],text=True).strip())
-                  fresh=start>=max(commit_clock,refpath.stat().st_mtime)
-                  if fresh:
-                    with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as response:ready=response.status==200
-                  if ready:break
-                except Exception:pass
-              print('NUMERIC_READER_PROCESS_WAIT',json.dumps({'installed_expected_sha':installed==expected,'new_process':fresh,'http_ready':ready,'pid':pid}),flush=True)
-              time.sleep(15)
-            else:raise RuntimeError('EXACT_NEW_PROCESS_NOT_READY')
-            def read(route):
+            import collections,json,subprocess,time,urllib.request
+            print('AI_ERROR_DEPLOY',subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),flush=True)
+            raw=subprocess.run(['journalctl','-u','seiltanzer','--since','-8 hours','-n','6000','-o','cat','--no-pager'],capture_output=True,text=True,timeout=10).stdout
+            traces=[];errors=[];response_counts=collections.Counter()
+            for line in raw.splitlines():
+             try:value=json.loads(line)
+             except (ValueError,TypeError):continue
+             if not isinstance(value,dict) or not str(value.get('request_id','')).startswith('ai-') or 'stage' not in value:continue
+             allowed={'request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code','provider_reason','input_bytes','request_bytes','response_bytes','output_bytes','finish_reason'}
+             value={k:v for k,v in value.items() if k in allowed}
+             traces.append(value)
+             if value.get('stage')=='response':response_counts[value.get('status_code')]+=1
+             if 'exception_class' in value:errors.append(value)
+            print('AI_ERROR_RESPONSES',json.dumps(dict(response_counts)),flush=True)
+            for value in traces[-100:]:print('AI_ERROR_TRACE',json.dumps(value),flush=True)
+            for value in errors[-20:]:print('AI_ERROR_EXCEPTION',json.dumps(value),flush=True)
+            for i in range(3):
+             result={}
+             for route in ['/api/ai/snapshot/status','/api/position']:
               started=time.monotonic()
-              with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=6) as response:
-                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
-              return body,round(1000*(time.monotonic()-started),1)
-            root=pathlib.Path('/opt/seiltanzer/data')
-            deadline=time.monotonic()+600
-            while time.monotonic()<deadline:
-              receipt=root/'research'/'official_macro_offhost_latest.json'
               try:
-                assert receipt.is_file() and receipt.stat().st_size<=12000000
-                bundle=json.loads(receipt.read_bytes())
-                current=bundle.get('published_for_sha')==expected or bundle.get('expected_sha')==expected
-                cpi,latency=read('/api/research/macro/latest?family=CPI')
-                if current and cpi.get('status')=='VALID' and cpi.get('official_source_verified') is True:break
-              except Exception as error:
-                print('NUMERIC_READER_WARMING',type(error).__name__,str(error),flush=True)
-              time.sleep(15)
-            else:raise RuntimeError('CURRENT_OFFICIAL_NUMERIC_RELEASE_UNAVAILABLE')
-            samples=[]
-            for index in range(5):
-              cutoff=time.time()
-              cpi,latency=read('/api/research/macro/latest?family=CPI&captured_ts='+str(cutoff))
-              payload=cpi.get('payload') or {};missing=payload.get('unavailable_fields') or {}
-              assert cpi.get('status')=='VALID' and cpi.get('official_source_verified') is True
-              assert 0<cpi['available_at']<=cutoff and cpi['fetched_at']<=cutoff
-              assert payload.get('headline_mom_pct') is not None and payload.get('core_mom_pct') is not None
-              for field,gap in missing.items():
-                assert payload.get(field) is None and gap.get('official_marker')=='-' and gap.get('reason')=='OFFICIAL_REFERENCE_OBSERVATION_UNAVAILABLE'
-              connection=sqlite3.connect((root/'trades.db').as_uri()+'?mode=ro',uri=True,timeout=.05)
-              try:
-                connection.execute('PRAGMA query_only=ON')
-                connection.execute('PRAGMA cache_size=-1024')
-                end=time.monotonic()+.25
-                connection.set_progress_handler(lambda:time.monotonic()>end,1000)
-                row=connection.execute('SELECT available_at,source_sha256,payload_json FROM macro_numeric_releases WHERE release_id=?',(cpi['release_id'],)).fetchone()
-                assert row is not None and row[0]==cpi['available_at'] and row[1]==cpi['source_sha256'] and json.loads(row[2])==payload
-              finally:connection.close()
-              state,state_ms=read('/api/state');worker,_=read('/api/research/runtime/worker-status');inputs=worker.get('decision_model_inputs') or {}
-              row={'sample':index+1,'cpi_ms':latency,'state_ms':state_ms,'period':cpi.get('period'),'available_at':cpi.get('available_at'),'fetched_at':cpi.get('fetched_at'),'source_sha256':cpi.get('source_sha256'),'missing_fields':sorted(missing),'available_metrics':inputs.get('available_metrics'),'inputs_state':inputs.get('state')}
-              print('NUMERIC_READER_SAMPLE',json.dumps(row),flush=True);samples.append(row)
-              if index<4:time.sleep(3)
-            assert all(row['cpi_ms']<3000 and row['state_ms']<3000 for row in samples)
-            print('NUMERIC_READER_SUMMARY',json.dumps({'samples':len(samples),'max_cpi_ms':max(row['cpi_ms'] for row in samples),'max_state_ms':max(row['state_ms'] for row in samples),'original_committed_records_verified':True,'broader_35_metric_acceptance_claimed':False,'orders_or_ack_sent':False}),flush=True)
-            position,_=read('/api/position');recon=position.get('execution_reconciliation') or {}
-            print('NUMERIC_READER_POSITION',json.dumps({'trade_id':position.get('trade_id'),'reconciliation_required':bool(recon),'commands':recon.get('commands') or []}),flush=True)
+               with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=6) as response:value=json.load(response)
+               if 'position' in route:result['position']={'trade_id':value.get('trade_id'),'reconciliation':value.get('execution_reconciliation')}
+               else:result['snapshot']={k:value.get(k) for k in ('ready','building','age_sec','invalidated_reason','build_ms','build_started_at','build_n','last_error')}
+               result[route+'_ms']=round(1000*(time.monotonic()-started),1)
+              except Exception as error:result[route+'_error']=type(error).__name__
+             print('AI_ERROR_STATUS',json.dumps(result),flush=True)
+             if i<2:time.sleep(5)
+            print('AI_ERROR_DONE',json.dumps({'database_writes':False,'orders_or_ack_sent':False,'provider_calls':False}),flush=True)
             PY
