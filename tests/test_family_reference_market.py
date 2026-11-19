@@ -262,3 +262,26 @@ def test_complete_context_wire_keeps_original_forecast_expiry_and_integrity_chec
     snapshot['captured_ts']=T0
     snapshot['edge_family_market_context']=market().pack_market_context(original)
     assert not build_edge_family_evidence(snapshot)['components']
+
+
+@pytest.mark.parametrize('bound', ['wire', 'decoded'])
+def test_wide_market_context_encoding_has_separate_input_and_wire_limits(bound):
+    import base64
+    import hashlib
+    import json
+    import zlib
+    from seiltanzer.operational_edge_compaction import MARKET_CONTEXT_MAX_BYTES
+
+    expanded_limit = MARKET_CONTEXT_MAX_BYTES + len(market().FAMILIES) * market().FROZEN_MODEL_MAX_BYTES
+    if bound == 'wire':
+        data = {'receipts': [hashlib.sha256(str(i).encode()).hexdigest() for i in range(750)]}
+    else:
+        data = {'receipts': 'x' * expanded_limit}
+    raw = json.dumps(data, separators=(',', ':')).encode()
+    wire = {'context_encoding': 'json-zlib-v2', 'context_sha256': fingerprint(data),
+            'context_encoded': base64.b64encode(zlib.compress(raw)).decode('ascii')}
+    assert 0 < len(wire['context_encoded']) <= 45000
+    assert (len(raw) > expanded_limit) is (bound == 'decoded')
+    assert (len(json.dumps(wire, separators=(',', ':')).encode()) > MARKET_CONTEXT_MAX_BYTES) is (bound == 'wire')
+    assert market().pack_market_context(data) is data
+    assert market().unpack_market_context(wire) is None

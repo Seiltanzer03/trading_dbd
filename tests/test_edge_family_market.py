@@ -538,6 +538,45 @@ def test_native_trained_option_forecast_uses_same_actual_live_feature_and_preser
     assert all(0<p['probability']<1 for p in families['option']['market_predictions'].values())
 
 
+def test_large_fitted_family_envelope_preserves_both_forecasts(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    from seiltanzer.edge_family_adapters import build_edge_family_evidence
+    from seiltanzer.operational_edge_compaction import compact_operational_edges, MARKET_CONTEXT_MAX_BYTES
+
+    engine, snapshot, report, path = option_runtime(tmp_path, monkeypatch)
+    market().attach_market_family_context(engine, snapshot)
+    original = deepcopy(snapshot['edge_family_market_context'])
+    expected = build_edge_family_evidence(snapshot)
+    # The fitted heads share archived-source lineage. Use varied hash values so
+    # squeezing each model separately still exceeds the aggregate wire budget.
+    lineage = [hashlib.sha256(f'archive-record-{i}'.encode()).hexdigest() for i in range(300)]
+    for family in ('option', 'session'):
+        model = report['family_market_models']['NAS100'][family]
+        model['training_source_hashes'] = lineage
+        model['model_sha256'] = fingerprint({k: v for k, v in model.items() if k != 'model_sha256'})
+        assert len(json.dumps(model, separators=(',', ':')).encode()) <= 24000
+        original['families'][family]['model'] = deepcopy(model)
+    separately_encoded = deepcopy(original)
+    market().freeze_context_models(separately_encoded, force=True)
+    assert len(json.dumps(separately_encoded, separators=(',', ':')).encode()) > MARKET_CONTEXT_MAX_BYTES
+    path.write_text(json.dumps(report))
+
+    market().attach_market_family_context(engine, snapshot)
+    wire = snapshot['edge_family_market_context']
+    assert wire['available'] is True, wire['reason']
+    assert len(json.dumps(wire, separators=(',', ':')).encode()) <= MARKET_CONTEXT_MAX_BYTES
+    restored = market().unpack_market_context(wire)
+    assert restored['families'] == original['families']
+    snapshot['policy_manager']['existing_snapshot_content'] = 's' * 39000
+    compact_operational_edges(snapshot)
+    assert len(json.dumps(snapshot, separators=(',', ':')).encode()) < 60000
+    actual = build_edge_family_evidence(snapshot)
+    for family in ('option', 'session'):
+        assert actual['families'][family]['market_predictions'] == expected['families'][family]['market_predictions']
+    assert market().family_runtime_status(snapshot)['available_forecasts_at_capture'] == 2
+
+
 @pytest.mark.parametrize('case',['demo','wrong_proxy','stale','after_origin','malformed','missing_ts'])
 def test_bad_live_option_input_preserves_other_genuine_experts(tmp_path,monkeypatch,case):
     engine,snapshot,_,_=option_runtime(tmp_path,monkeypatch)
