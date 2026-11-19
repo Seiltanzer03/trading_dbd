@@ -27,6 +27,7 @@ from .ai_api import (
     deterministic_result,
     error_body as ai_error_body,
     provider_error as normalize_provider_error,
+    reconciliation_response,
     success_body as ai_success_body,
 )
 from .g1_management_edge_frequency import current_edge_management_payload
@@ -1594,13 +1595,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 engine, snapshot, active_trade, audit))
 
             return JSONResponse(content=body)
-
-    def reconciliation_response(context, req_id):
-        return JSONResponse(status_code=409, content={
-            **ai_error_body('broker_reconciliation_required',
-                'Требуется сверка с брокером: подтвердите фактическую позицию и судьбу прежних команд. '
-                'Новая торговая команда не выдана.', req_id, retriable=False),
-            'reconciliation': context})
 
     @app.post("/api/ai/decision/ack")
     def api_ai_decision_ack(req: ManagementExecution):
