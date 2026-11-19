@@ -1,4 +1,4 @@
-name: verify-current-ai-reconciliation-response
+name: terminal-response-baseline
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -18,58 +18,54 @@ jobs:
           command_timeout: 3m
           script: |
             cd /opt/seiltanzer
-            PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import json,os,pathlib,sqlite3,subprocess,time,urllib.error,urllib.request
-            expected='99163f1c0e1333b0af41b6542771e71f2bafdc1f'
-            installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-            assert installed==expected
-            assert subprocess.run(['systemctl','is-active','--quiet','seiltanzer']).returncode==0
-            print('AI_CURRENT_INSTALLED',json.dumps({'sha':installed,'full_release_acceptance_claimed':False}),flush=True)
-            def read(route,method='GET'):
-              started=time.monotonic()
-              request=urllib.request.Request('http://127.0.0.1:8790'+route,method=method,data=b'' if method=='POST' else None)
-              try:response=urllib.request.urlopen(request,timeout=6)
-              except urllib.error.HTTPError as error:response=error
-              with response:
-                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
-                return response.code,body,round(1000*(time.monotonic()-started),1)
-            code,before,_=read('/api/position');assert code==200
-            context=before.get('execution_reconciliation') or {}
-            if context.get('required') is not True:
-              print('AI_PREFLIGHT_SKIPPED',json.dumps({'reason':'NO_CURRENT_PENDING_EXECUTION','trade_id':before.get('trade_id'),'orders_or_ack_sent':False}),flush=True)
-              raise SystemExit(0)
-            trade=before['trade_id']
-            def counts():
-              connection=sqlite3.connect(pathlib.Path('/opt/seiltanzer/data/trades.db').as_uri()+'?mode=ro',uri=True,timeout=.05)
-              try:
-                connection.execute('PRAGMA query_only=ON');connection.execute('PRAGMA cache_size=-1024')
-                deadline=time.monotonic()+.25
-                connection.set_progress_handler(lambda:time.monotonic()>deadline,1000)
-                return {table:connection.execute('SELECT COUNT(*) FROM '+table+' WHERE trade_id=?',(trade,)).fetchone()[0] for table in ('ai_verdicts','management_decisions','llm_shadow_manual_actions')}
-              finally:connection.close()
-            original_counts=counts();samples=[];request_ids=[]
-            for index in range(3):
-              code,position,_=read('/api/position');assert code==200 and position.get('trade_id')==trade and position.get('execution_reconciliation')==context
-              code,body,latency=read('/api/ai/verdict',method='POST')
-              error=body.get('error') or {}
-              assert code==409 and error.get('code')=='broker_reconciliation_required' and error.get('retriable') is False
-              assert body.get('reconciliation')==context and 'verdict' not in body and 'review_job' not in body
-              request_ids.append(error['request_id'])
-              _,snapshot,_=read('/api/ai/snapshot/status')
-              row={'sample':index+1,'status':code,'error_code':error.get('code'),'ms':latency,'trade_id':trade,'snapshot_ready':snapshot.get('ready'),'snapshot_building':snapshot.get('building'),'snapshot_reason':snapshot.get('invalidated_reason')}
-              print('AI_PREFLIGHT_SAMPLE',json.dumps(row),flush=True);samples.append(row)
-              if index<2:time.sleep(3)
-            _,after,_=read('/api/position')
-            assert after.get('trade_id')==trade and after.get('execution_reconciliation')==context and counts()==original_counts
-            for field in ('remaining_position_fraction','realized_position_fraction'):
-              assert (before.get('position_state') or {}).get(field)==(after.get('position_state') or {}).get(field)
-            raw=subprocess.run(['journalctl','-u','seiltanzer','--since','-2 minutes','-n','500','-o','cat','--no-pager'],capture_output=True,text=True,timeout=10).stdout
-            stages={identity:[] for identity in request_ids}
-            for line in raw.splitlines():
-              try:value=json.loads(line)
-              except (ValueError,TypeError):continue
-              if isinstance(value,dict) and value.get('request_id') in stages:stages[value['request_id']].append(value.get('stage'))
-            assert all('response' in observed and 'route' not in observed and not any(str(stage).startswith('provider') for stage in observed) for observed in stages.values())
-            assert all(row['ms']<3000 for row in samples)
-            print('AI_PREFLIGHT_SUMMARY',json.dumps({'samples':len(samples),'max_ms':max(row['ms'] for row in samples),'trade_id':trade,'same_pending_commands':True,'review_command_counts_unchanged':True,'position_fractions_unchanged':True,'provider_not_admitted':True,'orders_or_ack_sent':False,'new_llm_report_claimed':False}),flush=True)
+            /usr/bin/python3 -B -u - <<'PY'
+            import concurrent.futures, json, pathlib, sqlite3, subprocess, time, urllib.error, urllib.request
+            def out(label, data):
+                print(label, json.dumps(data, ensure_ascii=True), flush=True)
+            def run(args, timeout=5):
+                return subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout.strip()
+            print('TERMINAL_SHA', run(['git','rev-parse','HEAD']), flush=True)
+            print('TERMINAL_SERVICE',run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','NRestarts']).replace('\n',' '),flush=True)
+            for name in ('cpu','io','memory'):
+                path=pathlib.Path('/proc/pressure')/name
+                if path.exists(): print('TERMINAL_PRESSURE',name,path.read_text().replace('\n',' '),flush=True)
+            def fetch(base, path, i):
+                started=time.monotonic()
+                row=dict(origin=base,route=path,sample=i)
+                try:
+                    try: response=urllib.request.urlopen(base+path,timeout=7)
+                    except urllib.error.HTTPError as err: response=err
+                    with response:
+                        row.update(status=response.status,header_ms=round(1000*(time.monotonic()-started),1))
+                        raw=response.read(2000001);row['bytes']=len(raw)
+                    if response.status==200 and path!='/' and len(raw)<=2000000:
+                        data=json.loads(raw)
+                        if isinstance(data,list):row['rows']=len(data)
+                        elif isinstance(data,dict):
+                            row.update(trade_id=data.get('trade_id') or ((data.get('trade') or {}).get('id') if isinstance(data.get('trade'),dict) else None),ready=data.get('ready'),building=data.get('building'))
+                            for field in ('entries','trades','journal'):
+                                if isinstance(data.get(field),list):row[field+'_n']=len(data[field])
+                except Exception as exc:
+                    row['error']=type(exc).__name__
+                row['ms']=round(1000*(time.monotonic()-started),1)
+                out('TERMINAL_ROUTE',row)
+            paths=['/','/api/state','/api/position','/api/journal','/api/ai/snapshot/status']
+            for i in range(1,6):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+                    list(pool.map(lambda path:fetch('http://127.0.0.1:8790',path,i), paths))
+                time.sleep(1)
+            db=pathlib.Path('/opt/seiltanzer/data/trades.db')
+            with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True,timeout=.25) as conn:
+                conn.execute('PRAGMA query_only=ON')
+                for name in ('trades','journal'):
+                    exists=conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",(name,)).fetchone()
+                    if exists:
+                        ts=time.monotonic()
+                        count=conn.execute('SELECT COUNT(*) FROM '+name).fetchone()[0]
+                        out('TERMINAL_DB_ROWS',dict(table=name,count=count,ms=round(1000*(time.monotonic()-ts),1)))
             PY
+      - name: Measure public routes
+        run: |
+          for route in / /api/state /api/position /api/journal; do
+            curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w "$route status=%{http_code} header=%{time_starttransfer} total=%{time_total} bytes=%{size_download}\n" "http://94.241.171.182:8790$route" || true
+          done
