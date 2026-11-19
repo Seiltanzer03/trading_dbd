@@ -1,4 +1,4 @@
-name: read-current-terminal-model-inputs
+name: verify-public-terminal-data
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -6,49 +6,38 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  public-data:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 3
     steps:
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 90s
-          script: |
-            cd /opt/seiltanzer
-            /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,subprocess,time,urllib.request
-            expected='a85b57d1899e0e071619848818e86a1ad36ed892'
-            assert subprocess.check_output(['git','rev-parse','HEAD'],text=True,timeout=4).strip()==expected
-            def read(path):
-                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as result:
-                    raw=result.read(2000001)
-                    assert len(raw)<=2000000
-                return json.loads(raw)
-            def show(label,obj):
-                print(label,json.dumps(obj,ensure_ascii=True),flush=True)
-            for i in range(2):
-                ai=read('/api/ai/snapshot/status')
-                fm=ai.get('family_market_forecasts') or {}
-                worker=read('/api/research/runtime/worker-status')
-                row=worker.get('decision_model_inputs') or {}
-                tick=read('/api/state')['tick']
-                price=tick['feeds']['price']
-                pos=read('/api/position')
-                show('CURRENT_INPUTS',dict(sample=i+1,observed_ts=time.time(),instrument=ai.get('current_instrument'),
-                     position_id=pos.get('trade_id'),reconciliation_required=(pos.get('execution_reconciliation') or {}).get('required'),
-                     ai_ready=ai.get('ready'),building=ai.get('building'),ai_reason=ai.get('invalidated_reason'),
-                     last_error=ai.get('last_error'),ai_build_ms=ai.get('build_ms'),budget=ai.get('snapshot_budget'),
-                     quote_age=round(time.time()-price['ts'],1) if isinstance(price.get('ts'),(float,int)) else None,
-                     quote_source=price.get('source'),quote_fresh=price.get('fresh'),
-                     metric_state=row.get('state'),metric_count=row.get('metric_count'),metrics_available=row.get('available_metrics'),
-                     metric_age=round(time.time()-row['captured_ts'],1) if isinstance(row.get('captured_ts'),(float,int)) else None,
-                     receipt_sha=fm.get('published_for_sha'),receipt_at=fm.get('captured_ts'),
-                     available_forecasts=fm.get('available_forecasts_at_capture'),qualified=fm.get('qualified_preferences_at_capture'),
-                     families={k:{'available':v.get('forecast_available_at_capture'),'target':v.get('target_symbol'),
-                                  'reason':v.get('reason'),'origin':v.get('forecast_origin_ts'),'expires':v.get('reference_valid_until_ts')}
-                               for k,v in (fm.get('families') or {}).items()}))
-                if i==0:time.sleep(8)
-            PY
+      - name: Measure the public page and independent data routes once
+        run: |
+          python3 - <<'PY'
+          from concurrent.futures import ThreadPoolExecutor
+          import json
+          import time
+          import urllib.request
+
+          base = 'http://94.241.171.182:8790'
+          paths = ('/', '/api/state', '/api/journal', '/api/position')
+
+          def fetch(path):
+              started = time.monotonic()
+              with urllib.request.urlopen(base + path, timeout=5) as response:
+                  raw = response.read(2_500_001)
+                  if response.status != 200 or not 0 < len(raw) <= 2_500_000:
+                      raise RuntimeError('PUBLIC_RESPONSE_INVALID:' + path)
+              return raw if path == '/' else json.loads(raw), round(time.monotonic() - started, 3)
+
+          with ThreadPoolExecutor(max_workers=4) as pool:
+              results = dict(zip(paths, pool.map(fetch, paths)))
+          page, state, journal, position = (results[path][0] for path in paths)
+          assert b'id="terminal-loading"' in page
+          assert isinstance(state.get('journal'), list) and isinstance(state.get('tick'), dict)
+          assert isinstance(journal, list) and journal and 'trade_id' in position
+          trade_id = position['trade_id']
+          print('PUBLIC_TERMINAL_DATA=' + json.dumps(dict(journal_rows=len(journal),
+              position_present=trade_id is not None, state_rows=len(state['journal']),
+              open_row_in_journal=trade_id is not None and any(row.get('id') == trade_id and row.get('status') == 'open' for row in journal),
+              seconds={path: result[1] for path, result in results.items()})))
+          PY
