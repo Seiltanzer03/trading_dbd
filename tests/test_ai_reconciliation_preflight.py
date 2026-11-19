@@ -1,5 +1,8 @@
+import asyncio
+import threading
 import time
 
+import httpx
 import pytest
 
 from seiltanzer import app as app_module
@@ -105,3 +108,44 @@ def test_production_no_trade_keeps_existing_fast_error(tmp_path, monkeypatch):
         assert app.state.ai_review_jobs.task is None
     finally:
         app.state.engine.close()
+
+
+@pytest.mark.parametrize('blocked_stage', ['journal', 'reconciliation'])
+def test_ai_preflight_wait_does_not_block_terminal_reads(tmp_path, monkeypatch, blocked_stage):
+    app, _, materializer = _production_stack(tmp_path, monkeypatch)
+    engine = app.state.engine
+    started = threading.Event()
+    release = threading.Event()
+    wait_finished = threading.Event()
+    _pending(engine, 'CLOSE_25')
+    owner, name = ((materializer, 'current_trade_id') if blocked_stage == 'journal'
+                   else (engine.position, 'execution_reconciliation'))
+    original = getattr(owner, name)
+
+    def wait_for_owner(*args):
+        started.set()
+        release.wait(2)
+        wait_finished.set()
+        return original(*args)
+
+    monkeypatch.setattr(owner, name, wait_for_owner)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url='http://test') as client:
+            review = asyncio.create_task(client.post('/api/ai/verdict'))
+            try:
+                assert await asyncio.to_thread(started.wait, 1)
+                status, journal = await asyncio.gather(client.get('/api/state'), client.get('/api/journal'))
+                assert status.status_code == journal.status_code == 200
+                assert journal.json()[0]['id'] == 1
+                assert not wait_finished.is_set(), 'AI ledger wait pinned the HTTP event loop'
+            finally:
+                release.set()
+                response = await review
+            assert response.status_code == 409
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        engine.close()

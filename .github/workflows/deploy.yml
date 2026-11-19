@@ -109,10 +109,30 @@ jobs:
             # Also serialize surviving SSH processes after an interrupted run.
             exec 9>/opt/seiltanzer/.deployment-git-maintenance.lock
             flock -w 30 9
-            if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ] || {
-              { [ -e /opt/seiltanzer/data/cutover.journal.json ] || [ -L /opt/seiltanzer/data/cutover.journal.json ]; } &&
-              ! /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer >/dev/null;
-            }; then
+            history_safe=false
+            for attempt in 1 2 3; do
+              if [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ]; then
+                break
+              fi
+              if ! { [ -e /opt/seiltanzer/data/cutover.journal.json ] || [ -L /opt/seiltanzer/data/cutover.journal.json ] ||
+                     [ -e /opt/seiltanzer/data/json-history.epoch.json ] || [ -L /opt/seiltanzer/data/json-history.epoch.json ]; }; then
+                history_safe=true
+                break
+              fi
+              if fence=$(/usr/bin/timeout 9s /usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --database /opt/seiltanzer/data/trades.db --application-root /opt/seiltanzer); then
+                history_safe=true
+                break
+              fi
+              printf 'History check %s/3 refused: %s\n' "$attempt" "$fence"
+              # The installed guard also uses STATE_INVALID when SQLite's five
+              # second deadline interrupts the projection check. Rerun the
+              # whole proof on a new connection before doing any mutation.
+              case "$fence" in
+                *'"reason": "HOT_HISTORY_STATE_INVALID"'*|*'"reason": "HOT_HISTORY_STATE_CHECK_TIMEOUT"'*|*'"reason": "JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT"'*) ;;
+                *) break ;;
+              esac
+            done
+            if [ "$history_safe" != true ] || [ -e /opt/seiltanzer/data/cutover.active ] || [ -L /opt/seiltanzer/data/cutover.active ]; then
               echo "::error::HISTORY_CUTOVER_ACTIVE_MUTATION_REFUSED"
               exit 1
             fi

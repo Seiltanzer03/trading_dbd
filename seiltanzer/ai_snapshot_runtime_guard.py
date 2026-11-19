@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 
 RUNTIME_GUARD_VERSION = "ai-snapshot-runtime-guard-v1"
@@ -70,7 +71,7 @@ def install_ai_snapshot_runtime_guard(app: Any, materializer: Any,
             # Production installs this middleware outside the materializer.
             # Start timing before the synchronous journal probe can block.
             with trace.span('runtime_guard'):
-                no_active_trade = materializer.current_trade_id() is None
+                no_active_trade = await run_in_threadpool(materializer.current_trade_id) is None
             if no_active_trade:
                 response = JSONResponse(
                     status_code=400,

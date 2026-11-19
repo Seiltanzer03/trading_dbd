@@ -24,6 +24,7 @@ import time
 from typing import Any, Callable
 
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from .canonical_market_context import (
     canonical_instrument_code,
@@ -638,6 +639,23 @@ def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
     app.state.ai_snapshot_materializer = materializer
     app_module.build_snapshot = materializer.cached_build_snapshot
 
+    def preflight(request_id):
+        # While the ledger is waiting for its owner, HTTP can still serve the
+        # terminal. Keep pending execution ahead of snapshot readiness.
+        trade = materializer.current_trade()
+        position = getattr(engine, 'position', None)
+        unresolved = (position.execution_reconciliation(trade)
+                      if trade is not None and position is not None else None)
+        if unresolved:
+            from .ai_api import reconciliation_response
+            return reconciliation_response(unresolved, request_id)
+        reason = materializer._event_reason()
+        if reason:
+            if reason != "NO_ACTIVE_TRADE":
+                materializer.request_refresh(reason)
+            return _warming_response({**materializer.status(), "reason": reason})
+        return None
+
     @app.middleware("http")
     async def _ai_materializer_gate(request, call_next):
         if request.url.path == "/api/ai/verdict" and request.method.upper() == "POST":
@@ -647,24 +665,7 @@ def install_ai_snapshot_materializer(app: Any) -> AISnapshotMaterializer:
             request.state.ai_request_trace = trace
             try:
                 with trace.span('preflight'):
-                    # A known unresolved command is actionable user input,
-                    # independent of a slow snapshot. Do not hide its existing
-                    # factual-execution controls behind retryable warmup.
-                    trade = materializer.current_trade()
-                    position = getattr(engine, 'position', None)
-                    unresolved = (position.execution_reconciliation(trade)
-                                  if trade is not None and position is not None else None)
-                    if unresolved:
-                        from .ai_api import reconciliation_response
-                        response = reconciliation_response(unresolved, trace.request_id)
-                    else:
-                        reason = materializer._event_reason()
-                        if reason:
-                            if reason != "NO_ACTIVE_TRADE":
-                                materializer.request_refresh(reason)
-                            response = _warming_response({**materializer.status(), "reason": reason})
-                        else:
-                            response = None
+                    response = await run_in_threadpool(preflight, trace.request_id)
                 if response is None:
                     response = await call_next(request)
                     # Preserve the race backstop and log the actual converted status.
