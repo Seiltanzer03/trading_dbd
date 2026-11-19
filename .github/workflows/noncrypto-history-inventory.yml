@@ -1,4 +1,4 @@
-name: locate-live-terminal-startup-stage
+name: read-current-terminal-model-inputs
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -19,32 +19,36 @@ jobs:
           script: |
             cd /opt/seiltanzer
             /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,re,subprocess,time,urllib.request
-            def read(*args):
-                return subprocess.run(args,capture_output=True,text=True,timeout=5).stdout.strip()
-            def emit(label,value):
-                print(label,json.dumps(value),flush=True)
-            emit('STARTUP_INSTALL',read('git','rev-parse','HEAD'))
-            props=dict(line.split('=',1) for line in read('systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts','-p','Result').splitlines() if '=' in line)
-            emit('STARTUP_SERVICE',props)
-            pid=props.get('MainPID','0')
-            if pid.isdigit() and int(pid)>0:
-                markers=read('journalctl','-u','seiltanzer','_PID='+pid,'--grep=^STARTUP_PHASE phase=','-o','cat','--no-pager','-n','12')
-                emit('STARTUP_MARKERS',[line for line in markers.splitlines() if re.fullmatch(r'STARTUP_PHASE phase=[a-z.]+ elapsed_sec=[0-9.]+',line)])
-                def sample():
-                    try:
-                        row=pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()
-                        values=dict(line.split(': ',1) for line in pathlib.Path('/proc',pid,'io').read_text().splitlines())
-                        return dict(cpu_ticks=int(row[11])+int(row[12]),read_bytes=int(values['read_bytes']),rchar=int(values['rchar']))
-                    except (OSError,ValueError,IndexError,KeyError):
-                        return None
-                before=sample()
-                time.sleep(4)
-                after=sample()
-                emit('STARTUP_ACTIVITY',dict(before=before,after=after))
-            try:
-                with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=2) as response:
-                    emit('STARTUP_HTTP',response.status)
-            except Exception as error:
-                emit('STARTUP_HTTP',dict(kind=type(error).__name__,status=getattr(error,'code',None)))
+            import json,pathlib,subprocess,time,urllib.request
+            expected='a85b57d1899e0e071619848818e86a1ad36ed892'
+            assert subprocess.check_output(['git','rev-parse','HEAD'],text=True,timeout=4).strip()==expected
+            def read(path):
+                with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=5) as result:
+                    raw=result.read(2000001)
+                    assert len(raw)<=2000000
+                return json.loads(raw)
+            def show(label,obj):
+                print(label,json.dumps(obj,ensure_ascii=True),flush=True)
+            for i in range(2):
+                ai=read('/api/ai/snapshot/status')
+                fm=ai.get('family_market_forecasts') or {}
+                worker=read('/api/research/runtime/worker-status')
+                row=worker.get('decision_model_inputs') or {}
+                tick=read('/api/state')['tick']
+                price=tick['feeds']['price']
+                pos=read('/api/position')
+                show('CURRENT_INPUTS',dict(sample=i+1,observed_ts=time.time(),instrument=ai.get('current_instrument'),
+                     position_id=pos.get('trade_id'),reconciliation_required=(pos.get('execution_reconciliation') or {}).get('required'),
+                     ai_ready=ai.get('ready'),building=ai.get('building'),ai_reason=ai.get('invalidated_reason'),
+                     last_error=ai.get('last_error'),ai_build_ms=ai.get('build_ms'),budget=ai.get('snapshot_budget'),
+                     quote_age=round(time.time()-price['ts'],1) if isinstance(price.get('ts'),(float,int)) else None,
+                     quote_source=price.get('source'),quote_fresh=price.get('fresh'),
+                     metric_state=row.get('state'),metric_count=row.get('metric_count'),metrics_available=row.get('available_metrics'),
+                     metric_age=round(time.time()-row['captured_ts'],1) if isinstance(row.get('captured_ts'),(float,int)) else None,
+                     receipt_sha=fm.get('published_for_sha'),receipt_at=fm.get('captured_ts'),
+                     available_forecasts=fm.get('available_forecasts_at_capture'),qualified=fm.get('qualified_preferences_at_capture'),
+                     families={k:{'available':v.get('forecast_available_at_capture'),'target':v.get('target_symbol'),
+                                  'reason':v.get('reason'),'origin':v.get('forecast_origin_ts'),'expires':v.get('reference_valid_until_ts')}
+                               for k,v in (fm.get('families') or {}).items()}))
+                if i==0:time.sleep(8)
             PY
