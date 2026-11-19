@@ -1,4 +1,4 @@
-name: diagnose-deploy-history-fence
+name: verify-current-ai-reconciliation-response
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,45 +8,68 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 5m
+          command_timeout: 3m
           script: |
             cd /opt/seiltanzer
-            /usr/bin/python3 -B -u - <<'PY'
-            import json,pathlib,re,stat,subprocess,time
-            root=pathlib.Path('/opt/seiltanzer')
-            print('FENCE_DIAG_SHA',subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),flush=True)
-            import resource
-            for kind,prefix in [('normal',[]),('priority_read',['/usr/bin/nice','-n','-10']),('normal_again',[])]:
-             started=time.monotonic();cpu=resource.getrusage(resource.RUSAGE_CHILDREN)
-             result=subprocess.run(prefix+['/usr/bin/python3','/usr/local/lib/seiltanzer-history-start-guard.py','--database',str(root/'data/trades.db'),'--application-root',str(root)],capture_output=True,text=True,timeout=12)
-             after=resource.getrusage(resource.RUSAGE_CHILDREN);elapsed=time.monotonic()-started
-             print('FENCE_CPU_CHECK',json.dumps({'kind':kind,'returncode':result.returncode,'wall_ms':round(1000*elapsed,1),'user_cpu_ms':round(1000*(after.ru_utime-cpu.ru_utime),1),'system_cpu_ms':round(1000*(after.ru_stime-cpu.ru_stime),1),'result':result.stdout.strip()[:1000],'stderr':result.stderr.strip()[:180]}),flush=True)
-            def metadata(directory):
-             for name in ('cutover.active','cutover.preparation.json','cutover.journal.json','cutover.result.json','cutover.abort.json','json-history.epoch.json'):
-              path=directory/name;item={'path':str(path),'exists':path.exists()}
+            PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
+            import json,os,pathlib,sqlite3,subprocess,time,urllib.error,urllib.request
+            expected='99163f1c0e1333b0af41b6542771e71f2bafdc1f'
+            installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+            assert installed==expected
+            assert subprocess.run(['systemctl','is-active','--quiet','seiltanzer']).returncode==0
+            print('AI_CURRENT_INSTALLED',json.dumps({'sha':installed,'full_release_acceptance_claimed':False}),flush=True)
+            def read(route,method='GET'):
+              started=time.monotonic()
+              request=urllib.request.Request('http://127.0.0.1:8790'+route,method=method,data=b'' if method=='POST' else None)
+              try:response=urllib.request.urlopen(request,timeout=6)
+              except urllib.error.HTTPError as error:response=error
+              with response:
+                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
+                return response.code,body,round(1000*(time.monotonic()-started),1)
+            code,before,_=read('/api/position');assert code==200
+            context=before.get('execution_reconciliation') or {}
+            if context.get('required') is not True:
+              print('AI_PREFLIGHT_SKIPPED',json.dumps({'reason':'NO_CURRENT_PENDING_EXECUTION','trade_id':before.get('trade_id'),'orders_or_ack_sent':False}),flush=True)
+              raise SystemExit(0)
+            trade=before['trade_id']
+            def counts():
+              connection=sqlite3.connect(pathlib.Path('/opt/seiltanzer/data/trades.db').as_uri()+'?mode=ro',uri=True,timeout=.05)
               try:
-               info=path.lstat();item.update(size=info.st_size,mtime=info.st_mtime,mode=oct(stat.S_IMODE(info.st_mode)),regular=stat.S_ISREG(info.st_mode))
-               if stat.S_ISREG(info.st_mode) and info.st_size<=65536:
-                try:
-                 value=json.loads(path.read_bytes())
-                 if isinstance(value,dict):item['fields']={key:value[key] for key in ('contract','phase','run_id','application_sha','service_started','pid','started_at','reason','abort_reason') if key in value}
-                except ValueError:item['json']=False
-              except FileNotFoundError:pass
-              print('FENCE_DIAG_FILE',json.dumps(item),flush=True)
-            metadata(root/'data')
-            pointer=root/'data/json-history.epoch.json'
-            if pointer.is_file() and pointer.stat().st_size<=65536:
-             try:
-              run_id=json.loads(pointer.read_bytes()).get('run_id')
-              if isinstance(run_id,str) and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_-]{0,63}',run_id):metadata(root/'data'/('json-rebuild-'+run_id))
-             except ValueError:pass
-            print('FENCE_DIAG_UNITS',subprocess.run(['systemctl','list-units','--all','--type=service','--no-legend','seiltanzer*history*'],capture_output=True,text=True,timeout=5).stdout[:5000],flush=True)
-            print('FENCE_DIAG_SERVICE',subprocess.run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','SubState','-p','NRestarts'],capture_output=True,text=True,timeout=5).stdout,flush=True)
+                connection.execute('PRAGMA query_only=ON');connection.execute('PRAGMA cache_size=-1024')
+                deadline=time.monotonic()+.25
+                connection.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+                return {table:connection.execute('SELECT COUNT(*) FROM '+table+' WHERE trade_id=?',(trade,)).fetchone()[0] for table in ('ai_verdicts','management_decisions','llm_shadow_manual_actions')}
+              finally:connection.close()
+            original_counts=counts();samples=[];request_ids=[]
+            for index in range(3):
+              code,position,_=read('/api/position');assert code==200 and position.get('trade_id')==trade and position.get('execution_reconciliation')==context
+              code,body,latency=read('/api/ai/verdict',method='POST')
+              error=body.get('error') or {}
+              assert code==409 and error.get('code')=='broker_reconciliation_required' and error.get('retriable') is False
+              assert body.get('reconciliation')==context and 'verdict' not in body and 'review_job' not in body
+              request_ids.append(error['request_id'])
+              _,snapshot,_=read('/api/ai/snapshot/status')
+              row={'sample':index+1,'status':code,'error_code':error.get('code'),'ms':latency,'trade_id':trade,'snapshot_ready':snapshot.get('ready'),'snapshot_building':snapshot.get('building'),'snapshot_reason':snapshot.get('invalidated_reason')}
+              print('AI_PREFLIGHT_SAMPLE',json.dumps(row),flush=True);samples.append(row)
+              if index<2:time.sleep(3)
+            _,after,_=read('/api/position')
+            assert after.get('trade_id')==trade and after.get('execution_reconciliation')==context and counts()==original_counts
+            for field in ('remaining_position_fraction','realized_position_fraction'):
+              assert (before.get('position_state') or {}).get(field)==(after.get('position_state') or {}).get(field)
+            raw=subprocess.run(['journalctl','-u','seiltanzer','--since','-2 minutes','-n','500','-o','cat','--no-pager'],capture_output=True,text=True,timeout=10).stdout
+            stages={identity:[] for identity in request_ids}
+            for line in raw.splitlines():
+              try:value=json.loads(line)
+              except (ValueError,TypeError):continue
+              if isinstance(value,dict) and value.get('request_id') in stages:stages[value['request_id']].append(value.get('stage'))
+            assert all('response' in observed and 'route' not in observed and not any(str(stage).startswith('provider') for stage in observed) for observed in stages.values())
+            assert all(row['ms']<3000 for row in samples)
+            print('AI_PREFLIGHT_SUMMARY',json.dumps({'samples':len(samples),'max_ms':max(row['ms'] for row in samples),'trade_id':trade,'same_pending_commands':True,'review_command_counts_unchanged':True,'position_fractions_unchanged':True,'provider_not_admitted':True,'orders_or_ack_sent':False,'new_llm_report_claimed':False}),flush=True)
             PY
