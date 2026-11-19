@@ -1,4 +1,4 @@
-name: terminal-response-baseline
+name: locate-terminal-gateway-timeouts
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -15,57 +15,34 @@ jobs:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 3m
+          command_timeout: 2m
           script: |
             cd /opt/seiltanzer
             /usr/bin/python3 -B -u - <<'PY'
-            import concurrent.futures, json, pathlib, sqlite3, subprocess, time, urllib.error, urllib.request
-            def out(label, data):
-                print(label, json.dumps(data, ensure_ascii=True), flush=True)
-            def run(args, timeout=5):
-                return subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout.strip()
-            print('TERMINAL_SHA', run(['git','rev-parse','HEAD']), flush=True)
-            print('TERMINAL_SERVICE',run(['systemctl','show','seiltanzer','-p','MainPID','-p','ActiveState','-p','NRestarts']).replace('\n',' '),flush=True)
-            for name in ('cpu','io','memory'):
-                path=pathlib.Path('/proc/pressure')/name
-                if path.exists(): print('TERMINAL_PRESSURE',name,path.read_text().replace('\n',' '),flush=True)
-            def fetch(base, path, i):
-                started=time.monotonic()
-                row=dict(origin=base,route=path,sample=i)
-                try:
-                    try: response=urllib.request.urlopen(base+path,timeout=7)
-                    except urllib.error.HTTPError as err: response=err
-                    with response:
-                        row.update(status=response.status,header_ms=round(1000*(time.monotonic()-started),1))
-                        raw=response.read(2000001);row['bytes']=len(raw)
-                    if response.status==200 and path!='/' and len(raw)<=2000000:
-                        data=json.loads(raw)
-                        if isinstance(data,list):row['rows']=len(data)
-                        elif isinstance(data,dict):
-                            row.update(trade_id=data.get('trade_id') or ((data.get('trade') or {}).get('id') if isinstance(data.get('trade'),dict) else None),ready=data.get('ready'),building=data.get('building'))
-                            for field in ('entries','trades','journal'):
-                                if isinstance(data.get(field),list):row[field+'_n']=len(data[field])
-                except Exception as exc:
-                    row['error']=type(exc).__name__
-                row['ms']=round(1000*(time.monotonic()-started),1)
-                out('TERMINAL_ROUTE',row)
-            paths=['/','/api/state','/api/position','/api/journal','/api/ai/snapshot/status']
-            for i in range(1,6):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-                    list(pool.map(lambda path:fetch('http://127.0.0.1:8790',path,i), paths))
-                time.sleep(1)
-            db=pathlib.Path('/opt/seiltanzer/data/trades.db')
-            with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True,timeout=.25) as conn:
-                conn.execute('PRAGMA query_only=ON')
-                for name in ('trades','journal'):
-                    exists=conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",(name,)).fetchone()
-                    if exists:
-                        ts=time.monotonic()
-                        count=conn.execute('SELECT COUNT(*) FROM '+name).fetchone()[0]
-                        out('TERMINAL_DB_ROWS',dict(table=name,count=count,ms=round(1000*(time.monotonic()-ts),1)))
+            import collections,json,pathlib,re,subprocess
+            def read(*args):
+                return subprocess.run(args,capture_output=True,text=True,timeout=8).stdout
+            print('TERMINAL_LISTENERS',read('ss','-ltnp','( sport = :8790 or sport = :80 or sport = :443 )'))
+            for unit in ('caddy','nginx','seiltanzer'):
+                print('TERMINAL_UNIT',unit,read('systemctl','show',unit,'-p','ActiveState','-p','MainPID','-p','NRestarts').replace('\n',' '))
+                raw=read('journalctl','-u',unit,'--since','-12 hours','--grep=504|i/o timeout|deadline exceeded|STARTUP_PHASE|ASGI application|lock timeout','-n','180','-o','cat','--no-pager')
+                counts=collections.Counter()
+                for line in raw.splitlines():
+                    if line.startswith('STARTUP_PHASE phase='):
+                        print('TERMINAL_START',line[:140])
+                        continue
+                    try: rec=json.loads(line)
+                    except ValueError:
+                        signature=re.search(r'\b(504|i/o timeout|deadline exceeded|ASGI application|lock timeout)\b',line)
+                        if signature:counts[signature.group(0)]+=1
+                        continue
+                    if not isinstance(rec,dict):continue
+                    request=rec.get('request') or {}
+                    uri=request.get('uri','').split('?',1)[0]
+                    if not re.fullmatch(r'/[A-Za-z0-9/_-]{0,120}',uri):uri='unknown'
+                    result=dict(route=uri,status=rec.get('status'),duration=rec.get('duration'),ts=rec.get('ts'),timed_out='timeout' in str(rec.get('msg','')).lower())
+                    print('TERMINAL_PROXY_EVENT',unit,json.dumps(result))
+                print('TERMINAL_LOG_COUNTS',unit,json.dumps(counts))
+            print('TERMINAL_FREE',read('df','--output=avail','-h','/').splitlines()[-1])
+            print('TERMINAL_CPU',read('ps','-eo','pid,comm,pcpu,rss','--sort=-pcpu').splitlines()[:10])
             PY
-      - name: Measure public routes
-        run: |
-          for route in / /api/state /api/position /api/journal; do
-            curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w "$route status=%{http_code} header=%{time_starttransfer} total=%{time_total} bytes=%{size_download}\n" "http://94.241.171.182:8790$route" || true
-          done
