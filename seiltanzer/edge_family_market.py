@@ -28,6 +28,7 @@ ZONES = {'NAS100': 'America/New_York', 'SP500': 'America/New_York',
          'UK100': 'Europe/London', 'JPY100': 'Asia/Tokyo'}
 PRODUCTS = {'BTCUSD': 'BTC-USD', 'ETHUSD': 'ETH-USD', 'SOLUSD': 'SOL-USD'}
 MAX_HISTORY = 20000
+FROZEN_MODEL_MAX_BYTES = 24_000
 
 
 def session_features(code, cutoff):
@@ -531,7 +532,7 @@ def freeze_context_models(context,*,force=False):
         if not isinstance(model,dict):continue
         try:raw=json.dumps(model,allow_nan=False,separators=(',',':')).encode()
         except (TypeError,ValueError):continue
-        if len(raw)>24_000:continue
+        if len(raw)>FROZEN_MODEL_MAX_BYTES:continue
         item['model_encoded']=base64.b64encode(zlib.compress(raw)).decode('ascii')
         item['model_encoding']='json-zlib-v1'
         del item['model']
@@ -548,11 +549,15 @@ def pack_market_context(context):
     if not isinstance(context,dict) or 'context_encoded' in context:return context
     try:raw=json.dumps(context,allow_nan=False,separators=(',',':')).encode()
     except (ValueError,TypeError):return context
-    if len(raw)>MARKET_CONTEXT_MAX_BYTES:return context
+    # The existing wire limit still applies. Permit one complete, bounded
+    # decompression for shared histories that compress better together.
+    if len(raw)>MARKET_CONTEXT_MAX_BYTES+len(FAMILIES)*FROZEN_MODEL_MAX_BYTES:return context
+    encoding='json-zlib-v1' if len(raw)<=MARKET_CONTEXT_MAX_BYTES else 'json-zlib-v2'
     packed={k:context[k] for k in _CONTEXT_HEADERS if k in context}
-    packed.update(context_encoding='json-zlib-v1',context_encoded=base64.b64encode(zlib.compress(raw)).decode(),
+    packed.update(context_encoding=encoding,context_encoded=base64.b64encode(zlib.compress(raw)).decode(),
                   context_sha256=fingerprint(context))
-    return packed if len(json.dumps(packed,separators=(',',':')).encode())<len(raw) else context
+    size=len(json.dumps(packed,separators=(',',':')).encode())
+    return packed if size<=MARKET_CONTEXT_MAX_BYTES and size<len(raw) else context
 
 
 def unpack_market_context(context):
@@ -561,17 +566,23 @@ def unpack_market_context(context):
         import base64,json,zlib
         from .operational_edge_compaction import MARKET_CONTEXT_MAX_BYTES
         encoded=context.get('context_encoded')
-        if (context.get('context_encoding')!='json-zlib-v1' or not isinstance(encoded,str)
-                or not 0<len(encoded)<=45000):return None
+        encoding=context.get('context_encoding')
+        limit=MARKET_CONTEXT_MAX_BYTES
+        if encoding=='json-zlib-v2':limit+=len(FAMILIES)*FROZEN_MODEL_MAX_BYTES
+        elif encoding!='json-zlib-v1':return None
+        if not isinstance(encoded,str) or not 0<len(encoded)<=45000:return None
         decoder=zlib.decompressobj()
-        raw=decoder.decompress(base64.b64decode(encoded,validate=True),MARKET_CONTEXT_MAX_BYTES+1)
-        if (len(raw)>MARKET_CONTEXT_MAX_BYTES or not decoder.eof or decoder.unused_data
+        raw=decoder.decompress(base64.b64decode(encoded,validate=True),limit+1)
+        if (len(raw)>limit or not decoder.eof or decoder.unused_data
                 or decoder.unconsumed_tail):return None
         value=json.loads(raw)
         if not isinstance(value,dict) or 'context_encoded' in value:return None
         headers={k:value[k] for k in _CONTEXT_HEADERS if k in value}
         actual={k:v for k,v in context.items() if k not in ('context_encoding','context_encoded','context_sha256')}
         if actual!=headers or context.get('context_sha256')!=fingerprint(value):return None
+        if (encoding=='json-zlib-v2'
+                and len(json.dumps(context,allow_nan=False,separators=(',',':')).encode())>MARKET_CONTEXT_MAX_BYTES):
+            return None
         return value
     except (ValueError,TypeError,UnicodeError,RecursionError,zlib.error):return None
 
@@ -585,8 +596,8 @@ def frozen_model(item):
         if ('model' in item or item.get('model_encoding')!='json-zlib-v1'
                 or not isinstance(encoded,str) or not 0<len(encoded)<=32_000):return None
         decoder=zlib.decompressobj()
-        raw=decoder.decompress(base64.b64decode(encoded,validate=True),24_001)
-        if (len(raw)>24_000 or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail):return None
+        raw=decoder.decompress(base64.b64decode(encoded,validate=True),FROZEN_MODEL_MAX_BYTES+1)
+        if (len(raw)>FROZEN_MODEL_MAX_BYTES or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail):return None
         return json.loads(raw)
     except (ValueError,TypeError,UnicodeError,zlib.error):return None
 
@@ -721,13 +732,18 @@ def attach_market_family_context(engine, snapshot):
                                         'forecast_origin_ts': origin}
         if uses_reference:
             context['families'][family]['target_reference']=runtime_proof(reference)
-    # Root uses the existing frozen-input budget and is excluded explicitly as a
-    # whole when oversized, rather than deleting coefficients or observations.
+    # Shared model/source histories compress better together. Preserve the
+    # existing per-model fallback and never truncate coefficients or facts.
     from .operational_edge_compaction import MARKET_CONTEXT_MAX_BYTES
     context.update(available=bool(context['families']), reason='LOCAL_HASHED_HISTORICAL_MARKET_MODELS')
-    freeze_context_models(context)
     if len(json.dumps(context, allow_nan=False, separators=(',', ':')).encode()) > MARKET_CONTEXT_MAX_BYTES:
-        context.update(families={},available=False,reason='MARKET_CONTEXT_EXCEEDS_SNAPSHOT_BUDGET'); return
+        packed = pack_market_context(context)
+        if packed is not context:
+            snapshot['edge_family_market_context'] = packed
+            return
+        freeze_context_models(context, force=True)
+        if len(json.dumps(context, allow_nan=False, separators=(',', ':')).encode()) > MARKET_CONTEXT_MAX_BYTES:
+            context.update(families={}, available=False, reason='MARKET_CONTEXT_EXCEEDS_SNAPSHOT_BUDGET')
 
 
 def market_family_evidence(snapshot, families):
