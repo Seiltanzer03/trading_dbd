@@ -1,4 +1,4 @@
-name: diagnose-ai-review-errors
+name: verify-ai-reconciliation-preflight
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,44 +8,84 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 8
+    timeout-minutes: 45
     steps:
       - uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 5m
+          command_timeout: 40m
           script: |
             cd /opt/seiltanzer
             PYTHONPATH=/opt/seiltanzer .venv/bin/python -B -u - <<'PY'
-            import collections,json,subprocess,time,urllib.request
-            print('AI_ERROR_DEPLOY',subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),flush=True)
-            raw=subprocess.run(['journalctl','-u','seiltanzer','--since','-8 hours','-n','6000','-o','cat','--no-pager'],capture_output=True,text=True,timeout=10).stdout
-            traces=[];errors=[];response_counts=collections.Counter()
-            for line in raw.splitlines():
-             try:value=json.loads(line)
-             except (ValueError,TypeError):continue
-             if not isinstance(value,dict) or not str(value.get('request_id','')).startswith('ai-') or 'stage' not in value:continue
-             allowed={'request_id','stage','event','elapsed_ms','duration_ms','exception_class','status_code','provider_reason','input_bytes','request_bytes','response_bytes','output_bytes','finish_reason'}
-             value={k:v for k,v in value.items() if k in allowed}
-             traces.append(value)
-             if value.get('stage')=='response':response_counts[value.get('status_code')]+=1
-             if 'exception_class' in value:errors.append(value)
-            print('AI_ERROR_RESPONSES',json.dumps(dict(response_counts)),flush=True)
-            for value in traces[-100:]:print('AI_ERROR_TRACE',json.dumps(value),flush=True)
-            for value in errors[-20:]:print('AI_ERROR_EXCEPTION',json.dumps(value),flush=True)
-            for i in range(3):
-             result={}
-             for route in ['/api/ai/snapshot/status','/api/position']:
+            import json,os,pathlib,sqlite3,subprocess,time,urllib.error,urllib.request
+            expected='99163f1c0e1333b0af41b6542771e71f2bafdc1f'
+            deadline=time.monotonic()+1500
+            while time.monotonic()<deadline:
+              installed=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+              fresh=False;ready=False;pid=None
+              if installed==expected:
+                try:
+                  pid=subprocess.check_output(['systemctl','show','seiltanzer','-p','MainPID','--value'],text=True).strip()
+                  boot=int(next(line.split()[1] for line in pathlib.Path('/proc/stat').read_text().splitlines() if line.startswith('btime ')))
+                  started=boot+int(pathlib.Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[19])/os.sysconf('SC_CLK_TCK')
+                  ref=subprocess.run(['git','symbolic-ref','-q','HEAD'],capture_output=True,text=True).stdout.strip() or 'HEAD'
+                  refpath=pathlib.Path(subprocess.check_output(['git','rev-parse','--git-path',ref],text=True).strip())
+                  clock=int(subprocess.check_output(['git','show','-s','--format=%ct',expected],text=True).strip())
+                  fresh=started>=max(clock,refpath.stat().st_mtime)
+                  if fresh:
+                    with urllib.request.urlopen('http://127.0.0.1:8790/api/state',timeout=3) as response:ready=response.status==200
+                  if ready:break
+                except Exception:pass
+              print('AI_PREFLIGHT_PROCESS_WAIT',json.dumps({'installed_expected_sha':installed==expected,'new_process':fresh,'http_ready':ready}),flush=True)
+              time.sleep(15)
+            else:raise RuntimeError('EXACT_NEW_PROCESS_NOT_READY')
+            def read(route,method='GET'):
               started=time.monotonic()
+              request=urllib.request.Request('http://127.0.0.1:8790'+route,method=method,data=b'' if method=='POST' else None)
+              try:response=urllib.request.urlopen(request,timeout=6)
+              except urllib.error.HTTPError as error:response=error
+              with response:
+                raw=response.read(4000001);assert len(raw)<=4000000;body=json.loads(raw)
+                return response.code,body,round(1000*(time.monotonic()-started),1)
+            code,before,_=read('/api/position');assert code==200
+            context=before.get('execution_reconciliation') or {}
+            if context.get('required') is not True:
+              print('AI_PREFLIGHT_SKIPPED',json.dumps({'reason':'NO_CURRENT_PENDING_EXECUTION','trade_id':before.get('trade_id'),'orders_or_ack_sent':False}),flush=True)
+              raise SystemExit(0)
+            trade=before['trade_id']
+            def counts():
+              connection=sqlite3.connect(pathlib.Path('/opt/seiltanzer/data/trades.db').as_uri()+'?mode=ro',uri=True,timeout=.05)
               try:
-               with urllib.request.urlopen('http://127.0.0.1:8790'+route,timeout=6) as response:value=json.load(response)
-               if 'position' in route:result['position']={'trade_id':value.get('trade_id'),'reconciliation':value.get('execution_reconciliation')}
-               else:result['snapshot']={k:value.get(k) for k in ('ready','building','age_sec','invalidated_reason','build_ms','build_started_at','build_n','last_error')}
-               result[route+'_ms']=round(1000*(time.monotonic()-started),1)
-              except Exception as error:result[route+'_error']=type(error).__name__
-             print('AI_ERROR_STATUS',json.dumps(result),flush=True)
-             if i<2:time.sleep(5)
-            print('AI_ERROR_DONE',json.dumps({'database_writes':False,'orders_or_ack_sent':False,'provider_calls':False}),flush=True)
+                connection.execute('PRAGMA query_only=ON');connection.execute('PRAGMA cache_size=-1024')
+                deadline=time.monotonic()+.25
+                connection.set_progress_handler(lambda:time.monotonic()>deadline,1000)
+                return {table:connection.execute('SELECT COUNT(*) FROM '+table+' WHERE trade_id=?',(trade,)).fetchone()[0] for table in ('ai_verdicts','management_decisions','llm_shadow_manual_actions')}
+              finally:connection.close()
+            original_counts=counts();samples=[];request_ids=[]
+            for index in range(3):
+              code,position,_=read('/api/position');assert code==200 and position.get('trade_id')==trade and position.get('execution_reconciliation')==context
+              code,body,latency=read('/api/ai/verdict',method='POST')
+              error=body.get('error') or {}
+              assert code==409 and error.get('code')=='broker_reconciliation_required' and error.get('retriable') is False
+              assert body.get('reconciliation')==context and 'verdict' not in body and 'review_job' not in body
+              request_ids.append(error['request_id'])
+              _,snapshot,_=read('/api/ai/snapshot/status')
+              row={'sample':index+1,'status':code,'error_code':error.get('code'),'ms':latency,'trade_id':trade,'snapshot_ready':snapshot.get('ready'),'snapshot_building':snapshot.get('building'),'snapshot_reason':snapshot.get('invalidated_reason')}
+              print('AI_PREFLIGHT_SAMPLE',json.dumps(row),flush=True);samples.append(row)
+              if index<2:time.sleep(3)
+            _,after,_=read('/api/position')
+            assert after.get('trade_id')==trade and after.get('execution_reconciliation')==context and counts()==original_counts
+            for field in ('remaining_position_fraction','realized_position_fraction'):
+              assert (before.get('position_state') or {}).get(field)==(after.get('position_state') or {}).get(field)
+            raw=subprocess.run(['journalctl','-u','seiltanzer','--since','-2 minutes','-n','500','-o','cat','--no-pager'],capture_output=True,text=True,timeout=10).stdout
+            stages={identity:[] for identity in request_ids}
+            for line in raw.splitlines():
+              try:value=json.loads(line)
+              except (ValueError,TypeError):continue
+              if isinstance(value,dict) and value.get('request_id') in stages:stages[value['request_id']].append(value.get('stage'))
+            assert all('response' in observed and 'route' not in observed and not any(str(stage).startswith('provider') for stage in observed) for observed in stages.values())
+            assert all(row['ms']<3000 for row in samples)
+            print('AI_PREFLIGHT_SUMMARY',json.dumps({'samples':len(samples),'max_ms':max(row['ms'] for row in samples),'trade_id':trade,'same_pending_commands':True,'review_command_counts_unchanged':True,'position_fractions_unchanged':True,'provider_not_admitted':True,'orders_or_ack_sent':False,'new_llm_report_claimed':False}),flush=True)
             PY
