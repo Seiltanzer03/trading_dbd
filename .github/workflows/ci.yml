@@ -19,6 +19,9 @@ jobs:
   test:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,9 +29,9 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install
-        run: pip install -e ".[dev]" "boto3>=1.36,<2" "paramiko>=3.3,<6"
+        run: pip install -e ".[dev]" "boto3>=1.36,<2" "paramiko>=3.3,<6" pytest-xdist==3.8.0
       - name: Run Python tests
-        run: pytest -q
+        run: pytest -q -n 2 --dist=loadfile
       - name: Verify real systemd history startup fence
         run: sudo /usr/bin/python3 scripts/history_service_fence_drill.py
       - name: Verify finite native history owner survives driver death
@@ -114,6 +117,7 @@ jobs:
           node tests/web/correlation_controls_webkit_e2e.mjs
           node tests/web/ai_management_decision_webkit_e2e.mjs
           node tests/web/universe_render_webkit_e2e.mjs
+          node tests/web/terminal_boot_webkit_e2e.mjs
 
   acceptance:
     runs-on: ubuntu-22.04

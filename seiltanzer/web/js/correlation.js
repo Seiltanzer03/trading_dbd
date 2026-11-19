@@ -24,6 +24,7 @@ let liveTickAt = 0;
 let unsubscribeTick = null;
 let generation = 0;
 let lastMatrixSig = null;
+let matrixLibraryRequest = null;
 let lastGraphSig = null;
 let graphObservedAt = 0;
 const positions = new Map();
@@ -136,7 +137,10 @@ export function linksForNetworkMode(links = [], mode = 'FULL') {
 }
 
 function setMode(mode) {
-  if (currentMode === mode) return;
+  if (currentMode === mode) {
+    if (mode === 'MATRIX') loadMatrixLibrary();
+    return;
+  }
   currentMode = mode;
   const networkButton = $('#btn-corr-network');
   const matrixButton = $('#btn-corr-matrix');
@@ -145,7 +149,33 @@ function setMode(mode) {
   networkButton?.setAttribute('aria-pressed', mode === 'NETWORK' ? 'true' : 'false');
   matrixButton?.setAttribute('aria-pressed', mode === 'MATRIX' ? 'true' : 'false');
   destroyRenderer();
-  renderCorrelation(true);
+  if (mode === 'MATRIX') loadMatrixLibrary();
+  else renderCorrelation(true);
+}
+
+function loadMatrixLibrary() {
+  if (window.echarts) {
+    renderMatrixChart(true);
+    return;
+  }
+  if (matrixLibraryRequest) return;
+  if (statusEl) statusEl.textContent = '○ ЗАГРУЗКА МАТРИЦЫ';
+  const script = document.createElement('script');
+  script.src = 'https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js';
+  matrixLibraryRequest = script;
+  const finish = (loaded) => {
+    if (matrixLibraryRequest !== script) return;
+    matrixLibraryRequest = null;
+    clearTimeout(timeout);
+    if (!loaded) script.remove();
+    if (currentMode !== 'MATRIX') return;
+    if (loaded) renderMatrixChart(true);
+    else if (statusEl) statusEl.textContent = '○ МАТРИЦА НЕДОСТУПНА · ПОВТОРИТЕ ЗАГРУЗКУ';
+  };
+  const timeout = setTimeout(() => finish(false), 8000);
+  script.onload = () => finish(Boolean(window.echarts));
+  script.onerror = () => finish(false);
+  document.head.appendChild(script);
 }
 
 function destroyRenderer() {

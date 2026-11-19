@@ -257,7 +257,12 @@ def test_fresh_live_state_rebuilds_after_journal_mutation(tmp_path):
     ]
     # A post-mutation generation may update position state, but an older state
     # response must never overwrite a newer WebSocket tick.
-    assert 'st.tick.ts >= S.tick.ts' in refresh_source
+    assert 'applyTerminalState(await response.json(), { afterEdit: true })' in refresh_source
+    apply_source = source[
+        source.index('function applyTerminalState('):
+        source.index('async function loadJournalWhileWaiting()')
+    ]
+    assert 'st.tick.ts >= S.tick.ts' in apply_source
 
 
 def test_failed_live_state_refresh_fails_closed_and_recovers(

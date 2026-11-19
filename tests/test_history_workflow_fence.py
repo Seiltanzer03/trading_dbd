@@ -92,6 +92,42 @@ def test_workflow_journal_guard_uses_actual_read_only_checker(tmp_path, workflow
     assert ('MUTATION_REACHED' in result.stdout) is idle
 
 
+@pytest.mark.parametrize('outcome,attempts,allowed', [
+    ('resolves', 2, True), ('still_invalid', 3, False),
+    ('active_after_check', 1, False), ('active_epoch', 1, False),
+])
+def test_deploy_repeats_bounded_read_before_only_authorized_mutation(tmp_path, outcome, attempts, allowed):
+    script = _first_ssh_script('deploy.yml')
+    end = script.index('\nfi', script.index(GUARD_ERROR)) + len('\nfi')
+    data = tmp_path/'data'
+    data.mkdir()
+    (data/'json-history.epoch.json').touch()
+    checker = tmp_path/'checker.py'
+    checker.write_text(textwrap.dedent(f'''\
+        import json
+        from pathlib import Path
+        data = Path({str(data)!r})
+        count = data/'calls'
+        n = int(count.read_text()) if count.exists() else 0
+        count.write_text(str(n+1))
+        outcome = {outcome!r}
+        if outcome == 'active_after_check':
+            (data/'cutover.active').touch()
+        if outcome == 'active_after_check' or (outcome == 'resolves' and n == 1):
+            raise SystemExit(0)
+        reason = 'ACTIVE_JSON_HISTORY_EPOCH' if outcome == 'active_epoch' else 'HOT_HISTORY_STATE_INVALID'
+        print(json.dumps(dict(start_allowed=False, reason=reason)))
+        raise SystemExit(1)
+    '''))
+    prefix = script[:end].replace('/opt/seiltanzer', str(tmp_path)).replace(
+        '/usr/local/lib/seiltanzer-history-start-guard.py', str(checker))
+    result = subprocess.run(['bash', '-c', prefix+'\necho MUTATION_REACHED'],
+                            capture_output=True, text=True, timeout=5)
+    assert int((data/'calls').read_text()) == attempts
+    assert result.returncode == (0 if allowed else 1), result.stderr
+    assert ('MUTATION_REACHED' in result.stdout) is allowed
+
+
 def test_health_does_not_dispatch_backup_rotation_for_a_guarded_cutover():
     source = (ROOT/'.github/workflows/production-health-recovery.yml').read_text()
     assert 'capture_stdout: true' in source

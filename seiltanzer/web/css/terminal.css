@@ -553,6 +553,13 @@ html, body {
   padding: 4px;
 }
 
+.terminal-loading {
+  color: var(--muted, #a9bdc9);
+  text-align: center;
+  font-size: 12px;
+  padding: 5px;
+}
+
 [data-tip] { cursor: help; }
 button[data-tip], a[data-tip] { cursor: pointer; }
 

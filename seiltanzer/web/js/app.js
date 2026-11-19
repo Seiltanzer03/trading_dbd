@@ -33,9 +33,6 @@ const fan = initFan($('#cone-fan'));
 const ivSurface = initIVSurface('#iv-surface-plot');
 initVrp();
 initGex();
-initCorrelation();
-initRegimePhase();
-initWavelet();
 
 const S = {
   tick: null,
@@ -59,24 +56,116 @@ setInterval(() => {
 
 // ------------------------------------------------------------------- boot
 
-async function boot() {
+let terminalStateReady = false;
+let journalReady = false;
+let analyticsStarted = false;
+
+async function fetchTerminalData(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const st = await (await fetch('/api/state')).json();
-    S.tick = st.tick;
-    S.instruments = st.instruments || {};
-    S.ridge = st.ridge;
-    S.setups = st.setups;
-    S.journal = st.journal;
-    S.edge_track = st.edge_track;
-    S.validation = st.validation;
-    S.aiHistory = st.ai_history || [];
-    S.aiHistoryTradeId = st.tick?.trade?.id ?? null;
-    renderAll();
-    void refreshValidationSummary();
-  } catch (e) {
-    console.error('state fetch failed', e);
+    return await fetchStructured(url, { signal: controller.signal, cache: 'no-store' });
+  } finally {
+    clearTimeout(timeout);
   }
+}
+
+function retryDelay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function applyTerminalState(st, { afterEdit = false } = {}) {
+  if (!st.tick?.account || !st.tick?.feeds || !Array.isArray(st.setups) || !Array.isArray(st.journal)) {
+    throw new Error('Неполный ответ терминала');
+  }
+  if (!journalReady || afterEdit) S.journal = st.journal;
+  journalReady = true;
+  S.setups = st.setups;
+  S.instruments = st.instruments || {};
+  S.ridge = st.ridge;
+  // The socket can deliver the next position while the older state is in flight.
+  if (!S.tick || st.tick.ts >= S.tick.ts) S.tick = st.tick;
+  if ((S.tick?.trade?.id ?? null) === (st.tick.trade?.id ?? null)) {
+    S.aiHistory = st.ai_history || [];
+    S.aiHistoryTradeId = st.tick.trade?.id ?? null;
+  }
+  S.edge_track = st.edge_track;
+  S.validation = st.validation;
+  terminalStateReady = true;
+  $('#terminal-loading').hidden = true;
+  $('#btn-add-hist').disabled = false;
+  renderAll();
+  void refreshValidationSummary();
+  loadAnalytics();
+}
+
+async function loadJournalWhileWaiting() {
+  let delay = 1000;
+  while (!journalReady) {
+    try {
+      const trades = await fetchTerminalData('/api/journal');
+      if (!Array.isArray(trades)) throw new Error('Неполный ответ журнала');
+      if (journalReady) return;
+      S.journal = trades;
+      journalReady = true;
+      renderJournal();
+      if (!S.tick) {
+        const trade = trades.find((row) => row.status === 'open');
+        if (trade) {
+          $('#hdr-setup').textContent = `СДЕЛКА №${trade.id} · ${trade.instrument} · `
+            + `ВХОД ${fmtPrice(trade.entry)} · СТОП ${fmtPrice(trade.stop)} · ТЕЙК ${fmtPrice(trade.take)}`;
+        }
+      }
+      $('#terminal-loading').textContent = 'Журнал загружен. Ожидание рыночных данных…';
+      loadAnalytics();
+    } catch (error) {
+      if (journalReady) return;
+      $('#journal-count').textContent = '· Ожидание связи';
+      if ([401, 403].includes(error.status)) return;
+      await retryDelay(delay);
+      delay = Math.min(delay * 2, 8000);
+    }
+  }
+}
+
+async function boot() {
   connectWS();
+  // Let the cached state win on a fast connection; the journal can still load
+  // on its own while analytics or the larger state payload are unavailable.
+  setTimeout(loadJournalWhileWaiting, 350);
+  let delay = 800;
+  while (!terminalStateReady) {
+    try {
+      const state = await fetchTerminalData('/api/state');
+      if (!terminalStateReady) applyTerminalState(state);
+    } catch (error) {
+      if (terminalStateReady) {
+        console.error('terminal render failed', error);
+        return;
+      }
+      if ([401, 403].includes(error.status)) {
+        $('#terminal-loading').textContent = 'Доступ к данным терминала ограничен.';
+        return;
+      }
+      if (!journalReady) $('#terminal-loading').textContent = 'Связь с сервером прервана. Повторяю загрузку…';
+      await retryDelay(delay);
+      delay = Math.min(delay * 2, 8000);
+    }
+  }
+}
+
+function loadAnalytics() {
+  if (analyticsStarted) return;
+  analyticsStarted = true;
+  initCorrelation();
+  const script = document.createElement('script');
+  script.src = '/static/vendor/plotly-gl3d.min.js';
+  script.addEventListener('load', () => {
+    initRegimePhase();
+    initWavelet();
+    if (S.tick) onTick(true);
+  }, { once: true });
+  document.head.appendChild(script);
 }
 
 async function refreshValidationSummary() {
@@ -119,7 +208,7 @@ function connectWS() {
   ws.onerror = (e) => { console.error('[seiltanzer] WS error', e); ws.close(); };
 }
 
-function onTick() {
+function onTick(redrawCharts = false) {
   renderHeader();
   renderVerdict();
   renderState();
@@ -158,15 +247,15 @@ function onTick() {
   const surface = selectIVSurface(S.tick?.iv_surface, S.tick?.bybit, ivSource?.value);
   const ivLabel = document.getElementById('iv-source-label');
   if (ivLabel) ivLabel.textContent = surface?.source || surface?.error || '';
-  ivSurface.render(surface?.production_authority === false ? null : S.tick?.state, surface);
+  ivSurface.render(surface?.production_authority === false ? null : S.tick?.state, surface, redrawCharts);
   updateBybitContext(S.tick?.bybit);
   updateCorrelation(S.tick?.correlation?.value);
 }
 
 function renderAll() {
-  onTick();
   renderJournal();
   renderSetupGrid();
+  onTick();
   renderEdgeTrack();
   ridge.setData(S.ridge, S.tick?.prob?.model_p);
   updateGex(S.ridge);
@@ -177,17 +266,7 @@ async function refreshJournalAndSetups() {
   // production probes stay on the pointer-only cached route.
   const response = await fetch('/api/state?fresh=true');
   if (!response.ok) throw new Error(`state refresh HTTP ${response.status}`);
-  const st = await response.json();
-  S.journal = st.journal;
-  S.setups = st.setups;
-  S.ridge = st.ridge;
-  // WebSocket is the canonical tick owner. This state build may have started
-  // before a newer WS tick and must never roll live price/position data back.
-  if (st.tick && (!S.tick || st.tick.ts >= S.tick.ts)) S.tick = st.tick;
-  S.edge_track = st.edge_track;
-  S.validation = st.validation;
-  renderAll();
-  void refreshValidationSummary();
+  applyTerminalState(await response.json(), { afterEdit: true });
 }
 
 async function maybeRefreshRidge() {
@@ -267,7 +346,7 @@ function renderHeader() {
     $('#hdr-setup').textContent = `НЕТ ОТКРЫТОЙ СДЕЛКИ · ИНСТРУМЕНТ ${t.instrument}`;
     $('#btn-close-trade').hidden = true;
     $('#btn-record-fill').hidden = true;
-    $('#btn-new-trade').disabled = false;
+    $('#btn-new-trade').disabled = !terminalStateReady;
   }
 
   const px = t.feeds.price;
@@ -1513,4 +1592,4 @@ $('#btn-add-hist').addEventListener('click', () => {
 
 $('#btn-lattice-reset').addEventListener('click', () => lattice.reset());
 
-boot();
+void boot();
