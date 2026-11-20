@@ -156,7 +156,7 @@ def build_decision_packet(full_input: dict, *, version: str | None = None) -> tu
             row['feature_provenance'] = _rows_table(row['feature_provenance'])
     aliases = {label: identity for identity, label in source_forward.items()}
     aliases.update({label: digest for digest, label in forward.items()})
-    packet['decision_packet_version'] = version or PACKET_VERSION
+    packet['decision_packet_version'] = PACKET_VERSION
     metrics = packet.get('decision_model_metrics')
     if isinstance(metrics, dict) and (version == METRIC_TABLE_PACKET_VERSION or (
             version is None and _wire_bytes(packet) > INDEPENDENT_INPUT_MAX_BYTES)):
@@ -164,6 +164,8 @@ def build_decision_packet(full_input: dict, *, version: str | None = None) -> tu
         if table is not metrics:
             packet['decision_model_metrics'] = table
             packet['decision_packet_version'] = METRIC_TABLE_PACKET_VERSION
+    if version == METRIC_TABLE_PACKET_VERSION and packet['decision_packet_version'] != version:
+        raise ValueError('packet version requires a decision metric table')
     return packet, aliases
 
 
@@ -199,7 +201,10 @@ def restore_decision_rows(packet: dict) -> dict:
     """Expose original clock paths to the unchanged timestamp/risk validator."""
     version = packet.get('decision_packet_version')
     metrics = packet.get('decision_model_metrics')
-    if version != METRIC_TABLE_PACKET_VERSION and isinstance(metrics, dict) and 'column_groups' in metrics:
+    metric_table = isinstance(metrics, dict) and 'column_groups' in metrics
+    if version == METRIC_TABLE_PACKET_VERSION and not metric_table:
+        raise ValueError('packet version requires a decision metric table')
+    if metric_table and version != METRIC_TABLE_PACKET_VERSION:
         raise ValueError('decision metric table requires its packet version')
     if 'decision_packet_version' not in packet:
         manager = packet.get('policy_manager') or {}

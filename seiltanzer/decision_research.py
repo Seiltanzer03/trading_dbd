@@ -42,8 +42,10 @@ def _finite(value: Any) -> float | None:
 def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
                                   tolerance_sec: float = 1.0) -> None:
     """Reject numeric source timestamps newer than the decision capture."""
-    from .ai_provider_decision_packet import INDEPENDENT_INPUT_MAX_BYTES, restore_decision_rows
+    from .ai_provider_decision_packet import (INDEPENDENT_INPUT_MAX_BYTES, METRIC_TABLE_PACKET_VERSION,
+                                               restore_decision_rows)
     from .option_metric_transport import is_encoded_option_state, unpack_option_state
+    has_metric_table = snapshot.get('decision_packet_version') == METRIC_TABLE_PACKET_VERSION
     snapshot = restore_decision_rows(snapshot)
     violations: list[str] = []
 
@@ -107,7 +109,9 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
             policy = value.get("policy", policy)
             for key, child in value.items():
                 child_path = (*path, str(key))
-                if (key == "ts" or key.endswith("_ts") or key.endswith("_at")):
+                metric_clock = (has_metric_table and len(path) == 2 and path[0] == 'decision_model_metrics'
+                                and key in ('asof', 't0'))
+                if key == "ts" or key.endswith("_ts") or key.endswith("_at") or metric_clock:
                     timestamp = _finite(child)
                     # Epoch-like values only. Durations and sample indices can
                     # also be named "ts" in third-party payloads.

@@ -135,15 +135,27 @@ def test_oversized_provider_packet_keeps_all_decision_metric_rows(monkeypatch):
     assert snapshot == before
 
 
-def test_metric_table_exposes_original_source_clock_to_validator():
+@pytest.mark.parametrize('clock', ['received_ts', 'asof', 't0'])
+def test_metric_table_exposes_original_source_clock_to_validator(clock):
     from seiltanzer.decision_research import validate_no_future_timestamps
 
     capture = 1_795_116_363.
     packet = {'decision_packet_version': 'independent-decision-packet-v2', 'captured_ts': capture,
               'decision_model_metrics': {'row_kind': 'mapping', 'column_groups': [
-                  {'columns': ['received_ts', 'value'], 'rows': {'metric': [capture+2, .1]}}]}}
-    with pytest.raises(ValueError, match=r'post-capture.*decision_model_metrics\.metric\.received_ts'):
+                  {'columns': [clock, 'value'], 'rows': {'metric': [capture+2, .1]}}]}}
+    with pytest.raises(ValueError, match=rf'post-capture.*decision_model_metrics\.metric\.{clock}'):
         validate_no_future_timestamps(packet, capture)
+
+
+@pytest.mark.parametrize('packet', [{}, {'decision_model_metrics': {'row_kind': 'mapping'}}])
+def test_metric_table_packet_version_requires_the_actual_table(packet):
+    from seiltanzer.ai_provider_decision_packet import (METRIC_TABLE_PACKET_VERSION,
+        build_decision_packet, restore_decision_rows)
+
+    with pytest.raises(ValueError, match='requires a decision metric table'):
+        restore_decision_rows({**packet, 'decision_packet_version': METRIC_TABLE_PACKET_VERSION})
+    with pytest.raises(ValueError, match='requires a decision metric table'):
+        build_decision_packet(packet, version=METRIC_TABLE_PACKET_VERSION)
 
 
 def test_provider_input_overflow_is_reported_as_local_preparation_failure():
