@@ -71,13 +71,6 @@ def select_candidate(candidates: list[ChainCandidate],
     )
 
 
-def _mid(bid, ask, last) -> np.ndarray:
-    return np.asarray(
-        np.where((bid > 0) & (ask > 0), (bid + ask) / 2.0, last),
-        dtype=float,
-    )
-
-
 def _raw_chain(ticker: Any, expiry: str, spot: float) -> dict:
     exp_dt = dt.datetime.strptime(expiry, "%Y-%m-%d").replace(
         hour=21, tzinfo=dt.timezone.utc)
@@ -91,16 +84,8 @@ def _raw_chain(ticker: Any, expiry: str, spot: float) -> dict:
         raise RuntimeError(f"слишком мало общих страйков: {len(merged)}")
     return {
         "strikes": merged["strike"].to_numpy(dtype=float),
-        "call_mid": _mid(
-            merged["bid_c"].fillna(0).to_numpy(),
-            merged["ask_c"].fillna(0).to_numpy(),
-            merged["lastPrice_c"].fillna(np.nan).to_numpy(),
-        ),
-        "put_mid": _mid(
-            merged["bid_p"].fillna(0).to_numpy(),
-            merged["ask_p"].fillna(0).to_numpy(),
-            merged["lastPrice_p"].fillna(np.nan).to_numpy(),
-        ),
+        "call_mid": opt.quoted_option_mid(merged["bid_c"], merged["ask_c"]),
+        "put_mid": opt.quoted_option_mid(merged["bid_p"], merged["ask_p"]),
         "call_oi": merged["openInterest_c"].fillna(0).to_numpy(dtype=float),
         "put_oi": merged["openInterest_p"].fillna(0).to_numpy(dtype=float),
         "call_iv": merged["impliedVolatility_c"].to_numpy(dtype=float),
@@ -202,6 +187,8 @@ def _adaptive_refresh_chain(self, status_dict) -> None:
             except Exception as exc:
                 scan_errors.append(f"{expiry}: {str(exc)[:100]}")
 
+        if not candidates and scan_errors:
+            raise ValueError("Нет валидных опционных экспираций. " + " | ".join(scan_errors[:3]))
         selected = select_candidate(candidates)
         selected.metrics["term"] = self._fetch_term(ticker, expiries, spot)
         selected.metrics["expiry_selection"] = {

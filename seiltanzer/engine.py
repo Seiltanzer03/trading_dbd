@@ -275,11 +275,16 @@ class Engine:
         try:
             import numpy as np
 
-            from .core.options import RNDensity, map_proxy_density
+            from .core.options import RNDensity, map_proxy_density, validate_market_density_center
             raw = RNDensity(
                 strikes=np.asarray(metrics["density"]["strikes"], dtype=float),
                 density=np.asarray(metrics["density"]["q"], dtype=float),
                 t_years=float(metrics["t_years"]))
+            if not self.market.demo:
+                source_spot = metrics.get("proxy_spot")
+                if source_spot is None:
+                    source_spot = metrics.get("spot")
+                validate_market_density_center(raw.strikes, raw.density, source_spot, raw.t_years)
             return map_proxy_density(
                 raw, proxy_spot, instrument_price,
                 self.market.instrument.proxy_transform)

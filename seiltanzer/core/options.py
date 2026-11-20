@@ -19,6 +19,16 @@ def _trapezoid(y, x):
         return fn(y, x)
     return np.trapz(y, x)
 
+
+def quoted_option_mid(bid, ask) -> np.ndarray:
+    """Use the reported two-sided quote and leave other prices missing."""
+    bid = np.asarray(bid, dtype=float)
+    ask = np.asarray(ask, dtype=float)
+    valid = np.isfinite(bid) & np.isfinite(ask) & (bid > 0) & (ask >= bid)
+    mids = np.full(bid.shape, np.nan)
+    mids[valid] = bid[valid] / 2.0 + ask[valid] / 2.0
+    return mids
+
 SQRT_2PI = math.sqrt(2.0 * math.pi)
 # Если суммарная BL-масса за двумя барьерами меньше 0.5%, их отношение слишком
 # чувствительно к одному плохому бесплатному mid и не должно якорить весь edge.
@@ -138,6 +148,34 @@ class RNDensity:
     def mean(self) -> float:
         """Математическое ожидание уровня под нормированной плотностью."""
         return float(_trapezoid(self.strikes * self.density, self.strikes))
+
+
+def validate_market_density_center(strikes, density, proxy_spot, t_years=None) -> None:
+    """Reject a materially displaced density under the feed's zero-carry model."""
+    unavailable = "OPTION_DENSITY_CENTER_UNAVAILABLE"
+    try:
+        k = np.asarray(strikes, dtype=float)
+        q = np.asarray(density, dtype=float)
+        spot = float(proxy_spot)
+        maturity = 0.0 if t_years is None else float(t_years)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(unavailable) from exc
+    if (k.ndim != 1 or q.shape != k.shape or k.size < 2
+            or not np.all(np.isfinite(k)) or not np.all(np.isfinite(q))
+            or k[0] <= 0 or not np.all(np.diff(k) > 0) or np.any(q < 0)
+            or not math.isfinite(spot) or spot <= 0
+            or not math.isfinite(maturity) or maturity < 0):
+        raise ValueError(unavailable)
+    area = float(_trapezoid(q, k))
+    if not math.isfinite(area) or area <= 0:
+        raise ValueError(unavailable)
+    mean = float(_trapezoid(k * (q / area), k))
+    if not math.isfinite(mean) or mean <= 0:
+        raise ValueError(unavailable)
+    # Allow truncated grid integration and a broad annual net carry allowance.
+    # Passing this check alone does not establish calibration or quote freshness.
+    if abs(math.log(mean) - math.log(spot)) > 0.05 + 0.10 * maturity:
+        raise ValueError("OPTION_DENSITY_CENTER_MISMATCH")
 
 
 def map_proxy_levels(levels, proxy_spot: float, instrument_spot: float,

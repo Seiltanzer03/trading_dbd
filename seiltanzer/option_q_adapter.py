@@ -12,7 +12,7 @@ import math
 from typing import Any, Dict, List, Optional
 import numpy as np
 
-from .core.options import _trapezoid
+from .core.options import _trapezoid, validate_market_density_center
 from .variance_clock import get_variance_clock_spec
 
 OPTION_Q_CONTRACT_VERSION = "option-q-contract-f32-v1"
@@ -168,6 +168,12 @@ def adapt_option_q_forecast(
         val_res = validate_and_transform_proxy_density(
             density_dict, proxy_spot, instrument_spot, proxy_transform=proxy_transform
         )
+        if val_res["valid"]:
+            try:
+                validate_market_density_center(density_dict["strikes"], density_dict["q"],
+                                               proxy_spot, t_years)
+            except ValueError as exc:
+                val_res = {"valid": False, "reason": str(exc)}
 
     if not val_res["valid"]:
         return {
@@ -179,6 +185,7 @@ def adapt_option_q_forecast(
             "horizon_kind": horizon_kind,
             "horizon_alignment_status": "unavailable",
             "horizon_alignment_method": "invalid_density",
+            "q_unavailable_reason": val_res["reason"],
             "quantiles_log_return": default_quantiles,
             "standardized_barriers": default_barriers,
             "q_evidence_tier": "unavailable",
