@@ -178,6 +178,7 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
 
 def observed_repriced_capture(snapshot: dict) -> tuple[float, float] | None:
     """Return the recorded live quote and R at the recorded review cutoff."""
+    from .real_input_integrity import FLAGS
     from .unified_edge_ensemble import _manual_candidate_preflight, number
 
     refresh = _at(snapshot, 'market_refresh', default={})
@@ -197,7 +198,7 @@ def observed_repriced_capture(snapshot: dict) -> tuple[float, float] | None:
     authority = quote.get('production_authority')
     if authority is not None and authority is not True:
         return None
-    for field in ('is_proxy', 'derived', 'demo', 'synthetic_data_used'):
+    for field in ('is_proxy', 'derived', *FLAGS):
         flag = quote.get(field)
         if flag is not None and flag is not False:
             return None
@@ -255,7 +256,7 @@ def canonical_snapshot(snapshot: dict) -> dict:
             or len(review_id) != len(review_prefix) + 10
             or any(char not in "0123456789abcdef" for char in review_id[-10:])):
         raise ValueError("decision snapshot review_id mismatch")
-    if _at(snapshot, 'market_refresh', 'available') is True:
+    if 'market_refresh' in snapshot:
         initial_price, initial_r = observed_repriced_capture(snapshot) or (None, None)
     else:
         initial_price = _finite(_at(snapshot, 'observation', 'exact_levels', 'current'))

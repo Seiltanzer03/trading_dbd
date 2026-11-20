@@ -274,7 +274,8 @@ def test_verified_repriced_capture_survives_without_presentation_observation():
 
 
 @pytest.mark.parametrize('failure', ['stale', 'future', 'not_authoritative', 'mismatched_r',
-    'declared_proxy', 'malformed_derived', 'nested_demo', 'malformed_state', 'malformed_source', 'string_geometry'])
+    'declared_proxy', 'malformed_derived', 'nested_demo', 'nested_synthetic',
+    'malformed_state', 'malformed_source', 'string_geometry', 'unavailable_refresh'])
 def test_invalid_repriced_anchor_uses_neither_old_presentation_nor_fake_path(failure):
     from seiltanzer.decision_research import canonical_snapshot
 
@@ -291,6 +292,10 @@ def test_invalid_repriced_anchor_uses_neither_old_presentation_nor_fake_path(fai
         quote['derived'] = 'true'
     elif failure == 'nested_demo':
         quote['demo'] = True
+    elif failure == 'nested_synthetic':
+        quote['synthetic'] = True
+    elif failure == 'unavailable_refresh':
+        value['market_refresh']['available'] = False
     elif failure == 'malformed_state':
         value['position_state'] = ['bad shape']
     elif failure == 'malformed_source':
