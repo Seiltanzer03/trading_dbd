@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: sp500-private-export-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   export-backup-slice:
@@ -90,10 +90,171 @@ jobs:
           PY_COLD_SCOPE
           )
           if [ "$catalog_status" = cold ]; then
-            python scripts/prepare_research_history.py \
-              --database "$SPY_WORK/trades.sqlite3" --manifest "$manifest" \
-              --destination "$SPY_WORK/research.sqlite3" --github-output "$GITHUB_OUTPUT"
-            echo "coverage_source=verified_hot_and_cold_history" >> "$GITHUB_OUTPUT"
+            cat > "$SPY_WORK/select_backup_rows.py" <<'PY_SELECT'
+          """Build a small, temporary SQLite input from the verified backup and retired rows."""
+          from concurrent.futures import ThreadPoolExecutor
+          from contextlib import closing
+          import json
+          from pathlib import Path
+          import sqlite3
+          import sys
+          
+          import boto3
+          from botocore.config import Config
+          
+          from scripts import sqlite_history_partition as archive
+          from scripts.history_storage_loader import history_state
+          from scripts.sqlite_history_union import MAX_CATALOG_BYTES, _catalog
+          
+          TABLE = "passive_market_observations"
+          START, END = 1788220800, 1793491200
+          REQUIRED = ("instrument", "observation_id", "anchor_group_id", "captured_ts",
+                      "market_price", "features_json")
+          COLUMNS = REQUIRED + (
+              "created_ts", "price_source", "price_kind", "price_age_sec", "price_quality",
+              "option_source", "option_age_sec", "option_quality", "option_kind", "session",
+              "observation_origin", "retrospective_replay",
+          )
+          FILTER = "instrument = ? AND captured_ts >= ? AND captured_ts < ?"
+          PARAMETERS = ("SP500", START, END)
+          QUOTED_TABLE = archive._quote(TABLE)
+          ALIASES = ("rowid", "_rowid_", "oid")
+          
+          
+          def signed_catalog(client, source, receipt):
+              manifest = receipt["storage_manifest"]
+              response = client.get_object(Bucket=manifest["cold_history_catalog_bucket"],
+                                           Key=manifest["cold_history_catalog_object_key"])
+              with closing(response["Body"]) as body:
+                  raw = body.read(MAX_CATALOG_BYTES + 1)
+              catalog, digest = _catalog(raw, receipt, archive._identity(source), allow_current_growth=True)
+              if "full_table_proofs" not in catalog:
+                  raise ValueError("Selective restore requires the complete catalog contract")
+              return catalog, digest
+          
+          
+          def plan_parts(catalog, retired):
+              remaining = set(retired)
+              planned = []
+              for receipt in catalog["partitions"]:
+                  part = receipt["partition"]
+                  if part["table"] != TABLE:
+                      continue
+                  ids = sorted(remaining.intersection(part["rowids"]))
+                  if ids:
+                      remaining.difference_update(ids)
+                      alias = part["source_rowid_alias"]
+                      if alias not in ALIASES:
+                          raise ValueError("Unrecognized archive rowid alias")
+                      planned.append((receipt, alias, ids))
+              if remaining:
+                  raise ValueError("The pinned catalog is missing retired passive observation rowids")
+              return planned
+          
+          
+          def copy_rows(selected, source, *, alias=None, ids=None):
+              selected.execute("ATTACH DATABASE ? AS upstream", (source.resolve().as_uri()+"?mode=ro&immutable=1",))
+              try:
+                  schema = {row[1] for row in selected.execute(f"PRAGMA upstream.table_xinfo({QUOTED_TABLE})")}
+                  if not set(REQUIRED) <= schema:
+                      raise ValueError("The source misses required passive observation columns")
+                  columns = ", ".join(archive._quote(key) for key in COLUMNS)
+                  expressions = ", ".join(archive._quote(key) if key in schema else "NULL" for key in COLUMNS)
+                  sql = f"INSERT INTO main.{QUOTED_TABLE} ({columns}) SELECT {expressions} FROM upstream.{QUOTED_TABLE} WHERE {FILTER}"
+                  args = PARAMETERS
+                  if ids:
+                      if alias not in ALIASES or alias in schema:
+                          raise ValueError("Ambiguous archive rowid alias")
+                      sql += f" AND {archive._quote(alias)} IN ({','.join('?' for _ in ids)})"
+                      args += tuple(ids)
+                  result = selected.execute(sql, args)
+                  selected.commit()
+                  return result.rowcount
+              finally:
+                  selected.rollback()
+                  selected.execute("DETACH DATABASE upstream")
+          
+          
+          def create_selection(directory, client, catalog_reader=signed_catalog,
+                               restore_archived=archive.restore_from_cloud):
+              source = directory / "trades.sqlite3"
+              receipt = json.loads((directory / "restore.json").read_text())
+              manifest = receipt["storage_manifest"]
+              identity = archive._identity(source)
+              if receipt.get("verified_local_file") != identity or receipt.get("immutable_sqlite_read") is not True:
+                  raise ValueError("Backup identity differs from its verified restore receipt")
+          
+              catalog, sha = catalog_reader(client, source, receipt)
+              with closing(sqlite3.connect(source.resolve().as_uri()+"?mode=ro&immutable=1", uri=True)) as hot:
+                  hot.execute("PRAGMA trusted_schema=OFF")
+                  hot.execute("PRAGMA query_only=ON")
+                  state = history_state.read_history_state(hot)
+                  if (state is None or state["catalog_sha256"] != sha
+                          or state["catalog_source_database_sha256"] != catalog["source_database_sha256"]):
+                      raise ValueError("Retired row ledger does not match the pinned cold catalog")
+                  retired = set(state["retired_rowids"].get(TABLE, []))
+                  needed = plan_parts(catalog, retired)
+                  for _, alias, ids in needed:
+                      binds = ",".join("?" for _ in ids)
+                      if hot.execute(f"SELECT 1 FROM {QUOTED_TABLE} WHERE {archive._quote(alias)} IN ({binds}) LIMIT 1", ids).fetchone():
+                          raise ValueError("A retired cold rowid also appears in the verified hot backup")
+          
+              target = directory / "sp500-selected.sqlite3"
+              if target.exists():
+                  raise FileExistsError(target)
+              columns = ", ".join(archive._quote(column) + (
+                  " TEXT PRIMARY KEY NOT NULL" if column == "observation_id" else ""
+              ) for column in COLUMNS)
+              cold_rows = 0
+          
+              def fetch(item):
+                  ordinal, (partition, alias, ids) = item
+                  path = directory / f"passive-part-{ordinal}.sqlite3"
+                  proof = restore_archived(client, partition, path)
+                  if proof.get("typed_values_verified") is not True:
+                      raise ValueError("Cold partition restore missed its typed-row proof")
+                  return path, alias, ids
+          
+              print(f"Verified retired passive row ledger. Relevant archive parts: {len(needed)}", flush=True)
+              with closing(sqlite3.connect(target, uri=True)) as selected:
+                  selected.execute("PRAGMA trusted_schema=OFF")
+                  selected.execute(f"CREATE TABLE {QUOTED_TABLE} ({columns})")
+                  hot_rows = copy_rows(selected, source)
+                  listed = list(enumerate(needed))
+                  with ThreadPoolExecutor(max_workers=4) as workers:
+                      for start in range(0, len(listed), 4):
+                          restored = list(workers.map(fetch, listed[start:start+4]))
+                          for path, alias, ids in restored:
+                              cold_rows += copy_rows(selected, path, alias=alias, ids=ids)
+                              path.unlink()
+                          if start % 20 == 0:
+                              print(f"Verified archive parts {min(start+4,len(needed))}/{len(needed)}", flush=True)
+                  count = selected.execute(f"SELECT COUNT(*) FROM {QUOTED_TABLE}").fetchone()[0]
+                  if count != hot_rows + cold_rows:
+                      raise ValueError("Extracted row count disagrees with its audited sources")
+              if archive._identity(source) != identity:
+                  raise ValueError("The immutable backup changed during selection")
+              audit = {
+                  "table": TABLE, "instrument": "SP500", "retired_rowids_covered": len(retired),
+                  "cold_partitions_verified": len(needed), "hot_rows_in_window": hot_rows,
+                  "cold_rows_in_window": cold_rows, "catalog_sha256": sha,
+                  "backup_manifest_database_sha256": manifest["database_sha256"],
+              }
+              (directory / "selection.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
+              return target
+          
+          
+          if __name__ == "__main__":
+              directory = Path(sys.argv[1])
+              sink = Path(sys.argv[2])
+              boto = boto3.client("s3", endpoint_url="https://storage.yandexcloud.net", region_name="ru-central1",
+                                  config=Config(connect_timeout=10, read_timeout=120, max_pool_connections=8,
+                                                retries={"max_attempts": 2}))
+              data_path = create_selection(directory, boto)
+              with sink.open("a", encoding="utf-8") as f:
+                  f.write(f"database={data_path}\ncoverage_source=verified_hot_and_cold_history\n")
+          PY_SELECT
+            PYTHONPATH="$GITHUB_WORKSPACE" python "$SPY_WORK/select_backup_rows.py" "$SPY_WORK" "$GITHUB_OUTPUT"
           else
             echo "database=$SPY_WORK/trades.sqlite3" >> "$GITHUB_OUTPUT"
             echo "coverage_source=verified_backup" >> "$GITHUB_OUTPUT"
@@ -522,6 +683,10 @@ jobs:
                   "snapshot_database_sha256": manifest["database_sha256"],
                   "snapshot_git_commit": manifest.get("git_commit"),
                   "snapshot_completed_ts": manifest.get("completed_ts"),
+                  "selection": (
+                      json.loads((directory / "selection.json").read_text())
+                      if (directory / "selection.json").is_file() else None
+                  ),
                   "cold_catalog_verified": scope == "verified_hot_and_cold_history",
                   "source_database_writes": 0
               }, indent=2))
