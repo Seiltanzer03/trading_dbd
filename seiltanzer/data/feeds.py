@@ -1533,18 +1533,10 @@ class MarketData:
             if len(merged) < 5:
                 raise RuntimeError(f"слишком мало страйков: {len(merged)}")
 
-            def mid(bid, ask, last):
-                m = np.where((bid > 0) & (ask > 0), (bid + ask) / 2.0, last)
-                return np.asarray(m, dtype=float)
-
             raw = {
                 "strikes": merged["strike"].to_numpy(dtype=float),
-                "call_mid": mid(merged["bid_c"].fillna(0).to_numpy(),
-                                merged["ask_c"].fillna(0).to_numpy(),
-                                merged["lastPrice_c"].fillna(np.nan).to_numpy()),
-                "put_mid": mid(merged["bid_p"].fillna(0).to_numpy(),
-                               merged["ask_p"].fillna(0).to_numpy(),
-                               merged["lastPrice_p"].fillna(np.nan).to_numpy()),
+                "call_mid": opt.quoted_option_mid(merged["bid_c"], merged["ask_c"]),
+                "put_mid": opt.quoted_option_mid(merged["bid_p"], merged["ask_p"]),
                 "call_oi": merged["openInterest_c"].fillna(0).to_numpy(dtype=float),
                 "put_oi": merged["openInterest_p"].fillna(0).to_numpy(dtype=float),
                 "call_iv": merged["impliedVolatility_c"].to_numpy(dtype=float),
@@ -1598,6 +1590,8 @@ class MarketData:
                 "ATM straddle дал неправдоподобный implied move; "
                 "цепочка отклонена как повреждённая")
         density = opt.bl_density(raw["strikes"], raw["call_mid"], raw["t_years"])
+        if not demo:
+            opt.validate_market_density_center(density.strikes, density.density, spot, raw["t_years"])
         gex = opt.gex_profile(raw["strikes"], raw["call_oi"], raw["put_oi"],
                               raw["call_iv"], raw["put_iv"], spot, raw["t_years"])
         skew = opt.risk_reversal_skew(raw["strikes"], raw["call_iv"],

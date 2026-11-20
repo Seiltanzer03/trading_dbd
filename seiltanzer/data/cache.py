@@ -29,7 +29,23 @@ def production_chain_snapshot(snapshot: object) -> bool:
     mode = str(
         density_input.get("mode") if isinstance(density_input, dict) else ""
     ).lower()
-    return "demo" not in mode and "synthetic" not in mode
+    if "demo" in mode or "synthetic" in mode:
+        return False
+    density = snapshot.get("density")
+    if density is not None:
+        from ..core.options import validate_market_density_center
+
+        if not isinstance(density, dict):
+            return False
+        spot = snapshot.get("proxy_spot")
+        if spot is None:
+            spot = snapshot.get("spot")
+        try:
+            validate_market_density_center(density.get("strikes"), density.get("q"), spot,
+                                           snapshot.get("t_years"))
+        except ValueError:
+            return False
+    return True
 
 
 class DiskCache:
