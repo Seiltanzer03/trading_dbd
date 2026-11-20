@@ -1,4 +1,4 @@
-name: verify-installed-provider-packet
+name: inspect-nas100-capture-path-anchor
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  compare:
+  inspect:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
@@ -21,88 +21,47 @@ jobs:
             cd /opt/seiltanzer
             test "$(git rev-parse HEAD)" = '64e026904861266f713402dee1b2f05310f1365f'
             .venv/bin/python -B -u - <<'PY'
-            import contextlib
+            from contextlib import closing
             import hashlib
             import json
-            import re
             import sqlite3
-            import urllib.request
 
-            from seiltanzer.ai_provider_decision_packet import (INDEPENDENT_INPUT_MAX_BYTES, PACKET_VERSION,
-                build_decision_packet, restore_decision_rows)
-            from seiltanzer.ai_provider_guard import compact_provider_snapshot
-            from seiltanzer.ai_runtime_report_v20 import _provider_decision_inputs
-            from seiltanzer.decision_research import validate_no_future_timestamps
-            from scripts.run_unified_edge_comparison import observed_replay
+            from seiltanzer.decision_research import canonical_snapshot
+            from seiltanzer.unified_edge_ensemble import _manual_candidate_preflight
 
             origin = 1795116363.2902696
-            with contextlib.closing(sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True, timeout=2.)) as db:
+            with closing(sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=2)) as db:
+                db.row_factory=sqlite3.Row
                 db.execute('PRAGMA query_only=ON')
-                ids = db.execute("SELECT id FROM trades WHERE instrument='NAS100' ORDER BY id DESC LIMIT 12").fetchall()
-                matching = []
-                for (trade_id,) in ids:
-                    rows = db.execute('SELECT review_id,captured_ts,snapshot_json,snapshot_sha256 FROM decision_snapshots WHERE trade_id=? AND captured_ts BETWEEN ? AND ? AND length(snapshot_json)<=2000000 ORDER BY captured_ts LIMIT 8', (trade_id, origin - 2, origin + 180)).fetchall()
-                    for review_id, captured, raw, digest in rows:
-                        snapshot = json.loads(raw)
-                        clock = (snapshot.get('market_refresh') or {}).get('original_snapshot_ts') or captured
-                        if abs(clock - origin) < .1:
-                            assert hashlib.sha256(raw.encode()).hexdigest() == digest
-                            matching.append((review_id, snapshot))
-                assert len(matching) == 1
-                review_id, snapshot = matching[0]
-                db.row_factory = sqlite3.Row
-                captured = snapshot['captured_ts']
-                horizon = ((snapshot.get('policy_manager') or {}).get('inputs') or {}).get('horizon_minutes')
-                endpoint = captured + 60 * horizon if isinstance(horizon, (int, float)) and horizon > 0 else None
-                if endpoint is None:
-                    points = []
-                else:
-                    points = [dict(row) for row in db.execute('SELECT ts,price,r FROM decision_path_points WHERE review_id=? AND ts>=? AND ts<=? ORDER BY ts LIMIT 6001', (review_id, captured, endpoint))]
-                    if len(points) <= 6000 and (not points or points[-1]['ts'] < endpoint):
-                        after = db.execute('SELECT ts,price,r FROM decision_path_points WHERE review_id=? AND ts>? ORDER BY ts LIMIT 1', (review_id, endpoint)).fetchone()
-                        if after is not None:
-                            points.append(dict(after))
-                saved_replay = db.execute('SELECT resolution_kind,replay_json FROM decision_replays WHERE review_id=? AND length(replay_json)<=2000000', (review_id,)).fetchone()
-                archive = {'path_points': points[:6000], 'path_truncated': len(points)>6000,
-                           'stored_replay': dict(saved_replay) if saved_replay else None}
-            serialize = lambda x: json.dumps(x, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
-            wire, full, aliases = _provider_decision_inputs(compact_provider_snapshot(snapshot), snapshot)
-            baseline, baseline_aliases = build_decision_packet(full, version=PACKET_VERSION)
-            original_json, fixed_json = serialize(baseline), serialize(wire)
-            original_size, fixed_size = (len(value.encode('utf-8')) for value in (original_json, fixed_json))
-            assert original_size > INDEPENDENT_INPUT_MAX_BYTES >= fixed_size
-            decoded = json.loads(fixed_json)
-            restored = restore_decision_rows(decoded)
-            assert restored == restore_decision_rows(json.loads(original_json)) and aliases == baseline_aliases
-            validate_no_future_timestamps(decoded, snapshot['captured_ts'])
-            print('INSTALLED_NAS_PROVIDER_PACKET=' + json.dumps(dict(installed_sha='64e026904861266f713402dee1b2f05310f1365f',
-                archive_sha=snapshot.get('runtime_code_sha'), wire_version=wire['decision_packet_version'],
-                v1_bytes=original_size, v2_bytes=fixed_size, limit=INDEPENDENT_INPUT_MAX_BYTES,
-                metric_count=len(restored['decision_model_metrics']), recovered_all_packet_fields=True,
-                network_provider_calls=0)), flush=True)
-
-            entry = (snapshot.get('trade_geometry') or {}).get('entry')
-            move = next((row for row in snapshot.get('active_management_candidates') or []
-                        if row.get('policy')=='MOVE_TO_BE' and entry is not None
-                        and (row.get('parameters') or {}).get('stop_price')==entry), None)
-            policies = ('HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT', 'MOVE_TO_BE')
-            comparisons = {name: observed_replay(snapshot, archive, move if name=='MOVE_TO_BE' else
-                           {'policy': name, 'candidate_id': name, 'parameters': {}}) for name in policies}
-            print('NAS_SIX_ACTION_PATH_COVERAGE=' + json.dumps(dict(
-                observed_points=len(archive['path_points']),
-                available=[name for name,row in comparisons.items() if row['available']],
-                missing={name:row['reason'] for name,row in comparisons.items() if not row['available']},
-                assumed_costs=any(row.get('costs_assumed') for row in comparisons.values()),
-                ledger_settled_profit_proven=False)), flush=True)
-
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status', timeout=5) as response:
-                raw = response.read(150001)
-            assert len(raw)<=150000
-            status = json.loads(raw)
-            receipt = status.get('family_market_forecasts') or {}
-            error = status.get('last_error') or ''
-            controlled = re.fullmatch(r'(?:RuntimeError|ValueError):([A-Z][A-Z0-9_]{4,80})', error)
-            print('INSTALLED_CURRENT_SNAPSHOT=' + json.dumps(dict(active=status.get('current_trade_id') is not None,
-                ready=status.get('ready'), instrument=status.get('current_instrument'), invalidation=status.get('invalidated_reason'),
-                public_reason=controlled.group(1) if controlled else None, forecasts=receipt.get('available_forecasts_at_capture'))), flush=True)
+                rows=[]
+                for trade in db.execute("SELECT id FROM trades WHERE instrument='NAS100' ORDER BY id DESC LIMIT 12").fetchall():
+                    rows += db.execute('SELECT review_id,captured_ts,snapshot_json,snapshot_sha256 FROM decision_snapshots '
+                        'WHERE trade_id=? AND captured_ts BETWEEN ? AND ? AND length(snapshot_json)<=2000000 '
+                        'ORDER BY captured_ts LIMIT 8',(trade['id'],origin-2,origin+180)).fetchall()
+                found=[]
+                for row in rows:
+                    snap=json.loads(row['snapshot_json'])
+                    actual=(snap.get('market_refresh') or {}).get('original_snapshot_ts') or row['captured_ts']
+                    if abs(actual-origin)<.1:
+                        assert hashlib.sha256(row['snapshot_json'].encode()).hexdigest()==row['snapshot_sha256']
+                        found.append((row,snap))
+                assert len(found)==1
+                row,snap=found[0]
+                first=db.execute('SELECT ts,r FROM decision_path_points WHERE review_id=? ORDER BY ts LIMIT 1',(row['review_id'],)).fetchone()
+                canonical=canonical_snapshot(snap)
+                ref=snap.get('market_refresh') or {}
+                manager=snap.get('policy_manager') or {}
+                quote=(((manager.get('input_audit') or {}).get('rows') or {}).get('instrument_price') or {})
+                geometry=snap.get('trade_geometry') or {}
+                inputs=manager.get('inputs') or {}
+                print('NAS_CAPTURE_PATH_ANCHOR=' + json.dumps(dict(
+                    observation_r_present=canonical['initial_r'] is not None,
+                    first_point_at_capture=first is not None and first['ts']==row['captured_ts'],
+                    first_point_lag_sec=round(first['ts']-row['captured_ts'],3) if first is not None else None,
+                    first_point_matches_frozen_r=first is not None and abs(first['r']-inputs['r0'])<=1e-4,
+                    repriced=ref.get('available') is True, quote_matches_geometry=quote.get('value')==geometry.get('current'),
+                    same_authoritative_price_clock=quote.get('timestamp')==ref.get('actual_provider_timestamp'),
+                    economics_r_matches_geometry=inputs.get('r0')==geometry.get('current_r'),
+                    real_quote_passed_preflight=_manual_candidate_preflight(snap),
+                    original_compaction=(snap.get('snapshot_budget') or {}).get('degrade_level'))),flush=True)
             PY
