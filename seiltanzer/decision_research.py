@@ -176,6 +176,59 @@ def validate_no_future_timestamps(snapshot: dict, captured_ts: float,
             + ", ".join(violations[:8]))
 
 
+def observed_repriced_capture(snapshot: dict) -> tuple[float, float] | None:
+    """Return the recorded live quote and R at the recorded review cutoff."""
+    from .real_input_integrity import FLAGS
+    from .unified_edge_ensemble import _manual_candidate_preflight, number
+
+    refresh = _at(snapshot, 'market_refresh', default={})
+    if (not isinstance(refresh, dict) or refresh.get('available') is not True
+            or refresh.get('version') != 'cached-comparison-market-refresh-v1'):
+        return None
+    manager = snapshot.get('policy_manager')
+    audit = _at(manager, 'input_audit', default={})
+    rows = _at(audit, 'rows', default={})
+    quote = _at(rows, 'instrument_price', default={})
+    geometry = snapshot.get('trade_geometry')
+    strategy = snapshot.get('strategy')
+    decision = _at(manager, 'management_decision')
+    if not all(isinstance(value, dict) for value in (manager, audit, rows, quote, geometry,
+            strategy, decision, snapshot.get('position_state'))):
+        return None
+    authority = quote.get('production_authority')
+    if authority is not None and authority is not True:
+        return None
+    for field in ('is_proxy', 'derived', *FLAGS):
+        flag = quote.get(field)
+        if flag is not None and flag is not False:
+            return None
+    if (not isinstance(quote.get('source'), str)
+            or not isinstance(strategy.get('instrument') or snapshot.get('instrument'), str)):
+        return None
+    levels = [geometry.get(key) for key in ('entry', 'original_stop', 'current',
+                                            'active_risk_barrier', 'final_take')]
+    if any(type(value) not in (int, float) or number(value) is None for value in levels):
+        return None
+    # Check the configured native source even when the archived row has an
+    # authority flag, as the live comparison does before it records the quote.
+    native_quote = {key: value for key, value in quote.items() if key != 'production_authority'}
+    native_audit = {**audit, 'rows': {**rows, 'instrument_price': native_quote}}
+    if not _manual_candidate_preflight({**snapshot, 'policy_manager': {**manager, 'input_audit': native_audit}}):
+        return None
+    captured, clock, prior = (number(value) for value in (snapshot.get('captured_ts'),
+        refresh.get('actual_provider_timestamp'), refresh.get('original_snapshot_ts')))
+    if (captured is None or clock is None or prior is None or not 0 < prior <= captured
+            or clock != number(quote.get('timestamp')) or not 0 < clock <= captured or captured-clock > 30):
+        return None
+    entry, stop, current, _, _ = levels
+    if current != number(quote.get('value')):
+        return None
+    r = (current-entry) / (entry-stop)
+    if (r != number(geometry.get('current_r')) or r != number(_at(manager, 'inputs', 'r0'))):
+        return None
+    return current, r
+
+
 def canonical_snapshot(snapshot: dict) -> dict:
     captured = _finite(snapshot.get("captured_ts"))
     trade_id = snapshot.get("trade_id")
@@ -186,7 +239,7 @@ def canonical_snapshot(snapshot: dict) -> dict:
     decision = (snapshot.get("effective_management_decision")
                 or manager.get("management_decision") or {})
     production = (
-        decision.get("policy")
+        _at(decision, "policy")
         or _at(manager, "recommendation", "policy")
         or "HOLD"
     )
@@ -203,6 +256,11 @@ def canonical_snapshot(snapshot: dict) -> dict:
             or len(review_id) != len(review_prefix) + 10
             or any(char not in "0123456789abcdef" for char in review_id[-10:])):
         raise ValueError("decision snapshot review_id mismatch")
+    if 'market_refresh' in snapshot:
+        initial_price, initial_r = observed_repriced_capture(snapshot) or (None, None)
+    else:
+        initial_price = _finite(_at(snapshot, 'observation', 'exact_levels', 'current'))
+        initial_r = _finite(_at(snapshot, 'observation', 'position', 'r'))
     return {
         "schema_version": DECISION_SCHEMA_VERSION,
         "review_id": review_id, "trade_id": int(trade_id),
@@ -220,8 +278,8 @@ def canonical_snapshot(snapshot: dict) -> dict:
             _at(manager, "derived_scenario_ensemble", "version") or "production-base"),
         "feature_contract_version": "phase-f-feature-contract-v1",
         "simulation_seed": _finite(_at(manager, "policies", "HOLD", "monte_carlo", "seed")),
-        "initial_price": _finite(_at(snapshot, "observation", "exact_levels", "current")),
-        "initial_r": _finite(_at(snapshot, "observation", "position", "r")),
+        "initial_price": initial_price,
+        "initial_r": initial_r,
     }
 
 

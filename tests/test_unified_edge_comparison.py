@@ -243,6 +243,83 @@ def test_immediate_exit_requires_measured_capture_but_not_future_continuation():
     assert observed_replay(value, source, choice('EXIT'))['available'] is False
 
 
+def _repriced_archive():
+    value = frozen()
+    captured = value['captured_ts']
+    value['trade_geometry']['current_r'] = 1.
+    manager = value['policy_manager']
+    manager['management_decision'] = {'policy': 'HOLD', 'automatic_execution_allowed': False}
+    quote = dict(value=110., timestamp=captured-2, status='live', available=True,
+                 source='TradingView stream OANDA:NAS100USD', production_authority=True)
+    manager['input_audit'] = {'rows': {'instrument_price': quote}}
+    value['market_refresh'] = {'version': 'cached-comparison-market-refresh-v1', 'available': True,
+                               'original_snapshot_ts': captured-10, 'actual_provider_timestamp': captured-2}
+    return value, quote
+
+
+def test_verified_repriced_capture_survives_without_presentation_observation():
+    from seiltanzer.decision_research import canonical_snapshot
+
+    value, _ = _repriced_archive()
+    assert 'observation' not in value
+    t0 = value['captured_ts']
+    source = record(value, [{'ts': t0+3, 'r': .9}, {'ts': t0+14400, 'r': -.8}])
+    keyed = deepcopy((value, source))
+    canonical = canonical_snapshot(value)
+    assert (canonical['initial_price'], canonical['initial_r']) == (110., 1.)
+    replay = observed_replay(value, source, choice('MOVE_TO_BE', stop_price=100.))
+    assert replay['available'] is True
+    assert replay['capture_basis'] == 'frozen_repriced_authoritative_quote'
+    assert (value, source) == keyed
+
+
+@pytest.mark.parametrize('failure', ['stale', 'future', 'not_authoritative', 'mismatched_r',
+    'declared_proxy', 'malformed_derived', 'nested_demo', 'nested_synthetic',
+    'malformed_state', 'malformed_source', 'string_geometry', 'unavailable_refresh'])
+def test_invalid_repriced_anchor_uses_neither_old_presentation_nor_fake_path(failure):
+    from seiltanzer.decision_research import canonical_snapshot
+
+    value, quote = _repriced_archive()
+    t0 = value['captured_ts']
+    value['observation'] = {'position': {'r': .9}, 'exact_levels': {'current': 109.}}
+    if failure == 'not_authoritative':
+        quote['production_authority'] = False
+    elif failure == 'mismatched_r':
+        value['policy_manager']['inputs']['r0'] = .8
+    elif failure == 'declared_proxy':
+        quote['is_proxy'] = True
+    elif failure == 'malformed_derived':
+        quote['derived'] = 'true'
+    elif failure == 'nested_demo':
+        quote['demo'] = True
+    elif failure == 'nested_synthetic':
+        quote['synthetic'] = True
+    elif failure == 'unavailable_refresh':
+        value['market_refresh']['available'] = False
+    elif failure == 'malformed_state':
+        value['position_state'] = ['bad shape']
+    elif failure == 'malformed_source':
+        quote['source'] = ['bad shape']
+    elif failure == 'string_geometry':
+        quote['value'] = 131.
+        value['trade_geometry'].update(current='131', current_r=3.1)
+        value['policy_manager']['inputs']['r0'] = 3.1
+    else:
+        quote['timestamp'] = t0-31 if failure == 'stale' else t0+1
+        value['market_refresh']['actual_provider_timestamp'] = quote['timestamp']
+    canonical = canonical_snapshot(value)
+    assert canonical['initial_r'] is None and canonical['initial_price'] is None
+    source = record(value, [{'ts': t0+3, 'r': .9}])
+    assert observed_replay(value, source, choice('EXIT'))['available'] is False
+
+
+def test_invalid_exact_path_point_cannot_be_replaced_by_authoritative_archive_quote():
+    value, _ = _repriced_archive()
+    t0 = value['captured_ts']
+    source = record(value, [{'ts': t0, 'r': 'nan'}, {'ts': t0+3, 'r': .9}])
+    assert observed_replay(value, source, choice('EXIT'))['available'] is False
+
+
 def test_truncated_observed_sequence_preserves_be_arm_then_reversal():
     value = frozen()
     value['policy_manager']['inputs'].update(horizon_minutes=7200., rungs=[], be_after=1.5)
