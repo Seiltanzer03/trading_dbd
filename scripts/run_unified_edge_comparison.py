@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 from dataclasses import replace
 import hashlib
 import json
@@ -216,7 +217,7 @@ def observed_replay(snapshot, record, candidate):
             'ledger_settled_profit_available': False, 'causal_profit_claim': False}
 
 
-def compare_review(record):
+def frozen_review_snapshot(record):
     if not isinstance(record.get('review_id'), str) or not record['review_id'].strip():
         raise ValueError('INVALID_REVIEW_ID; requires a nonempty string')
     raw = record['snapshot_json']
@@ -230,6 +231,34 @@ def compare_review(record):
     if snapshot.get('demo'):
         raise ValueError('SYNTHETIC_DEMO_NOT_ACTUAL_REVIEW')
     validate_no_future_timestamps(snapshot, captured)
+    return snapshot
+
+
+def observed_management_policies(snapshot, replay):
+    policies = {
+        policy: replay({'candidate_id': policy, 'policy': policy, 'parameters': {}})
+        for policy in BASE_FRACTIONS
+    }
+    manager = snapshot.get('policy_manager') or {}
+    entry = number((snapshot.get('trade_geometry') or {}).get('entry'))
+    if (manager.get('inputs') or {}).get('be_execution_confirmed') is True:
+        policies['MOVE_TO_BE'] = unavailable('BREAK_EVEN_ALREADY_CONFIRMED')
+    elif entry is None:
+        policies['MOVE_TO_BE'] = unavailable('TRADE_GEOMETRY_UNAVAILABLE')
+    else:
+        parameters = {'stop_price': entry}
+        policies['MOVE_TO_BE'] = replay({
+            'candidate_id': candidate_id('MOVE_TO_BE', parameters),
+            'policy': 'MOVE_TO_BE',
+            'parameters': parameters,
+        })
+    return policies
+
+
+def compare_review(record):
+    snapshot = frozen_review_snapshot(record)
+    captured = number(snapshot['captured_ts'])
+    digest = record['snapshot_sha256']
     llm = snapshot.get('llm_shadow_decision')
     # Old shadow contracts knew the quant decision. They are an anchored opinion,
     # never retroactively described as an independent experiment or fresh call.
@@ -252,13 +281,23 @@ def compare_review(record):
     anchored = bool(isinstance(llm, dict) and not independent_llm)
     audit = build_unified_ensemble(snapshot, llm)
     by_id = {row['candidate_id']: row for row in audit['candidates']}
+    replays = {}
+
+    def replay(candidate):
+        if candidate is None:
+            return unavailable('SELECTED_CANDIDATE_UNAVAILABLE')
+        identity = candidate['candidate_id']
+        if identity not in replays:
+            replays[identity] = observed_replay(snapshot, record, candidate)
+        return replays[identity]
+
     schemes = {}
     for choice in audit['scheme_comparisons']:
         if choice['scheme'] == 'legacy_control':
             continue
         selected = by_id.get(choice['selected_candidate_id'])
         schemes[choice['scheme']] = {'selection': choice,
-            'observed_path': observed_replay(snapshot, record, selected)}
+             'observed_path': replay(selected)}
     decision = snapshot.get('effective_management_decision') or (snapshot.get('policy_manager') or {}).get('management_decision') or {}
     legacy_policy = record.get('production_policy')
     parameters = decision.get('parameters') or {}
@@ -275,10 +314,11 @@ def compare_review(record):
         'delta_expected_r': legacy_expected - hold_expected if legacy_expected is not None and hold_expected is not None else None,
         'cvar10_net_r': number((legacy_row or {}).get('cvar10_net_r')),
         'evidence_type': 'STORED_PRODUCTION_CHOICE_REPRICED_IN_CURRENT_MODEL'},
-        'observed_path': observed_replay(snapshot, record, legacy_row)}
+        'observed_path': replay(legacy_row)}
     ablations = {choice['scheme']: {'selection': choice,
-        'observed_path': observed_replay(snapshot, record, by_id.get(choice['selected_candidate_id']))}
+         'observed_path': replay(by_id.get(choice['selected_candidate_id']))}
         for choice in audit['counterfactuals']}
+    policy_replays = observed_management_policies(snapshot, replay)
     signal_families = sorted({str(family) for component in audit['components']
         if component.get('available') is True and (number(component.get('effective_weight')) or 0.) > 0
         for family in component.get('evidence_family_ids') or []})
@@ -294,9 +334,79 @@ def compare_review(record):
             'legacy_llm_warning': 'stored opinion lacks verified selection-masked independent input contract; not independent fresh 15% LLM evidence' if anchored else None,
             'components': audit['components'], 'edge_families': audit['edge_families'],
             'scenario_bank': audit['scenario_bank'], 'schemes': schemes,
-            'observed_hold_control': observed_replay(snapshot, record,
-                {'candidate_id': 'HOLD', 'policy': 'HOLD', 'parameters': {}}),
+            'observed_hold_control': policy_replays['HOLD'],
+            'observed_management_policies': policy_replays,
             'counterfactuals': audit['counterfactuals']}
+
+
+def _policy_cohort(reviews, policies):
+    complete, missing = [], {policy: Counter() for policy in policies}
+    for review in reviews:
+        paths = review['observed_management_policies']
+        available = True
+        for policy in policies:
+            path = paths[policy]
+            if path['available'] is not True or number(path['net_r_on_remaining']) is None:
+                missing[policy][path['reason']] += 1
+                available = False
+        if available:
+            complete.append(paths)
+    count = len(complete)
+    rows = {}
+    if count:
+        values = {
+            policy: np.array([paths[policy]['net_r_on_remaining'] for paths in complete])
+            for policy in policies
+        }
+        weights = np.full(count, 1. / count)
+        hold = values['HOLD']
+        hold_cvar = _weighted_cvar(hold, weights)
+        for policy, net in values.items():
+            paired = net - hold
+            cvar = _weighted_cvar(net, weights)
+            leave_one_out = (paired.sum() - paired) / (count - 1) if count > 1 else None
+            rows[policy] = {
+                'mean_net_r_on_remaining': float(net.mean()),
+                'descriptive_cvar10_r_on_remaining': cvar,
+                'paired_mean_delta_vs_hold_r': float(paired.mean()),
+                'cvar10_delta_vs_hold_r': cvar - hold_cvar,
+                'paired_positive_n': int((paired > 1e-8).sum()),
+                'paired_negative_n': int((paired < -1e-8).sum()),
+                'leave_one_trade_out_delta_range_r': (
+                    [float(leave_one_out.min()), float(leave_one_out.max())]
+                    if leave_one_out is not None else None),
+                'reviews_with_assumed_execution_cost_n': sum(
+                    paths[policy]['costs_assumed'] for paths in complete),
+                'reviews_without_verified_rollover_n': sum(
+                    paths[policy]['broker_rollover_cost_r'] is None for paths in complete),
+            }
+    return {'candidate_trade_n': len(reviews), 'complete_trade_n': count,
+            'unavailable_reasons_by_policy': {p: dict(reasons) for p, reasons in missing.items()},
+            'policies': rows}
+
+
+def summarize_management_policy_replays(reviews):
+    """Use one frozen review per trade and a fixed common replay cohort."""
+    earliest = {}
+    for review in sorted(reviews, key=lambda row: (row['captured_ts'], row['review_id'])):
+        if review.get('trade_id') is not None:
+            earliest.setdefault(review['trade_id'], review)
+    by_instrument = defaultdict(list)
+    for review in earliest.values():
+        by_instrument[review['instrument']].append(review)
+
+    base_policies = tuple(BASE_FRACTIONS)
+
+    def cohorts(rows):
+        return {'base_actions': _policy_cohort(rows, base_policies),
+                'including_move_to_be': _policy_cohort(rows, (*base_policies, 'MOVE_TO_BE'))}
+
+    return {'study': 'DESCRIPTIVE_FROZEN_ACTUAL_PATH_COUNTERFACTUAL',
+            'selection': 'EARLIEST_FROZEN_REVIEW_IN_EXPORT_PER_TRADE_BEFORE_REPLAY_FILTER',
+            'trade_n': len(earliest), 'input_review_n': len(reviews),
+            'historical_profit_proven': False, 'live_admission_changed': False,
+            **cohorts(list(earliest.values())),
+            'by_instrument': {code: cohorts(rows) for code, rows in sorted(by_instrument.items())}}
 
 
 def _average(values):
@@ -581,6 +691,7 @@ def run_comparison(source, *, expected_sha=None, materiality_r=DEFAULT_MATERIALI
             'instrument_coverage': instruments,
             'unobserved_configured_instruments': sorted(set(ALL_INSTRUMENTS) - set(instruments)),
             'summary': summarize(reviews, materiality_r=materiality_r),
+             'management_policy_replay': summarize_management_policy_replays(reviews),
             'grouped_summary': grouped_summary(reviews, materiality_r=materiality_r),
             'grouped_summary_scope': 'descriptive_overlapping_partitions; family=available_positive_weight_component_lineage; not_independent_portfolios',
             'review_transitions': review_transitions(reviews),

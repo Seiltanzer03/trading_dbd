@@ -7,7 +7,9 @@ import time
 import pytest
 
 from scripts.export_unified_edge_reviews import export_reviews, remote_program, select_reviews
-from scripts.run_unified_edge_comparison import observed_replay, run_comparison, summarize
+from scripts.run_unified_edge_comparison import (
+    observed_replay, run_comparison, summarize, summarize_management_policy_replays,
+)
 from test_extended_policy_evaluation import _snapshot
 from test_unified_edge_ensemble import snapshot as voting_snapshot
 
@@ -78,6 +80,8 @@ def test_actual_snapshot_comparison_is_frozen_and_ledger_absence_is_not_zero():
     assert review['schemes']['legacy_control']['selection']['selected_policy'] == 'CLOSE_25'
     assert review['schemes']['quant100']['observed_path']['available'] is True
     assert review['observed_hold_control']['available'] is True
+    assert review['observed_management_policies']['HOLD'] == review['observed_hold_control']
+    assert report['management_policy_replay']['base_actions']['complete_trade_n'] == 1
     for summary in report['summary'].values():
         assert summary['historical_economic_completeness']['ledger_profit_net_r'] is None
         assert summary['historical_economic_completeness']['available'] is False
@@ -468,6 +472,38 @@ def test_same_complete_cohort_for_every_scheme():
     reviews = report['reviews']
     reviews[0]['schemes']['llm20']['observed_path'] = {'available': False}
     assert all(row['observed_path_replay']['paired_review_n'] == 0 for row in summarize(reviews).values())
+
+
+def test_management_replay_uses_earliest_review_before_completeness_filter():
+    policies = ('HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT', 'MOVE_TO_BE')
+
+    def replay_review(trade_id, ts, pnl, missing=None):
+        paths = {
+            policy: {'available': policy != missing,
+                     'reason': 'MISSING' if policy == missing else 'OBSERVED',
+                     'net_r_on_remaining': None if policy == missing else pnl.get(policy, .5),
+                     'costs_assumed': True, 'broker_rollover_cost_r': None}
+            for policy in policies
+        }
+        return {'trade_id': trade_id, 'review_id': f'{trade_id}-{ts}', 'captured_ts': ts,
+                'instrument': 'NAS100', 'observed_management_policies': paths}
+
+    summary = summarize_management_policy_replays([
+        replay_review(1, 2, {'CLOSE_10': 20.}),
+        replay_review(1, 1, {}, 'CLOSE_25'),
+        replay_review(2, 3, {'CLOSE_10': .75}, 'MOVE_TO_BE'),
+        replay_review(3, 4, {'CLOSE_10': 0.}),
+    ])
+    base, all_actions = summary['base_actions'], summary['including_move_to_be']
+    assert summary['input_review_n'] == 4
+    assert summary['trade_n'] == 3
+    assert base['complete_trade_n'] == 2
+    assert all_actions['complete_trade_n'] == 1
+    assert base['unavailable_reasons_by_policy']['CLOSE_25'] == {'MISSING': 1}
+    assert base['policies']['CLOSE_10']['paired_mean_delta_vs_hold_r'] == -.125
+    assert base['policies']['CLOSE_10']['leave_one_trade_out_delta_range_r'] == [-.5, .25]
+    assert all_actions['policies']['CLOSE_10']['paired_mean_delta_vs_hold_r'] == -.5
+    assert all_actions['policies']['CLOSE_10']['leave_one_trade_out_delta_range_r'] is None
 
 
 def test_legacy_is_in_summary_and_missing_legacy_excludes_identical_core_cohort():
