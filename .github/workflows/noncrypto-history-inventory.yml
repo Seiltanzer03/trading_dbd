@@ -1,4 +1,4 @@
-name: replay-nas100-provider-preparation
+name: inspect-ede-worker-capacity
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -6,69 +6,31 @@ on:
 permissions:
   contents: read
 jobs:
-  replay:
+  inspect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 3
     steps:
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 2m
-          script: |
-            set -eu
-            cd /opt/seiltanzer
-            test "$(git rev-parse HEAD)" = '57e3448676ea648310a45a8d5c2f222784df6b28'
-            .venv/bin/python -B -u - <<'PY'
-            import contextlib
-            import hashlib
-            import json
-            import re
-            import sqlite3
-            import urllib.request
+      - name: Measure the disposable research worker filesystem
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
 
-            from seiltanzer.ai_provider_guard import compact_provider_snapshot
-            from seiltanzer.ai_runtime_report_v20 import _provider_decision_inputs, INDEPENDENT_INPUT_MAX_BYTES
-
-            origin = 1795116363.2902696
-            with contextlib.closing(sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True, timeout=2.)) as db:
-                db.execute('PRAGMA query_only=ON')
-                ids = db.execute("SELECT id FROM trades WHERE instrument='NAS100' ORDER BY id DESC LIMIT 8").fetchall()
-                matching = []
-                for (trade_id,) in ids:
-                    rows = db.execute('SELECT captured_ts,snapshot_json,snapshot_sha256 FROM decision_snapshots WHERE trade_id=? AND captured_ts BETWEEN ? AND ? AND length(snapshot_json)<=2000000 ORDER BY captured_ts LIMIT 8', (trade_id, origin - 2, origin + 180)).fetchall()
-                    for captured, raw, digest in rows:
-                        snap = json.loads(raw)
-                        clock = (snap.get('market_refresh') or {}).get('original_snapshot_ts') or captured
-                        if abs(clock - origin) < .1:
-                            assert hashlib.sha256(raw.encode()).hexdigest() == digest
-                            matching.append(snap)
-            assert len(matching) == 1
-            snapshot = matching[0]
-            size = lambda x: len(json.dumps(x, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',',':')).encode())
-            ranked = lambda obj: dict(sorted(((key,size(value)) for key,value in obj.items()), key=lambda row:row[1], reverse=True)[:15])
-
-            projected = compact_provider_snapshot(snapshot)
-            packet, full, aliases = _provider_decision_inputs(projected, snapshot)
-            metric_state = packet['policy_manager'].get('option_derivative_state') or {}
-            print('NAS_ARCHIVED_PROVIDER_PACKET=' + json.dumps(dict(
-                full_bytes=size(full), wire_bytes=size(packet), cap=INDEPENDENT_INPUT_MAX_BYTES,
-                limit_exceeded=size(packet)>INDEPENDENT_INPUT_MAX_BYTES,
-                tier=(projected.get('provider_projection') or {}).get('compaction_tier'),
-                root=ranked(packet), manager=ranked(packet['policy_manager']),
-                option_state=ranked(metric_state), provenance=ranked(packet.get('decision_model_metric_provenance') or {}),
-                family_wire_bytes=ranked(packet.get('edge_family_facts') or {}))), flush=True)
-
-            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status', timeout=5) as response:
-                raw = response.read(150001)
-            assert len(raw)<=150000
-            status=json.loads(raw)
-            receipt=status.get('family_market_forecasts') or {}
-            error=status.get('last_error') or ''
-            match=re.fullmatch(r'(?:RuntimeError|ValueError):([A-Z][A-Z0-9_]{4,80})',error)
-            print('NAS_CURRENT_BUILD_REASON=' + json.dumps(dict(ready=status.get('ready'),
-                invalidation=status.get('invalidated_reason'), error_class=error.split(':',1)[0] if ':' in error else None,
-                controlled_error=match.group(1) if match else None,
-                forecast_families={name: (row.get('reason') or '').split(';')[0] for name,row in (receipt.get('families') or {}).items()})), flush=True)
-            PY
+          locations = [Path(os.environ['RUNNER_TEMP']), Path('/mnt')]
+          disks = []
+          for location in locations:
+              if location.is_dir():
+                  status = shutil.disk_usage(location)
+                  disks.append(dict(location=location.name or '/', device=location.stat().st_dev,
+                                    total=status.total, free=status.free, writable=os.access(location,os.W_OK)))
+          bundled = {}
+          for name in ('/usr/local/lib/android','/usr/share/dotnet','/opt/ghc'):
+              run = subprocess.run(['du','-sxB1', name], capture_output=True, text=True, timeout=15)
+              if run.returncode==0:
+                  bundled[name] = int(run.stdout.split(maxsplit=1)[0])
+          print('EDE_WORKER_CAPACITY=' + json.dumps(dict(disks=disks, existing_reproducible_sdk_bytes=bundled)))
+          PY
