@@ -27,10 +27,13 @@ jobs:
                   status = shutil.disk_usage(location)
                   disks.append(dict(location=location.name or '/', device=location.stat().st_dev,
                                     total=status.total, free=status.free, writable=os.access(location,os.W_OK)))
+          print('EDE_WORKER_CAPACITY=' + json.dumps(dict(disks=disks)), flush=True)
           bundled = {}
           for name in ('/usr/local/lib/android','/usr/share/dotnet','/opt/ghc'):
-              run = subprocess.run(['du','-sxB1', name], capture_output=True, text=True, timeout=15)
-              if run.returncode==0:
-                  bundled[name] = int(run.stdout.split(maxsplit=1)[0])
-          print('EDE_WORKER_CAPACITY=' + json.dumps(dict(disks=disks, existing_reproducible_sdk_bytes=bundled)))
+              try:
+                  run = subprocess.run(['du','-sxB1', name], capture_output=True, text=True, timeout=8)
+                  bundled[name] = int(run.stdout.split(maxsplit=1)[0]) if run.returncode==0 else None
+              except subprocess.TimeoutExpired:
+                  bundled[name] = None
+          print('EDE_WORKER_SDK_BYTES=' + json.dumps(bundled))
           PY
