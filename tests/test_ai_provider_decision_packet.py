@@ -93,6 +93,67 @@ def test_actual_transport_archives_full_audit_and_exact_label_mapping(monkeypatc
     assert snapshot == before
 
 
+def test_oversized_provider_packet_keeps_all_decision_metric_rows(monkeypatch):
+    from test_ai_provider_telemetry import transport
+    from test_option_shadow_state import _run_tracker
+    from seiltanzer import ai_runtime_report_v20 as report
+    from seiltanzer.ai_provider_decision_packet import PACKET_VERSION, build_decision_packet
+    from seiltanzer.decision_metric_inputs import pack_decision_metrics
+    from seiltanzer.decision_research import validate_no_future_timestamps
+    from seiltanzer.edge_discovery import ai_context
+
+    calls, _, _ = transport(monkeypatch)
+    snapshot = _frozen()
+    captured = snapshot['captured_ts']
+    instrument = snapshot['strategy']['instrument']
+    context = {'observation_t0': captured}
+    names = ai_context.canonical_current_feature_map(context, instrument)
+    source = {'captured_ts': captured, 'quality': {'source_ts': captured, 'source_quality': .85}}
+    metrics = {name: ai_context._record(instrument=instrument, t0=captured,
+        feature_id=name, value=row.get('value'), block=source) for name, row in names.items()}
+    monkeypatch.setattr(ai_context, 'canonical_current_feature_map', lambda *_: metrics)
+    snapshot['decision_metric_inputs'] = pack_decision_metrics(context, instrument)
+    snapshot['policy_manager']['option_derivative_state'] = _run_tracker()
+    before = deepcopy(snapshot)
+
+    result = report.request_explanation_with_shadow(snapshot, authoritative_snapshot=snapshot)
+    assert len(calls) == 1
+    wire = calls[0]['messages'][1]['content'].split('\n', 1)[1]
+    assert len(wire.encode('utf-8')) <= report.INDEPENDENT_INPUT_MAX_BYTES
+    packet = json.loads(wire)
+    assert packet['decision_packet_version'] == 'independent-decision-packet-v2'
+    assert _rows(packet['decision_model_metrics']) == metrics
+    assert packet['policy_manager']['option_derivative_state'] == before['policy_manager']['option_derivative_state']
+    shadow = result['llm_shadow_decision']
+    assert shadow['input_contract']['frozen_input_json'] == wire
+    full = json.loads(shadow['input_contract']['full_input_json'])
+    assert full['decision_model_metrics'] == metrics
+    previous, _ = build_decision_packet(full, version=PACKET_VERSION)
+    previous_wire = json.dumps(previous, ensure_ascii=False, separators=(',', ':')).encode()
+    assert len(previous_wire) > report.INDEPENDENT_INPUT_MAX_BYTES
+    validate_no_future_timestamps({**full, 'llm_shadow_decision': shadow}, captured)
+    assert snapshot == before
+
+
+def test_metric_table_exposes_original_source_clock_to_validator():
+    from seiltanzer.decision_research import validate_no_future_timestamps
+
+    capture = 1_795_116_363.
+    packet = {'decision_packet_version': 'independent-decision-packet-v2', 'captured_ts': capture,
+              'decision_model_metrics': {'row_kind': 'mapping', 'column_groups': [
+                  {'columns': ['received_ts', 'value'], 'rows': {'metric': [capture+2, .1]}}]}}
+    with pytest.raises(ValueError, match=r'post-capture.*decision_model_metrics\.metric\.received_ts'):
+        validate_no_future_timestamps(packet, capture)
+
+
+def test_provider_input_overflow_is_reported_as_local_preparation_failure():
+    from seiltanzer.ai_api import provider_error
+
+    failure = RuntimeError('combined_provider_independent_input_budget_exceeded')
+    assert provider_error(failure)['code'] == 'provider_input_too_large'
+    assert provider_error(failure)['retriable'] is False
+
+
 def test_omitted_delivery_clock_cannot_hide_future_input(monkeypatch):
     from test_ai_provider_telemetry import transport
     from seiltanzer import ai_runtime_report_v20 as report

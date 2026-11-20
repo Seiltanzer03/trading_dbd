@@ -14,6 +14,7 @@ export function aiProviderWarning(body = {}) {
     provider_bad_response: 'провайдер вернул некорректный ответ',
     provider_invalid_payload: 'ответ провайдера не прошёл проверку',
     provider_unavailable: 'провайдер временно недоступен',
+    provider_input_too_large: 'входные данные превысили лимит подготовки запроса',
   };
   const code = body.provider_error?.code;
   const reason = !structured && Object.hasOwn(reasons, code)
