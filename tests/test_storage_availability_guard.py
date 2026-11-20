@@ -286,6 +286,44 @@ def test_schema_reuse_keeps_actual_integrity_timestamp(tmp_path, monkeypatch):
     assert manager._startup_integrity["verification_scope"] == "pre_engine_source"
 
 
+def test_schema_reuses_prestart_check_after_empty_wal_is_opened(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    initial = sqlite3.connect(manager.db_path)
+    try:
+        initial.execute("PRAGMA journal_mode=WAL")
+    finally:
+        initial.close()
+
+    calls = []
+    check = storage._sqlite_integrity
+
+    def recorded(path, *, full=False):
+        calls.append(path)
+        return check(path, full=full)
+
+    monkeypatch.setattr(storage, "_sqlite_integrity", recorded)
+    error = OSError(errno.ENOSPC, "test low disk")
+    availability._reuse_verified_for_degraded_prestart(
+        manager, directory=manager.local_dir, original_error=error,
+    )
+    wal = manager.db_path.with_name(manager.db_path.name + "-wal")
+    assert not wal.exists()
+
+    writer = sqlite3.connect(manager.db_path)
+    try:
+        writer.execute("SELECT id FROM trades").fetchall()
+        assert wal.stat().st_size == 0
+        availability._defer_schema_identity_to_offhost(
+            manager, reason="g1m-schema-identity",
+            plan={"available_bytes": 100, "compact_required_bytes": 100_000},
+            original_error=error,
+        )
+        assert calls == [manager.db_path]
+        assert manager._startup_integrity["verification_scope"] == "pre_engine_source"
+    finally:
+        writer.close()
+
+
 def test_schema_cache_rechecks_committed_wal_change(tmp_path, monkeypatch):
     manager = _manager(tmp_path)
     writer = sqlite3.connect(manager.db_path)

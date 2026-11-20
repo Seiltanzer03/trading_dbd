@@ -129,6 +129,10 @@ def _source_integrity_identity(path: Path) -> tuple | None:
                     return None
                 identities.append(None)
             else:
+                # A connection can create an empty WAL before writing any pages.
+                if suffix == "-wal" and info.st_size == 0:
+                    identities.append(None)
+                    continue
                 identities.append((info.st_dev, info.st_ino, info.st_size,
                                    info.st_mtime_ns, info.st_ctime_ns))
     except OSError:
