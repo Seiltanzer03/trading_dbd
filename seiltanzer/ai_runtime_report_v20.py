@@ -30,13 +30,14 @@ from .llm_decision_shadow import (
     record_shadow_decision,
 )
 from .llm_shadow_working_action import build_working_action
+from .ai_api import PROVIDER_INPUT_BUDGET_REASON
+from .ai_provider_decision_packet import INDEPENDENT_INPUT_MAX_BYTES
 from .ai_provider_contract import (POLICY_SCORE_ORDER, EXPLICIT_OPINION_CONTRACT, provider_response_format,
     normalize_family_wire, normalize_score_wire)
 
 
 REPORT_VERSION = "ai-runtime-report-v20"
 COMBINED_PROVIDER_MAX_TOKENS = 2400
-INDEPENDENT_INPUT_MAX_BYTES = 60_000
 PROVIDER_RESPONSE_MAX_BYTES = 20_000
 _INSTALLED = False
 
@@ -72,7 +73,7 @@ relative affinities, never probabilities, Expected R, CVaR or costs copied from
 the input. Keep the final synthesis consistent with your explicit policy:
 family opinions must not jointly give a different hard-admissible action a higher
 preference. A contradictory overall opinion is rejected, never repaired locally.
-Some policy, candidate and provenance rows use column_groups: each group gives
+Some policy, candidate, decision metric and provenance rows use column_groups: each group gives
 columns and rows; zip columns with each row's values. Mapping row keys name the
 policy/feature; sequence row keys are original zero-based indices. Different
 column groups preserve absent fields; explicit null stays unknown. All numeric
@@ -507,8 +508,11 @@ def request_explanation_with_shadow(
                                        sort_keys=True, separators=(",", ":"), allow_nan=False)
         full_input_json = json.dumps(full_input, ensure_ascii=False,
                                     sort_keys=True, separators=(",", ":"), allow_nan=False)
-        if len(frozen_input_json.encode("utf-8")) > INDEPENDENT_INPUT_MAX_BYTES:
-            raise RuntimeError("combined_provider_independent_input_budget_exceeded")
+        input_bytes = len(frozen_input_json.encode("utf-8"))
+        if input_bytes > INDEPENDENT_INPUT_MAX_BYTES:
+            if trace is not None:
+                trace.provider_metrics(input_bytes=input_bytes)
+            raise RuntimeError(PROVIDER_INPUT_BUDGET_REASON)
         body = {
             "model": model,
             "temperature": 0.0,
@@ -528,7 +532,7 @@ def request_explanation_with_shadow(
         provider_request_json = json.dumps(body, ensure_ascii=False, sort_keys=True,
                                           separators=(",", ":"), allow_nan=False)
     if trace is not None:
-        trace.provider_metrics(input_bytes=len(frozen_input_json.encode('utf-8')),
+        trace.provider_metrics(input_bytes=input_bytes,
             request_bytes=len(provider_request_json.encode('utf-8')),
             max_output_tokens=COMBINED_PROVIDER_MAX_TOKENS)
     try:
@@ -615,7 +619,7 @@ def request_explanation_with_shadow(
                 "input_captured_ts": authority.get("captured_ts"),
                 "frozen_input_json": frozen_input_json,
                 "frozen_input_sha256": hashlib.sha256(frozen_input_json.encode("utf-8")).hexdigest(),
-                "decision_packet_version": "independent-decision-packet-v1",
+                "decision_packet_version": independent_input["decision_packet_version"],
                 "full_input_json": full_input_json,
                 "full_input_sha256": hashlib.sha256(full_input_json.encode("utf-8")).hexdigest(),
                 "evidence_identity_aliases": evidence_identity_aliases,

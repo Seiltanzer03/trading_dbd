@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 
 AI_API_VERSION = "ai-verdict-api-f1-v1"
+PROVIDER_INPUT_BUDGET_REASON = 'combined_provider_independent_input_budget_exceeded'
 logger = logging.getLogger("seiltanzer.ai_verdict")
 _REJECTED_RESPONSE_REASONS = frozenset((
     'combined_provider_missing_shadow', 'combined_provider_missing_policy_scores',
@@ -19,9 +20,9 @@ _REJECTED_RESPONSE_REASONS = frozenset((
 
 
 def provider_failure_reason(exc: BaseException) -> str | None:
-    """Expose only exact, code-owned validation failures; never provider text."""
+    """Expose only exact, code-owned preparation or validation failures."""
     message = str(exc)
-    return message if message in _REJECTED_RESPONSE_REASONS else None
+    return message if message == PROVIDER_INPUT_BUDGET_REASON or message in _REJECTED_RESPONSE_REASONS else None
 
 
 def request_id() -> str:
@@ -31,6 +32,8 @@ def request_id() -> str:
 def provider_error(exc: Exception) -> dict:
     """Map provider-facing failures without exposing response bodies/secrets."""
     reason = provider_failure_reason(exc)
+    if reason == PROVIDER_INPUT_BUDGET_REASON:
+        return {'code': 'provider_input_too_large', 'retriable': False, 'reason': reason}
     if reason is not None:
         return {'code': 'provider_bad_response', 'retriable': True, 'reason': reason}
     message = str(exc).lower()

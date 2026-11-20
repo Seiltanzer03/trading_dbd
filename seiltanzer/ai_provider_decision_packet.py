@@ -5,6 +5,9 @@ import re
 
 
 PACKET_VERSION = 'independent-decision-packet-v1'
+METRIC_TABLE_PACKET_VERSION = 'independent-decision-packet-v2'
+PACKET_VERSIONS = (PACKET_VERSION, METRIC_TABLE_PACKET_VERSION)
+INDEPENDENT_INPUT_MAX_BYTES = 60_000
 _DIGEST = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])')
 _PROOF_FIELDS = frozenset((
     'body_sha256', 'supporting_body_sha256', 'preliminary_context_sha256',
@@ -22,6 +25,10 @@ def _without_byte_proofs(value):
     return value
 
 
+def _wire_bytes(value):
+    return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode())
+
+
 def _rows_table(rows):
     sequence = isinstance(rows, list)
     if not isinstance(rows, (dict, list)) or len(rows) < 2:
@@ -36,17 +43,19 @@ def _rows_table(rows):
         group['rows'][str(name)] = [row[key] for key in columns]
     result = {'row_kind': 'sequence' if sequence else 'mapping',
               'column_groups': [groups[key] for key in sorted(groups)]}
-    size = lambda value: len(json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode())
-    return result if size(result) < size(rows) else rows
+    return result if _wire_bytes(result) < _wire_bytes(rows) else rows
 
 
-def build_decision_packet(full_input: dict) -> tuple[dict, dict[str, str]]:
+def build_decision_packet(full_input: dict, *, version: str | None = None) -> tuple[dict, dict[str, str]]:
     """Return a packet and label->exact digest mapping without changing inputs.
 
     Caller retains the full masked input and validates its original clocks.
     Removing byte proofs does not grant source authority: admitted availability,
     provider/symbol, clocks, dependencies, quality and preliminary roles stay.
+    Replay passes the stored version to reproduce exact archived packet bytes.
     """
+    if version is not None and version not in PACKET_VERSIONS:
+        raise ValueError('unsupported decision packet version')
     packet = deepcopy(full_input)
     packet.pop('edge_family_source_bundle_audit', None)
     manager = packet.get('policy_manager')
@@ -148,6 +157,15 @@ def build_decision_packet(full_input: dict) -> tuple[dict, dict[str, str]]:
     aliases = {label: identity for identity, label in source_forward.items()}
     aliases.update({label: digest for digest, label in forward.items()})
     packet['decision_packet_version'] = PACKET_VERSION
+    metrics = packet.get('decision_model_metrics')
+    if isinstance(metrics, dict) and (version == METRIC_TABLE_PACKET_VERSION or (
+            version is None and _wire_bytes(packet) > INDEPENDENT_INPUT_MAX_BYTES)):
+        table = _rows_table(metrics)
+        if table is not metrics:
+            packet['decision_model_metrics'] = table
+            packet['decision_packet_version'] = METRIC_TABLE_PACKET_VERSION
+    if version == METRIC_TABLE_PACKET_VERSION and packet['decision_packet_version'] != version:
+        raise ValueError('packet version requires a decision metric table')
     return packet, aliases
 
 
@@ -181,6 +199,13 @@ def _original_rows(value, kind):
 
 def restore_decision_rows(packet: dict) -> dict:
     """Expose original clock paths to the unchanged timestamp/risk validator."""
+    version = packet.get('decision_packet_version')
+    metrics = packet.get('decision_model_metrics')
+    metric_table = isinstance(metrics, dict) and 'column_groups' in metrics
+    if version == METRIC_TABLE_PACKET_VERSION and not metric_table:
+        raise ValueError('packet version requires a decision metric table')
+    if metric_table and version != METRIC_TABLE_PACKET_VERSION:
+        raise ValueError('decision metric table requires its packet version')
     if 'decision_packet_version' not in packet:
         manager = packet.get('policy_manager') or {}
         manager = manager if isinstance(manager, dict) else {}
@@ -192,7 +217,7 @@ def restore_decision_rows(packet: dict) -> dict:
         if any(isinstance(value, dict) and 'column_groups' in value for value in values):
             raise ValueError('unversioned decision row table')
         return packet
-    if packet.get('decision_packet_version') != PACKET_VERSION:
+    if version not in PACKET_VERSIONS:
         raise ValueError('unsupported decision packet version')
     result = deepcopy(packet)
     result.pop('decision_packet_version')
@@ -201,6 +226,8 @@ def restore_decision_rows(packet: dict) -> dict:
         manager['policies'] = _original_rows(manager['policies'], 'mapping')
     if 'active_management_candidates' in result:
         result['active_management_candidates'] = _original_rows(result['active_management_candidates'], 'sequence')
+    if version == METRIC_TABLE_PACKET_VERSION and 'decision_model_metrics' in result:
+        result['decision_model_metrics'] = _original_rows(result['decision_model_metrics'], 'mapping')
     for row in (result.get('edge_family_facts') or {}).values():
         if isinstance(row, dict) and 'feature_provenance' in row:
             row['feature_provenance'] = _original_rows(row['feature_provenance'], 'mapping')
