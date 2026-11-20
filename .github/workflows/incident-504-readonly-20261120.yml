@@ -185,11 +185,71 @@ jobs:
                     group["phase_elapsed_s"][match[1]] = round(float(match[2]), 3)
                 return list(starts.values())[-3:]
 
+            def readiness_summary(data):
+                ready = obj(data.get("startup_integrity"))
+                local = obj(data.get("last_local_backup"))
+                allowed_scopes = {
+                    "pre_engine_source", "post_engine_source", "post_schema_authoritative_source"
+                }
+                scope = ready.get("verification_scope")
+                actions = data.get("recovery_actions")
+                accepted_actions = ("serve_without_backup_under_low_disk",
+                                    "reuse_stale_verified_backup_for_availability",
+                                    "defer_schema_identity_backup_to_offhost",
+                                    "defer_impossible_background_backup")
+                present_actions = {row.get("action") for row in actions if isinstance(row, dict)} \
+                    if isinstance(actions, list) else set()
+                return {
+                    "request_time_integrity_scan": data.get("request_time_integrity_scan"),
+                    "startup_quick_check_passed": ready.get("ok") is True,
+                    "startup_verification_scope": scope if scope in allowed_scopes else None,
+                    "startup_local_backup_reused": ready.get("backup_reused") is True,
+                    "verified_local_backup_available": local.get("verified") is True,
+                    "schema_identity_backup_deferred": ready.get("schema_identity_backup_created") is False,
+                    "durability_degraded": ready.get("durability_degraded") is True,
+                    "recovery_actions": [name for name in accepted_actions if name in present_actions],
+                }
+
+            def provider_transport_counts():
+                history = subprocess.run(
+                    ["journalctl", "-u", "seiltanzer", "--since", "-24 hours",
+                     "-n", "220", "--no-pager", "-o", "json", "--grep",
+                     '"stage":"provider(?:_http|_fallback)?"'],
+                    capture_output=True, text=True, timeout=12, check=False,
+                )
+                stages = Counter()
+                errors = Counter()
+                allowed_errors = {"HTTPStatusError", "ConnectError", "ProxyError", "ReadTimeout",
+                                  "ConnectTimeout", "WriteTimeout", "RemoteProtocolError", "TimeoutError",
+                                  "RuntimeError", "ValueError", "TypeError"}
+                for line in history.stdout.splitlines():
+                    row = json.loads(line)
+                    message = row.get("MESSAGE")
+                    if not isinstance(message, str) or len(message) > 2048:
+                        continue
+                    try:
+                        trace = json.loads(message[message.index('{"request_id":'):])
+                    except (ValueError, TypeError):
+                        continue
+                    if trace.get("stage") == "provider_http" and trace.get("event") == "end":
+                        error = trace.get("exception_class")
+                        if error is None:
+                            stages["transport_completed"] += 1
+                        else:
+                            stages["transport_failed"] += 1
+                            errors[error if error in allowed_errors else "other"] += 1
+                    elif trace.get("stage") == "provider_fallback" and trace.get("event") == "error":
+                        stages["deterministic_fallback_events"] += 1
+                return {"last_24h_retained_trace_counts": dict(stages), "transport_failure_classes": dict(errors)}
+
             def main():
                 print("service_startup_timings " + json.dumps(startup_timings(), allow_nan=False))
                 state = read_cached("/api/state", 8_000_000)
                 status = read_cached("/api/ai/snapshot/status", 128_000)
                 print("live_review_summary " + json.dumps(summary(state, status), allow_nan=False, sort_keys=True))
+                print("storage_ready_summary " + json.dumps(readiness_summary(
+                    read_cached("/api/system/storage/status", 128_000)), allow_nan=False, sort_keys=True))
+                print("provider_trace_summary " + json.dumps(provider_transport_counts(), allow_nan=False, sort_keys=True))
 
             if __name__ == "__main__":
                 main()
