@@ -1,0 +1,111 @@
+name: incident-504-readonly-20261120
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+    paths: ['.github/workflows/incident-504-readonly-20261120.yml']
+permissions:
+  contents: read
+jobs:
+  diagnosis:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'ops/diagnose-terminal-504-20261120'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 4
+    steps:
+      - name: Check the public routes without retaining response bodies
+        run: |
+          for route in / /api/state; do
+            printf 'outside_before route=%s ' "$route"
+            curl -sS -o /dev/null --connect-timeout 3 --max-time 9 \
+              -w 'http=%{http_code} connect=%{time_connect} first_byte=%{time_starttransfer} total=%{time_total}\n' \
+              "http://94.241.171.182:8790$route" || true
+          done
+      - name: Read listener, service, and recent resource diagnostics
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          timeout: 15s
+          command_timeout: 2m
+          script: |
+            set -u
+            date -u '+diagnostic_utc=%FT%TZ'
+            git -C /opt/seiltanzer rev-parse --verify HEAD
+            systemctl show seiltanzer -p ActiveState -p SubState -p Result -p ExecMainStatus -p NRestarts -p MainPID -p MemoryCurrent -p MemoryPeak -p ActiveEnterTimestamp
+            systemctl is-active nginx caddy || true
+            df -Pk / /opt/seiltanzer
+            free -m
+            uptime
+            ss -ltn | awk 'NR == 1 || /:(80|443|8790)[[:space:]]/'
+            pid=$(systemctl show seiltanzer -p MainPID --value)
+            if [ "$pid" -gt 0 ] 2>/dev/null; then
+              ps -p "$pid" -o pid,stat,pcpu,pmem,rss,etimes,comm,wchan:24 || true
+            fi
+            for route in / /api/state; do
+              printf 'loopback route=%s ' "$route"
+              curl -sS -o /dev/null --connect-timeout 2 --max-time 8 \
+                -w 'http=%{http_code} connect=%{time_connect} first_byte=%{time_starttransfer} total=%{time_total}\n' \
+                "http://127.0.0.1:8790$route" || true
+            done
+            python3 - <<'PY'
+            from collections import Counter
+            import datetime
+            import json
+            import re
+            import subprocess
+
+            safe_patterns = {
+                "oom": r"out of memory|oom.kill|killed process",
+                "disk_full": r"no space left|database or disk is full|disk headroom",
+                "sqlite_lock": r"database (?:table )?is locked|SQLITE_BUSY",
+                "startup_phase": r"^STARTUP_PHASE phase=",
+                "upstream_timeout": r"upstream timed out|gateway time.out",
+                "task_exception": r"exception in ASGI|Traceback \(most recent call last\)",
+                "storage_timeout": r"snapshot.*(?:deadline|timed out)|(?:deadline|timed out).*snapshot",
+                "listener_ready": r"Uvicorn running|Application startup complete",
+                "stopping": r"(?:Stopping|Stopped) seiltanzer",
+            }
+            for name, command in (
+                ("service", ["-u", "seiltanzer"]),
+                ("kernel", ["-k"]),
+                ("proxy", ["-u", "nginx", "-u", "caddy"]),
+            ):
+                proc = subprocess.run(
+                    ["journalctl", "-b", "--since", "-100 minutes", "--no-pager",
+                     "-n", "1100", "-o", "json", *command],
+                    text=True, capture_output=True, timeout=20, check=False,
+                )
+                totals = Counter()
+                latest = {}
+                for line in proc.stdout.splitlines():
+                    try:
+                        row = json.loads(line)
+                        body = row.get("MESSAGE", "")
+                        if not isinstance(body, str):
+                            continue
+                        ts = datetime.datetime.fromtimestamp(
+                            int(row.get("__REALTIME_TIMESTAMP", 0)) / 1e6, datetime.timezone.utc
+                        ).isoformat(timespec="seconds")
+                    except (ValueError, TypeError):
+                        continue
+                    for key, rex in safe_patterns.items():
+                        if re.search(rex, body, flags=re.I):
+                            totals[key] += 1
+                            latest[key] = ts
+                    match = re.search(r'"GET (/|/api/state)(?:\?[^ ]*)? HTTP/[^"]+" ([0-9]{3})', body)
+                    if match:
+                        key = "get_" + match.group(1) + "_" + match.group(2)
+                        totals[key] += 1
+                        latest[key] = ts
+                print(name, json.dumps({"totals": totals, "latest_utc": latest}, sort_keys=True))
+            PY
+      - name: Repeat public checks after the VPS sample
+        run: |
+          for route in / /api/state; do
+            printf 'outside_after route=%s ' "$route"
+            curl -sS -o /dev/null --connect-timeout 3 --max-time 9 \
+              -w 'http=%{http_code} connect=%{time_connect} first_byte=%{time_starttransfer} total=%{time_total}\n' \
+              "http://94.241.171.182:8790$route" || true
+          done
