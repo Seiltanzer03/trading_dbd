@@ -1,0 +1,537 @@
+name: sp500-private-export-once-20261120
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+    paths: ['.github/workflows/sp500-private-export-once-20261120.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sp500-private-export-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  export-backup-slice:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'ops/sp500-private-export-20261120'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 95
+    env:
+      SPY_WORK: ${{ runner.temp }}/sp500-private-export
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Allocate scratch space on the hosted runner
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          umask 077
+          mkdir -p "$SPY_WORK/delivery"
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h "$RUNNER_TEMP"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install the Object Storage SDK
+        run: python -m pip install -q boto3
+      - name: Restore the existing private backup on the runner
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          python scripts/restore_verified_snapshot.py --snapshot-drill \
+            --bucket trading-dbd-backups-2026 \
+            --destination "$SPY_WORK/trades.sqlite3" --result "$SPY_WORK/restore.json"
+          python - "$SPY_WORK" <<'PY_RESTORE_CHECK'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          directory = Path(sys.argv[1])
+          receipt = json.loads((directory / "restore.json").read_text())
+          manifest = receipt["storage_manifest"]
+          if receipt.get("immutable_sqlite_read") is not True or receipt.get("sqlite_quick_check") != "ok":
+              raise SystemExit("The existing backup did not pass immutable SQLite validation")
+          if not isinstance(manifest, dict) or manifest["database_sha256"] != receipt["database_sha256"]:
+              raise SystemExit("The backup receipt did not bind the restored database")
+          (directory / "trades.sqlite3.manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, allow_nan=False), encoding="utf8"
+          )
+          PY_RESTORE_CHECK
+      - name: Include any archived observations from the verified cold catalog
+        id: history
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          manifest="$SPY_WORK/trades.sqlite3.manifest.json"
+          catalog_status=$(python - "$manifest" <<'PY_COLD_SCOPE'
+          import json
+          from pathlib import Path
+          import sys
+
+          manifest = json.loads(Path(sys.argv[1]).read_text())
+          print("cold" if manifest.get("cold_history_catalog_sha256") else "standalone")
+          PY_COLD_SCOPE
+          )
+          if [ "$catalog_status" = cold ]; then
+            python scripts/prepare_research_history.py \
+              --database "$SPY_WORK/trades.sqlite3" --manifest "$manifest" \
+              --destination "$SPY_WORK/research.sqlite3" --github-output "$GITHUB_OUTPUT"
+            echo "coverage_source=verified_hot_and_cold_history" >> "$GITHUB_OUTPUT"
+          else
+            echo "database=$SPY_WORK/trades.sqlite3" >> "$GITHUB_OUTPUT"
+            echo "coverage_source=verified_backup" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Export SPY observations and encrypt the result for the recipient
+        env:
+          SOURCE_DB: ${{ steps.history.outputs.database }}
+          COVERAGE_SOURCE: ${{ steps.history.outputs.coverage_source }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > "$SPY_WORK/sp500_spy_export.py" <<'PY_SPY_EXPORTER'
+          #!/usr/bin/env python3
+          """Export the September–October 2026 SPY option snapshots from a local SQLite copy."""
+          from __future__ import annotations
+          
+          import argparse
+          import base64
+          from collections import Counter, defaultdict
+          from contextlib import closing
+          from datetime import date, datetime, time, timedelta, timezone
+          import hashlib
+          from itertools import groupby
+          import json
+          import math
+          from pathlib import Path
+          import re
+          import sqlite3
+          import tempfile
+          import zipfile
+          from zoneinfo import ZoneInfo
+          import zlib
+          
+          
+          START = datetime(2026, 9, 1, tzinfo=timezone.utc)
+          END = datetime(2026, 11, 1, tzinfo=timezone.utc)
+          NEW_YORK = ZoneInfo("America/New_York")
+          TABLE = "passive_market_observations"
+          META = (
+              "observation_id", "anchor_group_id", "captured_ts", "created_ts",
+              "market_price", "price_source", "price_kind", "price_age_sec", "price_quality",
+              "option_source", "option_age_sec", "option_quality", "option_kind",
+              "session", "observation_origin", "retrospective_replay",
+          )
+          REQUIRED = {"instrument", "observation_id", "anchor_group_id", "captured_ts",
+                      "market_price", "features_json"}
+          OPTION_CONTEXT = ("option_static", "option_dynamics", "option_dynamic", "gex", "gex_context")
+          OPTION_CLOCKS = ("source_ts", "observed_ts", "received_ts", "fetched_ts", "as_of_ts",
+                           "asof_ts", "provider_ts", "source_observation_ts", "chain_ts")
+          FIELDS = ("iv", "gex", "open_interest", "skew", "density", "expiry", "sp500_price")
+          SPY = re.compile(r"\bSPY\b", re.IGNORECASE)
+          MISLABELLED = re.compile(r"\b(?:QQQ|SPX|IVV|VOO|IWM)\b", re.IGNORECASE)
+          SIMULATED = ("demo", "synthetic", "synthetic_demo", "contract_fixture", "is_demo")
+          MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
+          
+          
+          def object_or_empty(value):
+              return value if isinstance(value, dict) else {}
+          
+          
+          def number(value):
+              if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                  return value
+              return None
+          
+          
+          def positive(value):
+              return number(value) is not None and value > 0
+          
+          
+          def compact(value):
+              return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                                sort_keys=True)
+          
+          
+          def unpack_features(raw):
+              if not isinstance(raw, str):
+                  raise ValueError("features_json is not text")
+              if raw.startswith("~stj"):
+                  version, size_text, sha, encoded = raw.split(":", 3)
+                  size = int(size_text)
+                  if version != "~stj1" or str(size) != size_text or not 4096 <= size <= MAX_PAYLOAD_BYTES:
+                      raise ValueError("unsupported or invalid stored encoding")
+                  decoder = zlib.decompressobj()
+                  plain = decoder.decompress(base64.b64decode(encoded, validate=True), size + 1)
+                  if (len(plain) != size or not decoder.eof or decoder.unused_data
+                          or decoder.unconsumed_tail or hashlib.sha256(plain).hexdigest() != sha):
+                      raise ValueError("stored JSON checksum or length does not match")
+                  raw = plain.decode("utf-8")
+              replaced = False
+          
+              def non_finite(_):
+                  nonlocal replaced
+                  replaced = True
+                  return None
+          
+              def finite_float(text):
+                  value = float(text)
+                  return value if math.isfinite(value) else non_finite(text)
+          
+              data = json.loads(raw, parse_constant=non_finite, parse_float=finite_float)
+              if not isinstance(data, dict):
+                  raise ValueError("features_json is not an object")
+              return data, replaced
+          
+          
+          def read_rows(connection):
+              names = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+              missing = REQUIRED - names
+              if missing:
+                  raise ValueError(f"{TABLE}: missing {', '.join(sorted(missing))}")
+              columns = [name if name in names else f"NULL AS {name}" for name in META]
+              return connection.execute(
+                  f"SELECT {', '.join(columns)}, features_json FROM {TABLE} "
+                  "WHERE instrument = ? AND captured_ts >= ? AND captured_ts < ? "
+                  "ORDER BY captured_ts, created_ts, observation_id",
+                  ("SP500", START.timestamp(), END.timestamp()),
+              )
+          
+          
+          def option_views(features, source):
+              primary = object_or_empty(features.get("option_distribution"))
+              derivative = object_or_empty(object_or_empty(features.get("option_derivatives")).get("data"))
+              possibilities = [view for view in (primary, derivative)
+                               if view and view.get("available") is not False]
+              for view in possibilities:
+                  if any(view.get(flag) for flag in SIMULATED):
+                      continue
+                  proxy = str(view.get("proxy") or "").upper()
+                  if proxy == "SPY" or (not proxy and SPY.search(source) and not MISLABELLED.search(source)):
+                      yield view
+          
+          
+          def vectors(block, measures):
+              strikes = block.get("strikes")
+              arrays = [block.get(key) for key in measures]
+              if (not isinstance(strikes, list) or len(strikes) < 2
+                      or not all(positive(x) for x in strikes)
+                      or not all(a < b for a, b in zip(strikes, strikes[1:]))
+                      or any(not isinstance(a, list) or len(a) != len(strikes)
+                             or any(number(x) is None for x in a) for a in arrays)):
+                  return None
+              return strikes, arrays
+          
+          
+          def metric_quality(option, price):
+              gex = object_or_empty(option.get("gex"))
+              oi = vectors(object_or_empty(option.get("oi_profile")), ("call_oi", "put_oi"))
+              density = vectors(object_or_empty(option.get("density")), ("q",))
+              mass = None
+              if density:
+                  strikes, (q,) = density
+                  if min(q) >= 0:
+                      mass = sum((b - a) * (y + z) / 2 for a, b, y, z in
+                                 zip(strikes, strikes[1:], q, q[1:]))
+              quality = {
+                  "iv": positive(object_or_empty(option.get("implied_move")).get("sigma_annual")),
+                  "gex": vectors(gex, ("net",)) is not None or number(gex.get("zero_flip")) is not None,
+                  "open_interest": bool(oi and all(min(a) >= 0 for a in oi[1])),
+                  "skew": number(object_or_empty(option.get("skew")).get("rr")) is not None,
+                  "density": mass is not None and 0.98 <= mass <= 1.02,
+                  "expiry": positive(option.get("expiry_ts_utc")) or bool(option.get("expiry")),
+                  "sp500_price": positive(price),
+              }
+              return quality, mass if number(mass) is not None else None
+          
+          
+          def temporal_audit(row, features, option, context):
+              capture, created = row["captured_ts"], number(row["created_ts"])
+              price_ts = number(features.get("source_observation_ts"))
+              option_age = number(row["option_age_sec"])
+              direct = {key: number(option.get(key)) for key in OPTION_CLOCKS}
+              clocks = {key: value for key, value in direct.items() if value is not None}
+              option_ts = next((direct[k] for k in ("chain_ts", "source_ts", "observed_ts", "provider_ts")
+                                if direct[k] is not None), None)
+              basis = "stored_in_option_payload" if option_ts is not None else None
+              if option_ts is None and option_age is not None and option_age > 0:
+                  option_ts, basis = capture - option_age, "derived_from_recorded_chain_age"
+              for name, block in context.items():
+                  source = number(object_or_empty(block.get("quality")).get("source_ts"))
+                  if source is not None:
+                      clocks[f"{name}.quality.source_ts"] = source
+          
+              issues = []
+              if not positive(created) or created < capture:
+                  issues.append("missing_or_inconsistent_row_creation_time")
+              if not positive(price_ts):
+                  issues.append("missing_price_source_time")
+              elif price_ts > capture:
+                  issues.append("price_time_after_capture")
+              if not positive(option_ts):
+                  issues.append("missing_option_source_time")
+              elif option_ts > capture:
+                  issues.append("option_source_time_after_capture")
+              if any(ts > capture for key, ts in clocks.items() if key not in {"received_ts", "fetched_ts"}):
+                  issues.append("option_context_time_after_capture")
+              if created is not None and any(clocks[k] > created for k in ("received_ts", "fetched_ts") if k in clocks):
+                  issues.append("option_receipt_time_after_row_creation")
+              if row["retrospective_replay"] is None:
+                  issues.append("missing_retrospective_replay_flag")
+              elif row["retrospective_replay"]:
+                  issues.append("retrospective_replay")
+              expiry = number(option.get("expiry_ts_utc"))
+              if expiry is not None and expiry <= (created if positive(created) else capture):
+                  issues.append("expired_by_row_creation")
+              return {
+                  "available_from_ts": created if not issues else None,
+                  "price_source_ts": price_ts, "option_source_ts": option_ts,
+                  "option_source_clock_basis": basis, "option_clocks": clocks,
+                  "issues": issues,
+              }
+          
+          
+          def session_days():
+              day = START.date()
+              while day < END.date():
+                  if day.weekday() < 5 and day != date(2026, 9, 7):
+                      yield day.isoformat()
+                  day += timedelta(days=1)
+          
+          
+          def extract(connection, output, excluded):
+              counters = Counter()
+              issues = Counter()
+              fields = Counter()
+              days = defaultdict(Counter)
+              sources, expiries = Counter(), Counter()
+              known_days = set(session_days())
+              for capture, rows in groupby(read_rows(connection), key=lambda row: row["captured_ts"]):
+                  unique = {}
+                  for row in rows:
+                      counters["table_rows_in_range"] += 1
+                      try:
+                          features, replaced = unpack_features(row["features_json"])
+                      except (ValueError, TypeError, zlib.error):
+                          counters["unreadable_features_rows"] += 1
+                          continue
+                      if replaced:
+                          counters["rows_with_nonfinite_values_normalized_to_null"] += 1
+                      source = str(row["option_source"] or "")
+                      views = list(option_views(features, source))
+                      if not views:
+                          counters["rows_without_nondemo_spy_metrics"] += 1
+                          continue
+                      evidence = object_or_empty(features.get("g1s_evidence_v3"))
+                      context = {key: evidence[key] for key in OPTION_CONTEXT
+                                 if isinstance(evidence.get(key), dict)}
+                      raw_gex = object_or_empty(features.get("gex_context"))
+                      if raw_gex and raw_gex.get("data") != views[0].get("gex"):
+                          context["collector_gex_context"] = raw_gex
+                      if len(views) == 2 and views[0] == views[1]:
+                          views.pop()
+                      for option in views:
+                          temporal = temporal_audit(row, features, option, context)
+                          metric_status, density_mass = metric_quality(option, row["market_price"])
+                          record = {key: row[key] for key in META}
+                          record.update(instrument="SP500", option_proxy="SPY", option=option,
+                                        option_context=context, metric_quality=metric_status,
+                                        density_integral=density_mass, timing=temporal)
+                          fingerprint = {
+                              key: value for key, value in record.items()
+                              if key not in {"observation_id", "anchor_group_id", "created_ts", "timing"}
+                          }
+                          fingerprint["timing"] = {key: value for key, value in temporal.items()
+                                                   if key != "available_from_ts"}
+                          identity = hashlib.sha256(compact(fingerprint).encode()).hexdigest()
+                          if identity in unique:
+                              counters["duplicate_projection_rows"] += 1
+                              current = unique[identity]
+                              current["horizon_rows_collapsed"] += 1
+                              if temporal["available_from_ts"] is not None:
+                                  current["timing"]["available_from_ts"] = max(
+                                      current["timing"]["available_from_ts"], temporal["available_from_ts"])
+                              continue
+                          record["horizon_rows_collapsed"] = 1
+                          unique[identity] = record
+          
+                  local = datetime.fromtimestamp(capture, NEW_YORK)
+                  day = local.date().isoformat()
+                  regular = day in known_days and time(9, 30) <= local.time() < time(16, 0)
+                  for record in unique.values():
+                      temporal = record["timing"]
+                      valid = not temporal["issues"]
+                      record["in_nyse_core_session"] = regular
+                      record["exchange_date"] = day
+                      record["asof_timing_passed"] = valid
+                      destination = output if valid else excluded
+                      destination.write(compact(record) + "\n")
+                      counters["distinct_spy_records"] += 1
+                      counters["timing_passed" if valid else "timing_excluded"] += 1
+                      days[day]["distinct_spy_records"] += 1
+                      issues.update(temporal["issues"])
+                      sources.update([record["option_source"] or "unknown"])
+                      option = record["option"]
+                      expiry = option.get("expiry") or option.get("expiry_date")
+                      if expiry:
+                          expiries.update([str(expiry)])
+                      for key, present in record["metric_quality"].items():
+                          if present:
+                              fields[f"{key}_all"] += 1
+                              if valid:
+                                  fields[f"{key}_timing_passed"] += 1
+                      if regular:
+                          days[day]["core_session_records"] += 1
+                          if valid and record["metric_quality"]["density"]:
+                              days[day]["core_session_usable_densities"] += 1
+          
+              return {
+                  "contract": "sp500-spy-passive-export-v1",
+                  "captured_utc_from": START.isoformat(), "captured_utc_to_exclusive": END.isoformat(),
+                  "market_price_instrument": "SP500", "option_proxy": "SPY",
+                  "table": TABLE, "table_order": "captured_ts, created_ts, observation_id",
+                  "counts": dict(counters), "timing_exclusion_reasons": dict(issues),
+                  "field_quality": {key: {"all": fields[f"{key}_all"],
+                                          "timing_passed": fields[f"{key}_timing_passed"]} for key in FIELDS},
+                  "day_counts_america_new_york": {d: dict(days[d]) for d in sorted(known_days | days.keys())},
+                  "expected_nyse_core_sessions_n": len(known_days),
+                  "nyse_core_sessions_without_rows": sorted(d for d in known_days if not days[d]["core_session_records"]),
+                  "nyse_core_sessions_without_usable_densities": sorted(
+                      d for d in known_days if not days[d]["core_session_usable_densities"]),
+                  "option_sources": dict(sources), "expiry_dates": dict(expiries),
+              }
+          
+          
+          def report(quality):
+              n = quality["counts"]
+              sessions = quality["expected_nyse_core_sessions_n"]
+              coverage = sessions - len(quality["nyse_core_sessions_without_usable_densities"])
+              return f"""# Опционные наблюдения SP500/SPY
+          
+          Период отбора по времени снимка — 1 сентября — 31 октября 2026 года, UTC.
+          Источник — таблица `passive_market_observations` существующей копии `trades.db`.
+          Найдено {n.get('distinct_spy_records', 0)} отдельных записей SPY.
+          Проверку хронологии прошли {n.get('timing_passed', 0)}.
+          Годная плотность в основной сессии есть в {coverage} из {sessions} ожидаемых сессий.
+          
+          - `sp500_spy.jsonl` содержит снимки с проверенными сохранёнными часами. Для сравнения с Polymarket берите только строки с `metric_quality.density=true` и выполняйте as-of join по `timing.available_from_ts <= t`. Это нижняя граница по сохранённому времени записи, точное время SQLite COMMIT отсутствует. При совпадении меток времени выбирайте предыдущий снимок.
+          - `timing_excluded.jsonl` содержит записи с нарушениями хронологии или недостающими часовыми метками. Причина записана в `timing.issues`.
+          - `quality.json` содержит покрытие по дням Нью-Йорка, пропуски по полям, дубликаты, происхождение и экспирации. Несколько горизонтов с одинаковым снимком объединены. Смена цены SP500 при повторном использовании SPY-цепочки сохраняется отдельной строкой.
+          - `option.density.q` — риск-нейтральная плотность по страйкам SPY. Экспирация может использовать расчётное время закрытия, которое помечено в `expiry_time_quality`. Цена SP500 сохраняется с её фактическим источником и типом.
+          - Графики OI и GEX отражают значения, сохранённые терминалом. При отсутствии профиля поле остаётся пустым. Нули в исходных массивах OI могут происходить из обработки пропусков у сборщика. Исходные bid/ask и результаты исходов из базы отсутствуют в выгрузке.
+          """
+          
+          
+          def export(db, target):
+              db = db.resolve(strict=True)
+              with tempfile.TemporaryDirectory() as directory:
+                  data = Path(directory)
+                  with (closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=2)) as connection,
+                        (data / "sp500_spy.jsonl").open("w", encoding="utf-8") as output,
+                        (data / "timing_excluded.jsonl").open("w", encoding="utf-8") as excluded):
+                      connection.row_factory = sqlite3.Row
+                      connection.execute("PRAGMA query_only=ON")
+                      quality = extract(connection, output, excluded)
+                  with zipfile.ZipFile(target, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+                      for filename in ("sp500_spy.jsonl", "timing_excluded.jsonl"):
+                          archive.write(data / filename, filename)
+                      archive.writestr("quality.json", json.dumps(quality, ensure_ascii=False, indent=2))
+                      archive.writestr("README_RU.md", report(quality))
+              return quality
+          
+          
+          def main():
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument("--db", type=Path, required=True, help="Existing local copy of trades.db")
+              parser.add_argument("--output", type=Path, required=True, help="New ZIP archive")
+              args = parser.parse_args()
+              try:
+                  quality = export(args.db, args.output)
+              except (OSError, ValueError, sqlite3.Error) as exc:
+                  parser.exit(2, f"{type(exc).__name__}: {exc}\n")
+              print(compact(quality["counts"]))
+          
+          
+          if __name__ == "__main__":
+              main()
+          PY_SPY_EXPORTER
+          cat > "$SPY_WORK/recipient.crt" <<'SPY_RECIPIENT_CERT'
+          -----BEGIN CERTIFICATE-----
+          MIIENTCCAp2gAwIBAgIUH8P926e/2DLFgbeQKoE8Xlfsk+YwDQYJKoZIhvcNAQEL
+          BQAwKjEoMCYGA1UEAwwfU1BZIGV4cG9ydCByZWNpcGllbnQgMjAyNi0xMS0yMDAe
+          Fw0yNjExMjAxMjAyNTRaFw0yNjExMjMxMjAyNTRaMCoxKDAmBgNVBAMMH1NQWSBl
+          eHBvcnQgcmVjaXBpZW50IDIwMjYtMTEtMjAwggGiMA0GCSqGSIb3DQEBAQUAA4IB
+          jwAwggGKAoIBgQClHqGZeXbh8O/gI1bc6dc5JSIXVdnXnqbofF40GQd7z+gNBDyi
+          8OJ27HtQ0kDXbvLYUIhsRmcoGxxrIaRIwE1tPb2KUTInYqv3L7wZLmCdIKMHxjVR
+          +97ZfNjpfaVDuAn4aW7O9XpfasSa80DdoMVmRecWfVkuyfYqXi07r/H/SyZWQi2x
+          Nn01Tz63oerprYHadb31Lw0eFbgy0Re2SN/XjFNCjciKNTLfl7/PGzUzWyWPzoKy
+          huJ5EPyL9PXX7Y9+JMAa7437/4dnmqO/fK5DNVCSlkNts07hasuS+UHrmCsfdBoZ
+          6qylE9/mna+hQ60PLMlmfenCh5UsqIib+Gf5cvO4XG2vSe6fXRQQbIyK2vpjcrwb
+          NDM3eAeCLL9LTs/BWMRv1fRBgmErNXF32kLPYes/QXqHsyDDHalxVRMf74wdlplB
+          QFywwuVG51CBzFSOhv9P/P4Ykh5PTqP+rM6+vvL3Vjs/M31AhEtHteur4+L6LJr3
+          KwxITZqWucKuNgECAwEAAaNTMFEwHQYDVR0OBBYEFNJKhztW+nrmcHDS4ONXjPxZ
+          9R2pMB8GA1UdIwQYMBaAFNJKhztW+nrmcHDS4ONXjPxZ9R2pMA8GA1UdEwEB/wQF
+          MAMBAf8wDQYJKoZIhvcNAQELBQADggGBAIcg3/gul5pQdjMmbMFWojmKpIh6alJ/
+          Ab8OUzlyGN2dPNTM7G45JTcLG/cO8K7VP5SHNSJA7PErp6YBOX/rl5//iya2+Ft/
+          QMwd1FzzOACZl5ymJ+RGFVNWlIQw7n0s8mfV2N5zkJ1iOqmqzkOmo/xzQdQ8J2wE
+          3dfz29zt25CLxju9osMv0fqrKhJ4wKrMqF7u2+DMqqsi5TSZ8P12H413B9teYiDc
+          rwFEESTCQaXwOaDwnxKYoKTfhErE0wZgBCZztvDgXwqmOORpbmjYpbaDvc0X80h4
+          8taxKEr4iPg24q85441bNakDd8OC0rGwWJLDrbZDHXosrpw+IA/iJxkZhu9mc1S3
+          7CGZDzVSG/cVDjd0jH4rqNeYJg5jEePFyfESiwrY5ZXLJT6jc2FWnchDNrF/Kprv
+          tozhgefZylzaumSnXExPGLq32J990P7NpLhEZayZ56K7YmindsjKxHRvpjsAELIw
+          o9d+KszG1DKbQy5Kr5ZbtCdvbOWSAOnQlQ==
+          -----END CERTIFICATE-----
+          SPY_RECIPIENT_CERT
+          python "$SPY_WORK/sp500_spy_export.py" --db "$SOURCE_DB" --output "$SPY_WORK/sp500_spy_sep_oct_2026.zip" > "$SPY_WORK/export.log"
+          python - "$SPY_WORK" "$COVERAGE_SOURCE" <<'PY_EXPORT_CHECK'
+          import json
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          directory = Path(sys.argv[1])
+          scope = sys.argv[2]
+          manifest = json.loads((directory / "trades.sqlite3.manifest.json").read_text())
+          path = directory / "sp500_spy_sep_oct_2026.zip"
+          with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+              if archive.testzip() is not None or set(archive.namelist()) != {
+                  "sp500_spy.jsonl", "timing_excluded.jsonl", "quality.json", "README_RU.md"
+              }:
+                  raise SystemExit("The SPY data ZIP failed verification")
+              quality = json.loads(archive.read("quality.json"))
+              if quality["table"] != "passive_market_observations" or quality["option_proxy"] != "SPY":
+                  raise SystemExit("Unexpected market-data ZIP scope")
+              archive.writestr("source_provenance.json", json.dumps({
+                  "input": scope,
+                  "snapshot_database_sha256": manifest["database_sha256"],
+                  "snapshot_git_commit": manifest.get("git_commit"),
+                  "snapshot_completed_ts": manifest.get("completed_ts"),
+                  "cold_catalog_verified": scope == "verified_hot_and_cold_history",
+                  "source_database_writes": 0
+              }, indent=2))
+          PY_EXPORT_CHECK
+          openssl cms -encrypt -binary -aes-256-gcm -outform DER \
+            -in "$SPY_WORK/sp500_spy_sep_oct_2026.zip" \
+            -out "$SPY_WORK/delivery/sp500-export.cms" "$SPY_WORK/recipient.crt"
+      - name: Upload the encrypted export package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp500-private-export-encrypted
+          path: ${{ runner.temp }}/sp500-private-export/delivery/sp500-export.cms
+          if-no-files-found: error
+          retention-days: 1
