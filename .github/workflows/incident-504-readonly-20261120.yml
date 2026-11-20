@@ -101,6 +101,99 @@ jobs:
                         latest[key] = ts
                 print(name, json.dumps({"totals": totals, "latest_utc": latest}, sort_keys=True))
             PY
+            python3 - <<'PY'
+            import json
+            import math
+            import re
+            import subprocess
+            import urllib.request
+            from collections import Counter
+
+            def read_cached(path, limit):
+                with urllib.request.urlopen("http://127.0.0.1:8790" + path, timeout=5) as response:
+                    body = response.read(limit + 1)
+                if len(body) > limit:
+                    raise ValueError("response size bound exceeded")
+                value = json.loads(body)
+                if not isinstance(value, dict):
+                    raise ValueError("unexpected cached response")
+                return value
+
+            def obj(value):
+                return value if isinstance(value, dict) else {}
+
+            def finite(value):
+                return type(value) in (int, float) and math.isfinite(value)
+
+            def summary(state, status):
+                tick = obj(state.get("tick"))
+                feeds = obj(tick.get("feeds"))
+                chain = obj(feeds.get("chain"))
+                options = obj(tick.get("options_summary"))
+                derivatives = obj(tick.get("option_derivative_state"))
+                chain_error = str(chain.get("error") or "")
+                cache = obj(chain.get("cache_fallback"))
+                market = obj(tick.get("market"))
+                raw_metrics = obj(derivatives.get("metrics"))
+                confidences = [row.get("confidence") for row in raw_metrics.values()
+                               if isinstance(row, dict) and finite(row.get("confidence"))]
+                snapshots = state.get("ai_history")
+                instrument = tick.get("instrument")
+                return {
+                    "scope": "cached_read_only_no_new_analysis",
+                    "current_instrument": instrument if isinstance(instrument, str)
+                                          and re.fullmatch(r"[A-Z0-9_]{2,16}", instrument) else None,
+                    "active_trade_present": bool(tick.get("trade")),
+                    "saved_reviews_for_active_trade": len(snapshots) if isinstance(snapshots, list) else 0,
+                    "snapshot_available": status.get("ready") is True,
+                    "option_context_available": bool(options),
+                    "option_market_available": market.get("available") is True,
+                    "option_age_s": round(options["chain_age_sec"], 1)
+                                    if finite(options.get("chain_age_sec")) else None,
+                    "option_cache_used": cache.get("used") is True,
+                    "density_integrity_error": next((code for code in (
+                        "OPTION_DENSITY_CENTER_MISMATCH", "OPTION_DENSITY_CENTER_UNAVAILABLE"
+                    ) if code in chain_error), None),
+                    "derivatives_available": derivatives.get("available") is True,
+                    "derivative_sample_count": derivatives.get("sample_count")
+                                               if type(derivatives.get("sample_count")) is int else None,
+                    "metrics_with_confidence": len(confidences),
+                    "metrics_below_25_pct_confidence": sum(value < 0.25 for value in confidences),
+                }
+
+            def startup_timings():
+                phases = subprocess.run(
+                    ["journalctl", "-u", "seiltanzer", "-b", "--since", "-6 hours",
+                     "-n", "40", "--no-pager", "-o", "json", "--grep", "^STARTUP_PHASE phase="],
+                    capture_output=True, text=True, timeout=12, check=False,
+                )
+                allowed = ("begin", "storage.prepare.begin", "storage.prepare.complete",
+                           "app.create.complete", "schema.backup.begin", "schema.backup.complete",
+                           "storage.runtime.begin", "storage.runtime.complete", "routes.complete", "uvicorn.run")
+                starts = {}
+                for line in phases.stdout.splitlines():
+                    row = json.loads(line)
+                    match = re.fullmatch(r"STARTUP_PHASE phase=([a-z.]+) elapsed_sec=([0-9.]+)",
+                                         str(row.get("MESSAGE") or ""))
+                    if not match or match[1] not in allowed:
+                        continue
+                    key = str(row.get("_PID") or "")
+                    group = starts.setdefault(key, {"first_utc_epoch": None, "phase_elapsed_s": {}})
+                    stamp = row.get("__REALTIME_TIMESTAMP")
+                    if isinstance(stamp, str) and stamp.isdecimal() and group["first_utc_epoch"] is None:
+                        group["first_utc_epoch"] = int(stamp) // 1_000_000
+                    group["phase_elapsed_s"][match[1]] = round(float(match[2]), 3)
+                return list(starts.values())[-3:]
+
+            def main():
+                print("service_startup_timings " + json.dumps(startup_timings(), allow_nan=False))
+                state = read_cached("/api/state", 8_000_000)
+                status = read_cached("/api/ai/snapshot/status", 128_000)
+                print("live_review_summary " + json.dumps(summary(state, status), allow_nan=False, sort_keys=True))
+
+            if __name__ == "__main__":
+                main()
+            PY
       - name: Repeat public checks after the VPS sample
         run: |
           for route in / /api/state; do
