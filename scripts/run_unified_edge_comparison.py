@@ -81,9 +81,12 @@ def observed_replay(snapshot, record, candidate):
     points = []
     for row in record.get('path_points') or []:
         ts, r = number(row.get('ts')), number(row.get('r'))
-        if ts is None or r is None or ts < captured:
+        if ts is None or ts < captured:
             continue
-        points.append((ts, r))
+        if r is None and abs(ts - captured) <= 1e-6:
+            return unavailable('ACTUAL_CAPTURE_AND_FUTURE_PATH_POINTS_UNAVAILABLE')
+        if r is not None:
+            points.append((ts, r))
     points = sorted(dict(points).items())
     capture_basis = 'recorded_path_point'
     if not points or abs(points[0][0] - captured) > 1e-6:

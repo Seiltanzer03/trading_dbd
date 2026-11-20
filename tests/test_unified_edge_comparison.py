@@ -273,7 +273,8 @@ def test_verified_repriced_capture_survives_without_presentation_observation():
     assert (value, source) == keyed
 
 
-@pytest.mark.parametrize('failure', ['stale', 'future', 'not_authoritative', 'mismatched_r'])
+@pytest.mark.parametrize('failure', ['stale', 'future', 'not_authoritative', 'mismatched_r',
+    'declared_proxy', 'malformed_derived', 'nested_demo', 'malformed_state', 'malformed_source', 'string_geometry'])
 def test_invalid_repriced_anchor_uses_neither_old_presentation_nor_fake_path(failure):
     from seiltanzer.decision_research import canonical_snapshot
 
@@ -284,12 +285,33 @@ def test_invalid_repriced_anchor_uses_neither_old_presentation_nor_fake_path(fai
         quote['production_authority'] = False
     elif failure == 'mismatched_r':
         value['policy_manager']['inputs']['r0'] = .8
+    elif failure == 'declared_proxy':
+        quote['is_proxy'] = True
+    elif failure == 'malformed_derived':
+        quote['derived'] = 'true'
+    elif failure == 'nested_demo':
+        quote['demo'] = True
+    elif failure == 'malformed_state':
+        value['position_state'] = ['bad shape']
+    elif failure == 'malformed_source':
+        quote['source'] = ['bad shape']
+    elif failure == 'string_geometry':
+        quote['value'] = 131.
+        value['trade_geometry'].update(current='131', current_r=3.1)
+        value['policy_manager']['inputs']['r0'] = 3.1
     else:
         quote['timestamp'] = t0-31 if failure == 'stale' else t0+1
         value['market_refresh']['actual_provider_timestamp'] = quote['timestamp']
     canonical = canonical_snapshot(value)
     assert canonical['initial_r'] is None and canonical['initial_price'] is None
     source = record(value, [{'ts': t0+3, 'r': .9}])
+    assert observed_replay(value, source, choice('EXIT'))['available'] is False
+
+
+def test_invalid_exact_path_point_cannot_be_replaced_by_authoritative_archive_quote():
+    value, _ = _repriced_archive()
+    t0 = value['captured_ts']
+    source = record(value, [{'ts': t0, 'r': 'nan'}, {'ts': t0+3, 'r': .9}])
     assert observed_replay(value, source, choice('EXIT'))['available'] is False
 
 

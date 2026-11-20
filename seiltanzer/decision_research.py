@@ -188,10 +188,25 @@ def observed_repriced_capture(snapshot: dict) -> tuple[float, float] | None:
     audit = _at(manager, 'input_audit', default={})
     rows = _at(audit, 'rows', default={})
     quote = _at(rows, 'instrument_price', default={})
-    if not all(isinstance(value, dict) for value in (manager, audit, rows, quote)):
+    geometry = snapshot.get('trade_geometry')
+    strategy = snapshot.get('strategy')
+    decision = _at(manager, 'management_decision')
+    if not all(isinstance(value, dict) for value in (manager, audit, rows, quote, geometry,
+            strategy, decision, snapshot.get('position_state'))):
         return None
     authority = quote.get('production_authority')
     if authority is not None and authority is not True:
+        return None
+    for field in ('is_proxy', 'derived', 'demo', 'synthetic_data_used'):
+        flag = quote.get(field)
+        if flag is not None and flag is not False:
+            return None
+    if (not isinstance(quote.get('source'), str)
+            or not isinstance(strategy.get('instrument') or snapshot.get('instrument'), str)):
+        return None
+    levels = [geometry.get(key) for key in ('entry', 'original_stop', 'current',
+                                            'active_risk_barrier', 'final_take')]
+    if any(type(value) not in (int, float) or number(value) is None for value in levels):
         return None
     # Check the configured native source even when the archived row has an
     # authority flag, as the live comparison does before it records the quote.
@@ -204,8 +219,7 @@ def observed_repriced_capture(snapshot: dict) -> tuple[float, float] | None:
     if (captured is None or clock is None or prior is None or not 0 < prior <= captured
             or clock != number(quote.get('timestamp')) or not 0 < clock <= captured or captured-clock > 30):
         return None
-    geometry = snapshot['trade_geometry']
-    entry, stop, current = (number(geometry.get(key)) for key in ('entry', 'original_stop', 'current'))
+    entry, stop, current, _, _ = levels
     if current != number(quote.get('value')):
         return None
     r = (current-entry) / (entry-stop)
@@ -224,7 +238,7 @@ def canonical_snapshot(snapshot: dict) -> dict:
     decision = (snapshot.get("effective_management_decision")
                 or manager.get("management_decision") or {})
     production = (
-        decision.get("policy")
+        _at(decision, "policy")
         or _at(manager, "recommendation", "policy")
         or "HOLD"
     )
