@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 95
     env:
-      SPY_WORK: ${{ runner.temp }}/sp500-private-export
       PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +30,8 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           umask 077
+          SPY_WORK="$RUNNER_TEMP/sp500-private-export"
+          echo "SPY_WORK=$SPY_WORK" >> "$GITHUB_ENV"
           mkdir -p "$SPY_WORK/delivery"
           sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
           df -h "$RUNNER_TEMP"
