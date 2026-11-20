@@ -1,4 +1,4 @@
-name: verify-ede-disposable-runner-space
+name: verify-installed-provider-packet
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -6,28 +6,103 @@ on:
 permissions:
   contents: read
 jobs:
-  qualify:
+  compare:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
-      - name: Measure the existing SDK reclamation on the disposable GitHub worker
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          before=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')
-          # The same disposable SDK paths are reclaimed in the repository's
-          # existing hosted JSON rebuild and verified history workflows.
-          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          after=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')
-          BEFORE_BYTES="$before" AFTER_BYTES="$after" python3 - <<'PY'
-          import json
-          import os
-          before, after = (int(os.environ[name]) for name in ('BEFORE_BYTES','AFTER_BYTES'))
-          raw_previous = 14_133_252_096
-          expanded_cap = 25 * 1024**3
-          union_reserve = 1024**3 + 2 * expanded_cap + 3 * 128 * 1024**2
-          required_before_dependencies = raw_previous + expanded_cap + union_reserve
-          print('EDE_WORKER_RECLAMATION=' + json.dumps(dict(before_bytes=before, after_bytes=after,
-              reclaimed_bytes=after-before, prior_snapshot_conservative_bytes=required_before_dependencies,
-              estimated_spare_before_dependencies=after-required_before_dependencies)))
-          PY
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: 94.241.171.182
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          command_timeout: 2m
+          script: |
+            set -eu
+            cd /opt/seiltanzer
+            test "$(git rev-parse HEAD)" = '64e026904861266f713402dee1b2f05310f1365f'
+            .venv/bin/python -B -u - <<'PY'
+            import contextlib
+            import hashlib
+            import json
+            import re
+            import sqlite3
+            import urllib.request
+
+            from seiltanzer.ai_provider_decision_packet import (INDEPENDENT_INPUT_MAX_BYTES, PACKET_VERSION,
+                build_decision_packet, restore_decision_rows)
+            from seiltanzer.ai_provider_guard import compact_provider_snapshot
+            from seiltanzer.ai_runtime_report_v20 import _provider_decision_inputs
+            from seiltanzer.decision_research import validate_no_future_timestamps
+            from scripts.run_unified_edge_comparison import observed_replay
+
+            origin = 1795116363.2902696
+            with contextlib.closing(sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro', uri=True, timeout=2.)) as db:
+                db.execute('PRAGMA query_only=ON')
+                ids = db.execute("SELECT id FROM trades WHERE instrument='NAS100' ORDER BY id DESC LIMIT 12").fetchall()
+                matching = []
+                for (trade_id,) in ids:
+                    rows = db.execute('SELECT review_id,captured_ts,snapshot_json,snapshot_sha256 FROM decision_snapshots WHERE trade_id=? AND captured_ts BETWEEN ? AND ? AND length(snapshot_json)<=2000000 ORDER BY captured_ts LIMIT 8', (trade_id, origin - 2, origin + 180)).fetchall()
+                    for review_id, captured, raw, digest in rows:
+                        snapshot = json.loads(raw)
+                        clock = (snapshot.get('market_refresh') or {}).get('original_snapshot_ts') or captured
+                        if abs(clock - origin) < .1:
+                            assert hashlib.sha256(raw.encode()).hexdigest() == digest
+                            matching.append((review_id, snapshot))
+                assert len(matching) == 1
+                review_id, snapshot = matching[0]
+                db.row_factory = sqlite3.Row
+                captured = snapshot['captured_ts']
+                horizon = ((snapshot.get('policy_manager') or {}).get('inputs') or {}).get('horizon_minutes')
+                endpoint = captured + 60 * horizon if isinstance(horizon, (int, float)) and horizon > 0 else None
+                if endpoint is None:
+                    points = []
+                else:
+                    points = [dict(row) for row in db.execute('SELECT ts,price,r FROM decision_path_points WHERE review_id=? AND ts>=? AND ts<=? ORDER BY ts LIMIT 6001', (review_id, captured, endpoint))]
+                    if len(points) <= 6000 and (not points or points[-1]['ts'] < endpoint):
+                        after = db.execute('SELECT ts,price,r FROM decision_path_points WHERE review_id=? AND ts>? ORDER BY ts LIMIT 1', (review_id, endpoint)).fetchone()
+                        if after is not None:
+                            points.append(dict(after))
+                saved_replay = db.execute('SELECT resolution_kind,replay_json FROM decision_replays WHERE review_id=? AND length(replay_json)<=2000000', (review_id,)).fetchone()
+                archive = {'path_points': points[:6000], 'path_truncated': len(points)>6000,
+                           'stored_replay': dict(saved_replay) if saved_replay else None}
+            serialize = lambda x: json.dumps(x, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
+            wire, full, aliases = _provider_decision_inputs(compact_provider_snapshot(snapshot), snapshot)
+            baseline, baseline_aliases = build_decision_packet(full, version=PACKET_VERSION)
+            original_json, fixed_json = serialize(baseline), serialize(wire)
+            original_size, fixed_size = (len(value.encode('utf-8')) for value in (original_json, fixed_json))
+            assert original_size > INDEPENDENT_INPUT_MAX_BYTES >= fixed_size
+            decoded = json.loads(fixed_json)
+            restored = restore_decision_rows(decoded)
+            assert restored == restore_decision_rows(json.loads(original_json)) and aliases == baseline_aliases
+            validate_no_future_timestamps(decoded, snapshot['captured_ts'])
+            print('INSTALLED_NAS_PROVIDER_PACKET=' + json.dumps(dict(installed_sha='64e026904861266f713402dee1b2f05310f1365f',
+                archive_sha=snapshot.get('runtime_code_sha'), wire_version=wire['decision_packet_version'],
+                v1_bytes=original_size, v2_bytes=fixed_size, limit=INDEPENDENT_INPUT_MAX_BYTES,
+                metric_count=len(restored['decision_model_metrics']), recovered_all_packet_fields=True,
+                network_provider_calls=0)), flush=True)
+
+            entry = (snapshot.get('trade_geometry') or {}).get('entry')
+            move = next((row for row in snapshot.get('active_management_candidates') or []
+                        if row.get('policy')=='MOVE_TO_BE' and entry is not None
+                        and (row.get('parameters') or {}).get('stop_price')==entry), None)
+            policies = ('HOLD', 'CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT', 'MOVE_TO_BE')
+            comparisons = {name: observed_replay(snapshot, archive, move if name=='MOVE_TO_BE' else
+                           {'policy': name, 'candidate_id': name, 'parameters': {}}) for name in policies}
+            print('NAS_SIX_ACTION_PATH_COVERAGE=' + json.dumps(dict(
+                observed_points=len(archive['path_points']),
+                available=[name for name,row in comparisons.items() if row['available']],
+                missing={name:row['reason'] for name,row in comparisons.items() if not row['available']},
+                assumed_costs=any(row.get('costs_assumed') for row in comparisons.values()),
+                ledger_settled_profit_proven=False)), flush=True)
+
+            with urllib.request.urlopen('http://127.0.0.1:8790/api/ai/snapshot/status', timeout=5) as response:
+                raw = response.read(150001)
+            assert len(raw)<=150000
+            status = json.loads(raw)
+            receipt = status.get('family_market_forecasts') or {}
+            error = status.get('last_error') or ''
+            controlled = re.fullmatch(r'(?:RuntimeError|ValueError):([A-Z][A-Z0-9_]{4,80})', error)
+            print('INSTALLED_CURRENT_SNAPSHOT=' + json.dumps(dict(active=status.get('current_trade_id') is not None,
+                ready=status.get('ready'), instrument=status.get('current_instrument'), invalidation=status.get('invalidated_reason'),
+                public_reason=controlled.group(1) if controlled else None, forecasts=receipt.get('available_forecasts_at_capture'))), flush=True)
+            PY
