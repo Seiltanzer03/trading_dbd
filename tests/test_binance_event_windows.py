@@ -22,19 +22,25 @@ class Response:
 
 
 class Client:
-    def __init__(self,deny=False):self.calls=[];self.deny=deny
+    def __init__(self,deny=False):
+        self.calls=[]
+        self.deny=deny
+        self.files={}
     def get(self,url,*,timeout):
         self.calls.append(url)
         if self.deny:
             response=Response(b'');response.status_code=451;return response
         filename=url.rsplit('/',1)[1].removesuffix('.CHECKSUM')
-        # Two calendar windows and an unrelated observation between them.
-        start=ts('2026-09-01')
-        raw=''.join(line(start=start+300*i) for i in range(12*288))
-        stream=io.BytesIO()
-        with zipfile.ZipFile(stream,'w',zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(filename[:-4]+'.csv',raw)
-        body=stream.getvalue()
+        if filename not in self.files:
+            # Both requests refer to the same object. Regenerating the ZIP
+            # changes its member timestamp at the next two-second boundary.
+            start=ts('2026-09-01')
+            raw=''.join(line(start=start+300*i) for i in range(12*288))
+            stream=io.BytesIO()
+            with zipfile.ZipFile(stream,'w',zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(filename[:-4]+'.csv',raw)
+            self.files[filename]=stream.getvalue()
+        body=self.files[filename]
         return Response(f'{hashlib.sha256(body).hexdigest()}  {filename}\n'.encode() if url.endswith('.CHECKSUM') else body)
 
 

@@ -12,7 +12,7 @@ import time
 import numpy as np
 
 from seiltanzer.ai_policy_base import PolicyInputs
-from seiltanzer.decision_research import validate_no_future_timestamps
+from seiltanzer.decision_research import observed_repriced_capture, validate_no_future_timestamps
 from seiltanzer.execution_simulator import ExecutionSpec, replay_execution_path
 from seiltanzer.rollover_economics import frozen_rollover_schedule, replay_rollover_cost
 from seiltanzer.unified_candidate_economics import BASE_FRACTIONS, _variant, _weighted_cvar
@@ -85,7 +85,15 @@ def observed_replay(snapshot, record, candidate):
             continue
         points.append((ts, r))
     points = sorted(dict(points).items())
-    # Never create a synthetic initial observation to rescue absent data.
+    capture_basis = 'recorded_path_point'
+    if not points or abs(points[0][0] - captured) > 1e-6:
+        # The immutable review retains an actual quote even when the path
+        # writer skipped its capture point. Keep the original review cutoff
+        # and source clock and leave the archived path untouched.
+        anchor = observed_repriced_capture(snapshot)
+        if anchor is not None:
+            points.insert(0, (captured, anchor[1]))
+            capture_basis = 'frozen_repriced_authoritative_quote'
     if (not points or abs(points[0][0] - captured) > 1e-6
             or abs(points[0][1] - inputs.r0) > 1e-4):
         return unavailable('ACTUAL_CAPTURE_AND_FUTURE_PATH_POINTS_UNAVAILABLE')
@@ -174,6 +182,7 @@ def observed_replay(snapshot, record, candidate):
     except (ValueError, TypeError):
         pass
     return {'available': True, 'reason': 'OBSERVED_PATH_COUNTERFACTUAL_WITH_FROZEN_COST_MODEL',
+            'capture_basis': capture_basis,
             **_frozen_cost_components(costs, fraction),
             'net_r_on_remaining': float(net), 'net_r_on_original_position': total_net,
             'original_position_net_basis': 'prior_net_plus_future_modeled_net' if total_net is not None else 'UNAVAILABLE_PRIOR_NET_COSTS_OR_EXPOSURE',
