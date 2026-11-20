@@ -1,4 +1,4 @@
-name: inspect-ede-worker-capacity
+name: verify-ede-disposable-runner-space
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -6,34 +6,28 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  qualify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Measure the disposable research worker filesystem
+      - name: Measure the existing SDK reclamation on the disposable GitHub worker
         run: |
+          set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
-          python3 - <<'PY'
+          before=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')
+          # The same disposable SDK paths are reclaimed in the repository's
+          # existing hosted JSON rebuild and verified history workflows.
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          after=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')
+          BEFORE_BYTES="$before" AFTER_BYTES="$after" python3 - <<'PY'
           import json
           import os
-          from pathlib import Path
-          import shutil
-          import subprocess
-
-          locations = [Path(os.environ['RUNNER_TEMP']), Path('/mnt')]
-          disks = []
-          for location in locations:
-              if location.is_dir():
-                  status = shutil.disk_usage(location)
-                  disks.append(dict(location=location.name or '/', device=location.stat().st_dev,
-                                    total=status.total, free=status.free, writable=os.access(location,os.W_OK)))
-          print('EDE_WORKER_CAPACITY=' + json.dumps(dict(disks=disks)), flush=True)
-          bundled = {}
-          for name in ('/usr/local/lib/android','/usr/share/dotnet','/opt/ghc'):
-              try:
-                  run = subprocess.run(['du','-sxB1', name], capture_output=True, text=True, timeout=8)
-                  bundled[name] = int(run.stdout.split(maxsplit=1)[0]) if run.returncode==0 else None
-              except subprocess.TimeoutExpired:
-                  bundled[name] = None
-          print('EDE_WORKER_SDK_BYTES=' + json.dumps(bundled))
+          before, after = (int(os.environ[name]) for name in ('BEFORE_BYTES','AFTER_BYTES'))
+          raw_previous = 14_133_252_096
+          expanded_cap = 25 * 1024**3
+          union_reserve = 1024**3 + 2 * expanded_cap + 3 * 128 * 1024**2
+          required_before_dependencies = raw_previous + expanded_cap + union_reserve
+          print('EDE_WORKER_RECLAMATION=' + json.dumps(dict(before_bytes=before, after_bytes=after,
+              reclaimed_bytes=after-before, prior_snapshot_conservative_bytes=required_before_dependencies,
+              estimated_spare_before_dependencies=after-required_before_dependencies)))
           PY
