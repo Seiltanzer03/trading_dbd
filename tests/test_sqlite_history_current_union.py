@@ -34,7 +34,7 @@ def _current_proof(path, result):
                 storage_manifest=manifest, storage_manifest_sha256=manifest_digest(manifest))
 
 
-def test_current_union_preserves_resolved_hot_prefix_and_appended_rows(tmp_path):
+def test_current_union_preserves_resolved_hot_prefix_and_appended_rows(tmp_path, monkeypatch):
     _, hot, result, raw, client = _hot(tmp_path)
     with closing(sqlite3.connect(hot)) as conn:
         with conn:
@@ -42,6 +42,14 @@ def test_current_union_preserves_resolved_hot_prefix_and_appended_rows(tmp_path)
                          "WHERE observation_id='obs-pending-110'")
     proof = _current_proof(hot, result)
     destination = tmp_path / 'full-current.sqlite3'
+    hashed_selections = []
+    logical_hash = union.archive._logical_hash
+
+    def trace_typed_hash(conn, table, columns, rowid, where='', parameters=(), **kwargs):
+        hashed_selections.append((table, where))
+        return logical_hash(conn, table, columns, rowid, where, parameters, **kwargs)
+
+    monkeypatch.setattr(union.archive, '_logical_hash', trace_typed_hash)
     report = union.hydrate_current_snapshot(
         hot, destination, source_receipt=proof, catalog_bytes=raw, client=client)
     with closing(sqlite3.connect(destination)) as conn:
@@ -56,6 +64,9 @@ def test_current_union_preserves_resolved_hot_prefix_and_appended_rows(tmp_path)
     assert report['contract'] == 'sqlite-history-current-union-v1'
     assert report['production_authority'] is False
     assert hashlib.sha256(hot.read_bytes()).hexdigest() == proof['database_sha256']
+    assert any(table.startswith('verified_hot.') and not where for table, where in hashed_selections)
+    assert any('IN (SELECT' in where and 'verified_hot.' in where for _, where in hashed_selections)
+    assert all('>?' not in where for _, where in hashed_selections)
 
 
 def test_current_union_allows_new_hot_growth_beyond_original_catalog_budget(tmp_path):

@@ -75,6 +75,11 @@ audit.selection_diagnostics = {basis:'DECLARED_POLICY_ORDER_AND_CANDIDATE_ID',
   equal_score_candidate_ids:['MOVE_TO_BE','TIGHTEN_STOP']};
 mountEdgeManagement(container,{available:false,unified_edge_ensemble:audit});
 const text = container.textContent;
+const protectionContainer = new Element();
+Object.assign(candidates[1], {unconfirmed_tail_protection:true,delta_expected_r:-.00428,delta_cvar_r:.11790});
+mountEdgeManagement(protectionContainer,{unified_edge_ensemble:{...audit,
+  selected_candidate_id:'CLOSE_10',selected_policy:'CLOSE_10'}});
+assert.match(protectionContainer.textContent,/Защитное сокращение по модели.*ΔExpected -0\.004R, ΔCVaR10 \+0\.118R.*нет отдельного подтверждения/);
 const trainedContainer = new Element();
 mountEdgeManagement(trainedContainer,{unified_edge_ensemble:{...audit,
   market_family_counterfactuals:[{excluded_family_id:'session',selected_candidate_id:'HOLD',selected_policy:'HOLD'}],

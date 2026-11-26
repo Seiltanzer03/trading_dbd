@@ -2,6 +2,7 @@
 import hashlib
 import importlib
 import json
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -12,17 +13,26 @@ from test_sqlite_history_current_union import _hot, _current_proof
 from test_verify_immutable_snapshot import create_snapshot
 
 
-def test_plain_verified_snapshot_requires_no_cloud_access_or_second_copy(tmp_path):
+def test_plain_verified_snapshot_requires_no_cloud_access_or_second_copy(tmp_path, monkeypatch):
     database, manifest = create_snapshot(tmp_path)
     class NoCloud:
         def get_object(self, **kwargs):
             raise AssertionError('Plain snapshot should not read cloud history')
     prep = importlib.import_module('scripts.prepare_research_history')
+    verified = []
+    verify = prep.verify
+
+    def count_verification(path, manifest_path):
+        verified.append(path)
+        return verify(path, manifest_path)
+
+    monkeypatch.setattr(prep, 'verify', count_verification)
     result = prep.prepare_research_snapshot(database, manifest, tmp_path/'unused.sqlite3', client=NoCloud())
     assert result['database'] == str(database.resolve())
     assert result['manifest'] == str(manifest.resolve())
     assert result['history_union_prepared'] is False
     assert not (tmp_path/'unused.sqlite3').exists()
+    assert verified == [database]
 
 
 def test_research_readers_receive_complete_history_and_current_hot_outcomes(tmp_path):
@@ -45,6 +55,49 @@ def test_research_readers_receive_complete_history_and_current_hot_outcomes(tmp_
     assert output_manifest['production_authority'] is False
     assert 'cold_history_catalog_sha256' not in output_manifest
     assert hashlib.sha256(hot.read_bytes()).hexdigest() == proof['database_sha256']
+
+
+def test_research_refuses_changed_hot_input_during_catalog_read(tmp_path):
+    _, hot, report, _, client = _hot(tmp_path)
+    manifest = tmp_path/'hot.manifest.json'
+    manifest.write_text(json.dumps(report['hot_restore_proof']['storage_manifest']))
+    destination = tmp_path/'research.sqlite3'
+
+    class ChangedDuringFetch:
+        def get_object(self, **kwargs):
+            if kwargs['Key'] == report['hot_restore_proof']['storage_manifest']['cold_history_catalog_object_key']:
+                hot.chmod(0o600)
+                with closing(sqlite3.connect(hot)) as conn, conn:
+                    conn.execute("UPDATE passive_market_observations SET payload='changed' WHERE rowid=140")
+            return client.get_object(**kwargs)
+
+        head_object = staticmethod(client.head_object)
+
+    prep = importlib.import_module('scripts.prepare_research_history')
+    with pytest.raises(ValueError, match='verified hot manifest pin'):
+        prep.prepare_research_snapshot(hot, manifest, destination, client=ChangedDuringFetch())
+    assert not destination.exists()
+
+
+def test_research_refuses_same_size_rewrite_during_verification(tmp_path, monkeypatch):
+    database, manifest = create_snapshot(tmp_path)
+    prep = importlib.import_module('scripts.prepare_research_history')
+    verify = prep.verify
+
+    def verify_then_rewrite(path, manifest_path):
+        verified = verify(path, manifest_path)
+        info = path.stat()
+        path.chmod(0o600)
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute("UPDATE evidence SET value='modified'")
+        path.chmod(0o444)
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        assert path.stat().st_size == info.st_size
+        return verified
+
+    monkeypatch.setattr(prep, 'verify', verify_then_rewrite)
+    with pytest.raises(ValueError, match='changed during verification'):
+        prep.prepare_research_snapshot(database, manifest, tmp_path/'research.sqlite3')
 
 
 def test_bad_manifest_history_pin_fails_before_catalog_fetch(tmp_path):
@@ -72,12 +125,13 @@ def test_research_output_manifest_collision_is_not_overwritten(tmp_path):
     assert not destination.exists()
 
 
-def test_coded_plain_history_expands_exact_text_without_cloud_or_changing_backup(tmp_path):
+def test_coded_plain_history_expands_exact_text_without_cloud_or_changing_backup(tmp_path, monkeypatch):
     from test_sqlite_json_rebuild import source, proof
-    from scripts.sqlite_json_rebuild import rebuild_snapshot
+    from scripts import sqlite_json_rebuild
     from scripts.history_storage_loader import history_state
     original,text=source(tmp_path);coded=tmp_path/'coded.db'
-    result=rebuild_snapshot(original,coded,source_receipt=proof(original),mode='compress')
+    monkeypatch.setattr(sqlite_json_rebuild, 'MAX_BYTES', 64 * 1024**2)
+    result=sqlite_json_rebuild.rebuild_snapshot(original,coded,source_receipt=proof(original),mode='compress')
     manifest=tmp_path/'coded.json';manifest.write_text(json.dumps(result))
     before=coded.read_bytes()
     class NoCloud:
@@ -95,8 +149,8 @@ def test_coded_plain_history_expands_exact_text_without_cloud_or_changing_backup
 
 
 @pytest.mark.parametrize('runtime_state',[False,True])
-def test_coded_current_hot_expands_before_cold_union_keeps_current_outcomes_and_pins(tmp_path,runtime_state):
-    from scripts.sqlite_json_rebuild import rebuild_snapshot
+def test_coded_current_hot_expands_before_cold_union_keeps_current_outcomes_and_pins(tmp_path,runtime_state,monkeypatch):
+    from scripts import sqlite_json_rebuild
     from test_sqlite_json_rebuild import proof
     from test_sqlite_history_cutover import _build_cutover_fixture
     from scripts.sqlite_history_cutover import build_hot_cutover_snapshot
@@ -108,9 +162,19 @@ def test_coded_current_hot_expands_before_cold_union_keeps_current_outcomes_and_
         conn.execute('UPDATE passive_market_observations SET features_json=?,resolution_status=? WHERE rowid=140',(text,'resolved'))
         conn.commit()
     coded=tmp_path/'coded-hot.db'
-    result=rebuild_snapshot(hot,coded,source_receipt=proof(hot),mode='compress')
+    # The tiny fixture can exercise a bounded expansion on a small local disk.
+    monkeypatch.setattr(sqlite_json_rebuild, 'MAX_BYTES', 64 * 1024**2)
+    result=sqlite_json_rebuild.rebuild_snapshot(hot,coded,source_receipt=proof(hot),mode='compress')
     manifest=tmp_path/'coded-hot.json';manifest.write_text(json.dumps(result))
     prep=importlib.import_module('scripts.prepare_research_history')
+    verified = []
+    verify = prep.verify
+
+    def count_verification(path, manifest_path):
+        verified.append(path.name)
+        return verify(path, manifest_path)
+
+    monkeypatch.setattr(prep, 'verify', count_verification)
     prepared=prep.prepare_research_snapshot(coded,manifest,tmp_path/'research.db',client=client)
     assert prepared['history_union_prepared'] and prepared['json_payloads_expanded']
     with closing(sqlite3.connect(prepared['database'])) as conn:
@@ -120,3 +184,4 @@ def test_coded_current_hot_expands_before_cold_union_keeps_current_outcomes_and_
     assert out['raw_hot_database_sha256']==result['database_sha256']
     assert out['raw_physical_database_sha256']==result['database_sha256']
     assert 'cold_history_catalog_sha256' not in out
+    assert verified == [coded.name, 'plain.db', 'research.db']

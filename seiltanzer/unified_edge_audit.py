@@ -146,7 +146,7 @@ def compact_unified_ensemble(value: Any) -> dict:
             "execution_cost_r", "economics_basis", "source",
             "working_family_contributions",
             'model_family_contributions',
-            "quant_utility", "benefit_assessment",
+            "quant_utility", "benefit_assessment", "unconfirmed_tail_protection",
             "expected_sacrifice_check", "independent_evaluation",
             "paired_delta_ci95_lower_r", "matched_seed_tail_gain_lower_r",
             "expected_hold_net_r",
@@ -280,6 +280,12 @@ def render_unified_ensemble_lines(value: Any) -> list[str]:
     ]
     labels = {**COMPONENT_LABELS, **{row.get("component_id"): row.get("label")
                                   for row in audit.get("components") or [] if row.get("label")}}
+    chosen = next((row for row in audit.get("candidates") or [] if row.get("candidate_id") == selected), {})
+    if chosen.get("unconfirmed_tail_protection") is True:
+        lines.insert(2, f"Защитное сокращение по модели. Относительно HOLD ΔExpected "
+                     f"{_format(chosen.get('delta_expected_r'), 'R')}, ΔCVaR10 "
+                     f"{_format(chosen.get('delta_cvar_r'), 'R')}. "
+                     "HOLD проходит лимит риска. Для сокращения нет отдельного подтверждения.")
     utility_policy = audit.get('decision_utility') or {}
     if utility_policy:
         lines.insert(-1, "Защитная польза учитывается в количественном балле: ΔExpected + "

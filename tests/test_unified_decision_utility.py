@@ -86,6 +86,56 @@ def test_quant_protective_utility_can_pay_small_expected_loss(policy):
     assert ranked[1]['expected_net_r'] == pytest.approx(.756)
 
 
+@pytest.mark.parametrize('policy', ['CLOSE_10', 'CLOSE_25', 'CLOSE_50', 'EXIT'])
+def test_unconfirmed_reduction_is_reported_as_tail_protection(policy):
+    candidates = rows(-.00428, .11790, policy)
+    candidates[1].update(
+        admission_authority='MANUAL_COMPARISON_PREFLIGHT_PASS',
+        paired_delta_ci95_lower_r=-.01, matched_seed_tail_gain_lower_r=.11790,
+    )
+    chosen, ranked, _ = rank_candidates(candidates, opinions(), context(), SCHEMES['quant100'])
+    assert chosen['policy'] == policy
+    assert ranked[1]['ranking_eligible'] is True
+    assert ranked[1]['unconfirmed_tail_protection'] is True
+    assert ranked[1]['expected_net_r'] == pytest.approx(.76672)
+    assert ranked[1]['delta_cvar_r'] == pytest.approx(.11790)
+
+
+@pytest.mark.parametrize('authority,hold_eligible,delta', [
+    ('FROZEN_CANDIDATE_CONFIRMATION_PASS', True, -.00428),
+    ('FROZEN_SELECTED_CONFIRMATION_PASS', True, -.00428),
+    ('MANUAL_COMPARISON_PREFLIGHT_PASS', False, -.00428),
+    ('MANUAL_COMPARISON_PREFLIGHT_PASS', True, .045),
+])
+def test_confirmed_required_or_profitable_reduction_is_not_model_only(authority, hold_eligible, delta):
+    candidates = rows(delta, .11790, 'CLOSE_10')
+    candidates[0]['eligible'] = hold_eligible
+    candidates[1]['admission_authority'] = authority
+    chosen, ranked, _ = rank_candidates(candidates, opinions(), context(), SCHEMES['quant100'])
+    assert chosen['policy'] == 'CLOSE_10'
+    assert ranked[1]['unconfirmed_tail_protection'] is False
+
+
+def test_protective_confirmation_study_reuses_bank_without_changing_plan(monkeypatch):
+    from seiltanzer import unified_edge_ensemble as ensemble
+    from seiltanzer.unified_edge_audit import render_unified_ensemble_lines
+
+    monkeypatch.setattr(ensemble, '_manual_candidate_preflight', lambda _: True)
+    value = bank_snapshot([[1., -1.]] * 120 + [[1., 1.3]] * 880, [.001] * 1000)
+    value['policy_manager']['selection_rule']['eligible'] = ['HOLD', 'CLOSE_10']
+    value['policy_manager']['policies'] = {
+        policy: {'expected_final_r': 1.0, 'cvar10_r': -1.02,
+                 'outcomes_include_execution_costs': True}
+        for policy in ('HOLD', 'CLOSE_10')
+    }
+    live = build_unified_ensemble(value, scheme='quant100')
+    studied = build_unified_ensemble(value, scheme='quant100', include_tail_confirmation_study=True)
+    assert studied.pop('tail_confirmation_study')['selected_policy'] == 'HOLD'
+    assert studied == live
+    assert live['selected_policy'] == 'CLOSE_10'
+    assert 'Защитное сокращение по модели' in '\n'.join(render_unified_ensemble_lines(live))
+
+
 def test_extending_take_cannot_buy_admission_using_tail_gain():
     chosen, ranked, _ = rank_candidates(rows(.002, .22, 'EXTEND_TAKE'), opinions(), context(), SCHEMES['quant100'])
     assert chosen['policy'] == 'HOLD'
