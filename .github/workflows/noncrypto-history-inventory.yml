@@ -1,111 +1,26 @@
-name: verify-trade-evidence-on-installed-pr571
+name: request-fresh-offhost-restore-drill
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
+  actions: write
   contents: read
 jobs:
-  verify:
+  dispatch:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
-    env:
-      EXPECTED_SHA: d2ef33701cbdc0333d27064059eee58a3864ed38
+    timeout-minutes: 3
     steps:
-      - name: Inspect existing execution receipts and configured provider authentication
-        uses: appleboy/ssh-action@v1
-        with:
-          host: 94.241.171.182
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
-          envs: EXPECTED_SHA
-          command_timeout: 2m
-          script: |
-            set -euo pipefail
-            cd /opt/seiltanzer
-            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-            .venv/bin/python -B -u - <<'PY'
-            import json
-            from pathlib import Path
-            import re
-            import sqlite3
-            import subprocess
-            import time
-            import urllib.request
-            import httpx
-
-            with urllib.request.urlopen("http://127.0.0.1:8790/api/position", timeout=4) as reply:
-                position = json.load(reply)
-            print("ACTIVE_POSITION", bool(position.get("trade_id")))
-
-            started = time.monotonic()
-            connection = sqlite3.connect("file:/opt/seiltanzer/data/trades.db?mode=ro", uri=True, timeout=1)
-            try:
-                connection.row_factory = sqlite3.Row
-                connection.execute("PRAGMA query_only=ON")
-                connection.set_progress_handler(lambda: int(time.monotonic() - started > 4), 1000)
-                observed = connection.execute("""
-                    SELECT COUNT(*) AS recorded_acknowledgements,
-                           COUNT(CASE WHEN stage = 'executed' THEN 1 END) AS executed_acknowledgements,
-                           COUNT(actual_broker_fill_ts) AS broker_fill_clock_present,
-                           COUNT(actual_fee_currency) AS actual_fee_present,
-                           COUNT(actual_slippage_currency) AS actual_slippage_present
-                      FROM execution_ack_observations
-                """).fetchone()
-                print("EXECUTION_RECEIPT_COVERAGE", json.dumps(dict(observed), sort_keys=True))
-            finally:
-                connection.close()
-
-            pid = int(subprocess.check_output(["systemctl","show","seiltanzer","-p","MainPID","--value"],
-                                             text=True, timeout=4).strip())
-            assert pid > 1
-            provider = {}
-            permitted = {b"OPENROUTER_API_KEY", b"OPENROUTER_PROXY", b"OPENROUTER_MODEL"}
-            for entry in Path("/proc", str(pid), "environ").read_bytes().split(b"\0"):
-                name, _, value = entry.partition(b"=")
-                if name in permitted:
-                    provider[name] = value.decode("utf-8").strip()
-            token = provider.get(b"OPENROUTER_API_KEY")
-            if token is None or not token:
-                print("OPENROUTER_KEY_STATUS", json.dumps({"configured": False, "inference_requests": 0}))
-            else:
-                started = time.monotonic()
-                try:
-                    with httpx.Client(proxy=provider.get(b"OPENROUTER_PROXY") or None,
-                                      timeout=8, follow_redirects=False) as client:
-                        response = client.get("https://openrouter.ai/api/v1/key",
-                                              headers={"Authorization": "Bearer " + token})
-                    result = {"configured": True, "http_status": response.status_code, "inference_requests": 0,
-                              "elapsed_ms": round((time.monotonic() - started) * 1000)}
-                    if response.status_code == 200:
-                        data = response.json().get("data") or {}
-                        remaining = data.get("limit_remaining")
-                        result["valid_metadata"] = isinstance(data.get("is_free_tier"), bool)
-                        result["is_free_tier"] = data.get("is_free_tier")
-                        result["key_limit_exhausted"] = (True if remaining <= 0 else False) if type(remaining) in (int, float) else None
-                    print("OPENROUTER_KEY_STATUS", json.dumps(result, sort_keys=True))
-                except (httpx.HTTPError, ValueError, TypeError) as exc:
-                    print("OPENROUTER_KEY_STATUS", json.dumps({"configured": True, "error_type": type(exc).__name__, "inference_requests": 0}))
-
-            # Emit only code-owned diagnostic values from the last archived real review.
-            out = subprocess.run(["journalctl", "-u", "seiltanzer", "--utc", "--since", "2026-11-19 19:25:30",
-                                  "--until", "2026-11-19 19:29:00", "-o", "cat", "--no-pager", "-n", "150"],
-                                 text=True, capture_output=True, timeout=6, check=False).stdout
-            observed_statuses = set()
-            historical_failure = set()
-            for line in out.splitlines():
-                m = re.search(r'HTTP Request: POST https://openrouter\.ai/api/v1/chat/completions "HTTP/\S+ ([1-5][0-9][0-9])', line)
-                if m:
-                    observed_statuses.add(int(m.group(1)))
-                if '"stage":"provider_fallback"' in line:
-                    try:
-                        problem = json.loads(line)
-                    except ValueError:
-                        continue
-                    kind = str(problem.get("exception_class") or "")
-                    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,79}", kind):
-                        historical_failure.add(kind)
-            print("ARCHIVED_PROVIDER_FAILURE", json.dumps({"http_statuses": sorted(observed_statuses),
-                                                          "error_types": sorted(historical_failure)}))
-            PY
+      - name: Start the existing read-only restore drill for current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
+          PROJECT_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error --max-time 15 \
+            --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --data '{"ref":"main","inputs":{"capacity_report":false}}' \
+            "$API_URL/repos/$PROJECT_REPO/actions/workflows/production-offhost-restore-drill.yml/dispatches"
