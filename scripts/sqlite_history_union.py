@@ -207,9 +207,10 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
     # The immutable catalog and all row/count/root checks remain unchanged.
     output_cap = MAX_CURRENT_RESEARCH_OUTPUT_BYTES if research_output else MAX_OUTPUT_BYTES
     maximum = min(output_cap, catalog_maximum + before['size']) if current else catalog_maximum
+    rollback_budget = 0 if research_output else maximum
     deadline = time.monotonic() + MAX_SECONDS
     _check(deadline, destination.parent,
-           needed=archive.RESERVE_BYTES + 2*maximum + 3*archive.MAX_BYTES)
+           needed=archive.RESERVE_BYTES + maximum + rollback_budget + 3*archive.MAX_BYTES)
     fd, name = tempfile.mkstemp(prefix='.history-union-', suffix='.sqlite3', dir=destination.parent)
     os.close(fd)
     work = Path(name)
@@ -226,7 +227,11 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
                         progress=lambda *_: _check(copy_deadline, destination.parent))
         original.close(); original = None
         _check(deadline, destination.parent)
-        conn.execute('PRAGMA journal_mode=DELETE')
+        # Only the new mkstemp-owned research file is disposable. Every failure
+        # drops it; verified sources and the published destination are separate.
+        mode = 'off' if research_output else 'delete'
+        if conn.execute('PRAGMA journal_mode='+mode).fetchone() != (mode,):
+            raise ValueError('History union could not set the staging journal mode')
         page_size = conn.execute('PRAGMA page_size').fetchone()[0]
         if work.stat().st_size > maximum:
             raise ValueError('Hot snapshot exceeds catalog output bound')
