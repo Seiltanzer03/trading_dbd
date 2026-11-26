@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -114,6 +115,34 @@ def test_current_union_does_not_hit_old_sqlite_page_cap_during_cold_merge(tmp_pa
     assert out.stat().st_size > catalog['maximum_hydrated_bytes']
     assert report['original_cold_table_roots_verified'] is True
     assert report['current_hot_rows_preserved'] is True
+
+
+def test_research_union_fits_without_a_second_output_sized_journal(tmp_path, monkeypatch):
+    _, hot, result, raw, client = _hot(tmp_path)
+    proof = _current_proof(hot, result)
+    output_bound = json.loads(raw)['maximum_hydrated_bytes'] + hot.stat().st_size
+    reserve = union.archive.RESERVE_BYTES + 3 * union.archive.MAX_BYTES
+    monkeypatch.setattr(union.shutil, 'disk_usage',
+                        lambda _path: SimpleNamespace(free=reserve + output_bound))
+    modes = set()
+    merge = union._merge
+
+    def trace_mode(conn, *args, **kwargs):
+        modes.add(conn.execute('PRAGMA journal_mode').fetchone()[0])
+        return merge(conn, *args, **kwargs)
+
+    monkeypatch.setattr(union, '_merge', trace_mode)
+    output = tmp_path / 'disposable-research.sqlite3'
+    with pytest.raises(ValueError, match='History union worker capacity'):
+        union.hydrate_current_snapshot(hot, output, source_receipt=proof,
+                                       catalog_bytes=raw, client=client)
+    assert not output.exists()
+    report = union.hydrate_current_snapshot(hot, output, source_receipt=proof,
+                                            catalog_bytes=raw, client=client, research_output=True)
+    assert modes == {'off'}
+    assert report['current_hot_rows_preserved'] is True
+    assert report['original_cold_table_roots_verified'] is True
+    assert identity(hot) == proof['verified_local_file']
 
 
 @pytest.mark.parametrize('field,value', [('payload', 'rewritten-input'),
