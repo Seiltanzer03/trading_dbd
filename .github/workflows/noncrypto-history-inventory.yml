@@ -1,4 +1,4 @@
-name: inspect-nas100-capture-path-anchor
+name: verify-installed-management-pr571
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -6,62 +6,96 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  verify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 4
+    timeout-minutes: 11
+    env:
+      EXPECTED_SHA: d2ef33701cbdc0333d27064059eee58a3864ed38
     steps:
-      - uses: appleboy/ssh-action@v1
+      - name: Check live routes and isolated management on the installed revision
+        uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
-          command_timeout: 2m
+          port: 22
+          command_timeout: 8m
+          envs: EXPECTED_SHA
           script: |
-            set -eu
+            set -euo pipefail
             cd /opt/seiltanzer
-            test "$(git rev-parse HEAD)" = '64e026904861266f713402dee1b2f05310f1365f'
+            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+            systemctl is-active seiltanzer
             .venv/bin/python -B -u - <<'PY'
-            from contextlib import closing
-            import hashlib
             import json
-            import sqlite3
+            import os
+            from pathlib import Path
+            import subprocess
+            import time
+            import urllib.request
 
-            from seiltanzer.decision_research import canonical_snapshot
-            from seiltanzer.unified_edge_ensemble import _manual_candidate_preflight
+            from scripts.production_functional_smoke import (
+                verify_isolated_unified_management_contract,
+                verify_management_ack_guard_contract,
+                verify_trade_settlement_contract,
+            )
 
-            origin = 1795116363.2902696
-            with closing(sqlite3.connect('file:/opt/seiltanzer/data/trades.db?mode=ro',uri=True,timeout=2)) as db:
-                db.row_factory=sqlite3.Row
-                db.execute('PRAGMA query_only=ON')
-                rows=[]
-                for trade in db.execute("SELECT id FROM trades WHERE instrument='NAS100' ORDER BY id DESC LIMIT 12").fetchall():
-                    rows += db.execute('SELECT review_id,captured_ts,snapshot_json,snapshot_sha256 FROM decision_snapshots '
-                        'WHERE trade_id=? AND captured_ts BETWEEN ? AND ? AND length(snapshot_json)<=2000000 '
-                        'ORDER BY captured_ts LIMIT 8',(trade['id'],origin-2,origin+180)).fetchall()
-                found=[]
-                for row in rows:
-                    snap=json.loads(row['snapshot_json'])
-                    actual=(snap.get('market_refresh') or {}).get('original_snapshot_ts') or row['captured_ts']
-                    if abs(actual-origin)<.1:
-                        assert hashlib.sha256(row['snapshot_json'].encode()).hexdigest()==row['snapshot_sha256']
-                        found.append((row,snap))
-                assert len(found)==1
-                row,snap=found[0]
-                first=db.execute('SELECT ts,r FROM decision_path_points WHERE review_id=? ORDER BY ts LIMIT 1',(row['review_id'],)).fetchone()
-                canonical=canonical_snapshot(snap)
-                ref=snap.get('market_refresh') or {}
-                manager=snap.get('policy_manager') or {}
-                quote=(((manager.get('input_audit') or {}).get('rows') or {}).get('instrument_price') or {})
-                geometry=snap.get('trade_geometry') or {}
-                inputs=manager.get('inputs') or {}
-                print('NAS_CAPTURE_PATH_ANCHOR=' + json.dumps(dict(
-                    observation_r_present=canonical['initial_r'] is not None,
-                    first_point_at_capture=first is not None and first['ts']==row['captured_ts'],
-                    first_point_lag_sec=round(first['ts']-row['captured_ts'],3) if first is not None else None,
-                    first_point_matches_frozen_r=first is not None and abs(first['r']-inputs['r0'])<=1e-4,
-                    repriced=ref.get('available') is True, quote_matches_geometry=quote.get('value')==geometry.get('current'),
-                    same_authoritative_price_clock=quote.get('timestamp')==ref.get('actual_provider_timestamp'),
-                    economics_r_matches_geometry=inputs.get('r0')==geometry.get('current_r'),
-                    real_quote_passed_preflight=_manual_candidate_preflight(snap),
-                    original_compaction=(snap.get('snapshot_budget') or {}).get('degrade_level'))),flush=True)
+            def cmd(*args):
+                return subprocess.check_output(args, text=True, timeout=5).strip()
+
+            expected = os.environ["EXPECTED_SHA"]
+            starting_pid = cmd("systemctl", "show", "seiltanzer", "-p", "MainPID", "--value")
+            assert int(starting_pid) > 1
+            deployed_ref = Path(cmd("git", "rev-parse", "--git-path", cmd("git", "symbolic-ref", "HEAD")))
+            boot_ts = int(next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime ")))
+            ticks = int(Path("/proc", starting_pid, "stat").read_text().rsplit(")", 1)[1].split()[19])
+            assert boot_ts + ticks / os.sysconf("SC_CLK_TCK") >= deployed_ref.stat().st_mtime
+            print("EXACT_INSTALLED_PROCESS", expected, "pid=" + starting_pid)
+
+            def get(path, budget_ms=3000.0):
+                started = time.monotonic()
+                with urllib.request.urlopen("http://127.0.0.1:8790" + path, timeout=4.0) as response:
+                    raw = response.read(8_000_001)
+                    code = response.status
+                ms = (time.monotonic() - started) * 1000.0
+                print("LOCAL_HTTP", path, code, f"{ms:.1f}ms")
+                assert code == 200 and ms < budget_ms and len(raw) <= 8_000_000
+                return raw
+
+            assert b'id="terminal-loading"' in get("/")
+            asset_path = "seiltanzer/web/js/management_ui.js"
+            asset_url = "/static/js/management_ui.js"
+            assert get(asset_url) == Path(asset_path).read_bytes()
+            for i in range(3):
+                state = json.loads(get("/api/state"))
+                position = json.loads(get("/api/position"))
+                assert isinstance(state["tick"], dict) and "trade_id" in position
+                if i == 2:
+                    print("POSITION_PRESENT", bool(position["trade_id"]))
+            fields = {
+                "/api/ai/snapshot/status": ("ready", "invalidated_reason", "building"),
+                "/api/system/storage/status": ("health", "offhost_configured", "last_local_backup_age_sec", "last_offhost_backup_age_sec"),
+                "/api/system/storage/integrity?full=false": ("ok", "check_kind"),
+                "/api/research/g1/management/local-status": ("resolved", "eligible_resolved", "status_snapshot_cached"),
+                "/api/research/g1/q/audit?limit=5000": ("contract_version",),
+            }
+            for route, names in fields.items():
+                body = json.loads(get(route))
+                print("STATUS", route, json.dumps({name: body.get(name) for name in names}))
+                if route.endswith("integrity?full=false"):
+                    assert body["ok"] is True and body["check_kind"] == "quick_check"
+            verify_management_ack_guard_contract()
+            verify_trade_settlement_contract()
+            verify_isolated_unified_management_contract()
+            assert starting_pid == cmd("systemctl", "show", "seiltanzer", "-p", "MainPID", "--value")
+            assert expected == cmd("git", "rev-parse", "HEAD")
             PY
+            .venv/bin/python -B scripts/production_readiness_check.py \
+              --expected-sha "$EXPECTED_SHA" --skip-restore-drill-low-disk
+      - name: Check public terminal independently
+        if: always()
+        run: |
+          set -euo pipefail
+          for route in / /api/state /api/position; do
+            curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null -w "PUBLIC $route http=%{http_code} seconds=%{time_total}\n" "http://94.241.171.182:8790$route"
+          done
