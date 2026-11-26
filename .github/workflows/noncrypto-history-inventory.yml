@@ -1,26 +1,78 @@
-name: request-fresh-offhost-restore-drill
+name: verify-actual-ede-union-pr572
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
     paths: [.github/workflows/noncrypto-history-inventory.yml]
 permissions:
-  actions: write
   contents: read
 jobs:
-  dispatch:
+  verify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 120
+    env:
+      VERIFIED_CANDIDATE: aaceaba2171b39a23dc43ba7b1e12665c8004e7a
+      ARCHIVED_SOURCE_SHA: d2ef33701cbdc0333d27064059eee58a3864ed38
+      ARCHIVED_DATABASE_SHA256: 08d23aa85caa7226f90be793f5cd0b02f0ec10f87c302a0530bb8005f9420414
+      BUCKET: trading-dbd-backups-2026
+      KEY: backups/v1/daily-slot-0/snapshot.sqlite3.gz
     steps:
-      - name: Start the existing read-only restore drill for current main
-        env:
-          GH_TOKEN: ${{ github.token }}
-          API_URL: ${{ github.api_url }}
-          PROJECT_REPO: ${{ github.repository }}
+      - name: Reclaim disposable hosted runner space
         run: |
           set -euo pipefail
-          curl --fail-with-body --silent --show-error --max-time 15 \
-            --request POST \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            --data '{"ref":"main","inputs":{"capacity_report":false}}' \
-            "$API_URL/repos/$PROJECT_REPO/actions/workflows/production-offhost-restore-drill.yml/dispatches"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo docker image prune -af
+          df -h "$RUNNER_TEMP"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERIFIED_CANDIDATE }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install boto3
+      - name: Restore the known verified research snapshot and run preparation
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.YC_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.YC_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VERIFIED_CANDIDATE"
+          db="$RUNNER_TEMP/actual-ede-snapshot/raw.sqlite3"
+          proof="$db.restore.json"
+          output="$RUNNER_TEMP/actual-ede-snapshot/complete.sqlite3"
+          python scripts/restore_verified_snapshot.py --snapshot-drill --bucket "$BUCKET" --key "$KEY" --destination "$db" --result "$proof"
+          python - "$proof" "$db.manifest.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          receipt = json.loads(Path(sys.argv[1]).read_text())
+          manifest = receipt["storage_manifest"]
+          assert receipt["snapshot_restore_verified"] is True
+          assert manifest["git_commit"] == os.environ["ARCHIVED_SOURCE_SHA"]
+          assert receipt["database_sha256"] == manifest["database_sha256"] == os.environ["ARCHIVED_DATABASE_SHA256"]
+          Path(sys.argv[2]).write_text(json.dumps(manifest))
+          print("ARCHIVED_INPUT_EXACT", receipt["database_size_bytes"], receipt["database_sha256"])
+          PY
+          python -u scripts/prepare_research_history.py --database "$db" --manifest "$db.manifest.json" --destination "$output"
+          python - "$output.manifest.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          manifest = json.loads(Path(sys.argv[1]).read_text())
+          assert manifest["history_union_verified"] is True
+          assert manifest["current_hot_rows_preserved"] is True
+          assert manifest["original_cold_table_roots_verified"] is True
+          assert manifest["raw_hot_database_sha256"] == os.environ["ARCHIVED_DATABASE_SHA256"]
+          assert manifest["json_payloads_expanded"] is True
+          print("ACTUAL_EDE_UNION_VERIFIED", manifest["database_size_bytes"], manifest["effective_output_bound_bytes"])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-actual-ede-union-${{ github.run_id }}
+          path: ${{ runner.temp }}/actual-ede-snapshot/complete.sqlite3.manifest.json
+          if-no-files-found: error
+          retention-days: 30
