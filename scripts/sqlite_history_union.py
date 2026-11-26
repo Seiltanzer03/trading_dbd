@@ -99,8 +99,9 @@ def _catalog(raw, proof, before, *, allow_verified_snapshot=False, allow_current
 def _check(deadline, directory, *, needed=archive.RESERVE_BYTES):
     if time.monotonic() >= deadline:
         raise ValueError('History union deadline exhausted')
-    if shutil.disk_usage(directory).free < needed:
-        raise ValueError('History union lacks unchanged 1GiB worker reserve')
+    free = shutil.disk_usage(directory).free
+    if free < needed:
+        raise ValueError(f'History union worker capacity: required_bytes={needed} free_bytes={free}')
 
 
 def _merge(conn, restored, receipt, *, mutable_columns=None, retired_rowids=None, cold_digest=None):
@@ -181,13 +182,16 @@ def hydrate_snapshot(source, destination, *, source_receipt, catalog_bytes, clie
                     catalog_bytes=catalog_bytes, client=client, current=False)
 
 
-def hydrate_current_snapshot(source, destination, *, source_receipt, catalog_bytes, client):
+def hydrate_current_snapshot(source, destination, *, source_receipt, catalog_bytes, client,
+                             research_output=False):
     """Retain verified current hot outcomes; cold capture fields stay immutable."""
     return _hydrate(source, destination, source_receipt=source_receipt,
-                    catalog_bytes=catalog_bytes, client=client, current=True)
+                    catalog_bytes=catalog_bytes, client=client, current=True,
+                    research_output=research_output)
 
 
-def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, current):
+def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, current,
+             research_output=False):
     source, destination = Path(source), Path(destination)
     if os.path.lexists(destination):
         raise FileExistsError(destination)
@@ -199,10 +203,10 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
     catalog_maximum = catalog['maximum_hydrated_bytes']
     # The frozen catalog bounds its original full database, not all future hot
     # observations. Allow the verified current hot file in addition to that old
-    # full-history budget, still inside the unchanged global analytical cap.
+    # full-history budget. EDE allows a larger disposable output only.
     # The immutable catalog and all row/count/root checks remain unchanged.
-    maximum = (min(MAX_CURRENT_RESEARCH_OUTPUT_BYTES, catalog_maximum + before['size'])
-               if current else catalog_maximum)
+    output_cap = MAX_CURRENT_RESEARCH_OUTPUT_BYTES if research_output else MAX_OUTPUT_BYTES
+    maximum = min(output_cap, catalog_maximum + before['size']) if current else catalog_maximum
     deadline = time.monotonic() + MAX_SECONDS
     _check(deadline, destination.parent,
            needed=archive.RESERVE_BYTES + 2*maximum + 3*archive.MAX_BYTES)
@@ -340,7 +344,7 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
                     verified_local_file=archive._identity(destination),
                     production_authority=False, data_retirement_authorized=False)
     except sqlite3.OperationalError as exc:
-        if exc.sqlite_errorcode == sqlite3.SQLITE_FULL:
+        if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL:
             raise ValueError(
                 f'History union SQLite capacity failure: output_bound_bytes={maximum} '
                 f'worker_free_bytes={shutil.disk_usage(destination.parent).free}'

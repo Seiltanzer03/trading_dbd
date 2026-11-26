@@ -124,7 +124,7 @@ def _prepare_plain_research_snapshot(database, manifest_path, destination, *,
                  database_size_bytes=manifest['database_size_bytes'],
                  storage_manifest=manifest, storage_manifest_sha256=manifest_digest(manifest))
     result = hydrate_current_snapshot(database, destination, source_receipt=proof,
-                                      catalog_bytes=raw, client=client)
+                                      catalog_bytes=raw, client=client, research_output=True)
     # Retain source clocks/generation, but never copy a hot-only count, cold
     # storage marker, or raw backup identity into the complete analytical file.
     retained = ('git_commit', 'source_db', 'started_ts', 'completed_ts', 'created_ts', 'run_id')

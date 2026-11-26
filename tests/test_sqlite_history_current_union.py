@@ -105,8 +105,12 @@ def test_current_union_does_not_hit_old_sqlite_page_cap_during_cold_merge(tmp_pa
     assert hot.stat().st_size < catalog['maximum_hydrated_bytes']
     monkeypatch.setattr(union, 'MAX_OUTPUT_BYTES', catalog['maximum_hydrated_bytes'])
     out = tmp_path / 'with-cold.sqlite3'
+    proof = _current_proof(hot, result)
+    with pytest.raises(ValueError, match='History union SQLite capacity failure'):
+        union.hydrate_current_snapshot(hot, out, source_receipt=proof, catalog_bytes=raw, client=client)
+    assert not out.exists()
     report = union.hydrate_current_snapshot(
-        hot, out, source_receipt=_current_proof(hot, result), catalog_bytes=raw, client=client)
+        hot, out, source_receipt=proof, catalog_bytes=raw, client=client, research_output=True)
     assert out.stat().st_size > catalog['maximum_hydrated_bytes']
     assert report['original_cold_table_roots_verified'] is True
     assert report['current_hot_rows_preserved'] is True
