@@ -1,4 +1,4 @@
-name: verify-installed-management-pr571
+name: verify-trade-evidence-on-installed-pr571
 on:
   push:
     branches: [ops/noncrypto-history-inventory-20261026]
@@ -8,93 +8,104 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 11
+    timeout-minutes: 4
     env:
       EXPECTED_SHA: d2ef33701cbdc0333d27064059eee58a3864ed38
     steps:
-      - name: Check live routes and isolated management on the installed revision
+      - name: Inspect existing execution receipts and configured provider authentication
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 8m
           envs: EXPECTED_SHA
+          command_timeout: 2m
           script: |
             set -euo pipefail
             cd /opt/seiltanzer
             test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-            systemctl is-active seiltanzer
             .venv/bin/python -B -u - <<'PY'
             import json
-            import os
             from pathlib import Path
+            import re
+            import sqlite3
             import subprocess
             import time
             import urllib.request
+            import httpx
 
-            from scripts.production_functional_smoke import (
-                verify_isolated_unified_management_contract,
-                verify_management_ack_guard_contract,
-                verify_trade_settlement_contract,
-            )
+            with urllib.request.urlopen("http://127.0.0.1:8790/api/position", timeout=4) as reply:
+                position = json.load(reply)
+            print("ACTIVE_POSITION", bool(position.get("trade_id")))
 
-            def cmd(*args):
-                return subprocess.check_output(args, text=True, timeout=5).strip()
+            started = time.monotonic()
+            connection = sqlite3.connect("file:/opt/seiltanzer/data/trades.db?mode=ro", uri=True, timeout=1)
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                connection.set_progress_handler(lambda: int(time.monotonic() - started > 4), 1000)
+                observed = connection.execute("""
+                    SELECT COUNT(*) AS recorded_acknowledgements,
+                           COUNT(CASE WHEN stage = 'executed' THEN 1 END) AS executed_acknowledgements,
+                           COUNT(actual_broker_fill_ts) AS broker_fill_clock_present,
+                           COUNT(actual_fee_currency) AS actual_fee_present,
+                           COUNT(actual_slippage_currency) AS actual_slippage_present
+                      FROM execution_ack_observations
+                """).fetchone()
+                print("EXECUTION_RECEIPT_COVERAGE", json.dumps(dict(observed), sort_keys=True))
+            finally:
+                connection.close()
 
-            expected = os.environ["EXPECTED_SHA"]
-            starting_pid = cmd("systemctl", "show", "seiltanzer", "-p", "MainPID", "--value")
-            assert int(starting_pid) > 1
-            deployed_ref = Path(cmd("git", "rev-parse", "--git-path", cmd("git", "symbolic-ref", "HEAD")))
-            boot_ts = int(next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime ")))
-            ticks = int(Path("/proc", starting_pid, "stat").read_text().rsplit(")", 1)[1].split()[19])
-            assert boot_ts + ticks / os.sysconf("SC_CLK_TCK") >= deployed_ref.stat().st_mtime
-            print("EXACT_INSTALLED_PROCESS", expected, "pid=" + starting_pid)
-
-            def get(path, budget_ms=3000.0):
+            pid = int(subprocess.check_output(["systemctl","show","seiltanzer","-p","MainPID","--value"],
+                                             text=True, timeout=4).strip())
+            assert pid > 1
+            provider = {}
+            permitted = {b"OPENROUTER_API_KEY", b"OPENROUTER_PROXY", b"OPENROUTER_MODEL"}
+            for entry in Path("/proc", str(pid), "environ").read_bytes().split(b"\0"):
+                name, _, value = entry.partition(b"=")
+                if name in permitted:
+                    provider[name] = value.decode("utf-8").strip()
+            token = provider.get(b"OPENROUTER_API_KEY")
+            if token is None or not token:
+                print("OPENROUTER_KEY_STATUS", json.dumps({"configured": False, "inference_requests": 0}))
+            else:
                 started = time.monotonic()
-                with urllib.request.urlopen("http://127.0.0.1:8790" + path, timeout=4.0) as response:
-                    raw = response.read(8_000_001)
-                    code = response.status
-                ms = (time.monotonic() - started) * 1000.0
-                print("LOCAL_HTTP", path, code, f"{ms:.1f}ms")
-                assert code == 200 and ms < budget_ms and len(raw) <= 8_000_000
-                return raw
+                try:
+                    with httpx.Client(proxy=provider.get(b"OPENROUTER_PROXY") or None,
+                                      timeout=8, follow_redirects=False) as client:
+                        response = client.get("https://openrouter.ai/api/v1/key",
+                                              headers={"Authorization": "Bearer " + token})
+                    result = {"configured": True, "http_status": response.status_code, "inference_requests": 0,
+                              "elapsed_ms": round((time.monotonic() - started) * 1000)}
+                    if response.status_code == 200:
+                        data = response.json().get("data") or {}
+                        remaining = data.get("limit_remaining")
+                        result["valid_metadata"] = isinstance(data.get("is_free_tier"), bool)
+                        result["is_free_tier"] = data.get("is_free_tier")
+                        result["key_limit_exhausted"] = (True if remaining <= 0 else False) if type(remaining) in (int, float) else None
+                    print("OPENROUTER_KEY_STATUS", json.dumps(result, sort_keys=True))
+                except (httpx.HTTPError, ValueError, TypeError) as exc:
+                    print("OPENROUTER_KEY_STATUS", json.dumps({"configured": True, "error_type": type(exc).__name__, "inference_requests": 0}))
 
-            assert b'id="terminal-loading"' in get("/")
-            asset_path = "seiltanzer/web/js/management_ui.js"
-            asset_url = "/static/js/management_ui.js"
-            assert get(asset_url) == Path(asset_path).read_bytes()
-            for i in range(3):
-                state = json.loads(get("/api/state"))
-                position = json.loads(get("/api/position"))
-                assert isinstance(state["tick"], dict) and "trade_id" in position
-                if i == 2:
-                    print("POSITION_PRESENT", bool(position["trade_id"]))
-            fields = {
-                "/api/ai/snapshot/status": ("ready", "invalidated_reason", "building"),
-                "/api/system/storage/status": ("health", "offhost_configured", "last_local_backup_age_sec", "last_offhost_backup_age_sec"),
-                "/api/system/storage/integrity?full=false": ("ok", "check_kind"),
-                "/api/research/g1/management/local-status": ("resolved", "eligible_resolved", "status_snapshot_cached"),
-            }
-            for route, names in fields.items():
-                body = json.loads(get(route))
-                print("STATUS", route, json.dumps({name: body.get(name) for name in names}))
-                if route.endswith("integrity?full=false"):
-                    assert body["ok"] is True and body["check_kind"] == "quick_check"
-            verify_management_ack_guard_contract()
-            verify_trade_settlement_contract()
-            verify_isolated_unified_management_contract()
-            assert starting_pid == cmd("systemctl", "show", "seiltanzer", "-p", "MainPID", "--value")
-            assert expected == cmd("git", "rev-parse", "HEAD")
+            # Emit only code-owned diagnostic values from the last archived real review.
+            out = subprocess.run(["journalctl", "-u", "seiltanzer", "--utc", "--since", "2026-11-19 19:25:30",
+                                  "--until", "2026-11-19 19:29:00", "-o", "cat", "--no-pager", "-n", "150"],
+                                 text=True, capture_output=True, timeout=6, check=False).stdout
+            observed_statuses = set()
+            historical_failure = set()
+            for line in out.splitlines():
+                m = re.search(r'HTTP Request: POST https://openrouter\.ai/api/v1/chat/completions "HTTP/\S+ ([1-5][0-9][0-9])', line)
+                if m:
+                    observed_statuses.add(int(m.group(1)))
+                if '"stage":"provider_fallback"' in line:
+                    try:
+                        problem = json.loads(line)
+                    except ValueError:
+                        continue
+                    kind = str(problem.get("exception_class") or "")
+                    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,79}", kind):
+                        historical_failure.add(kind)
+            print("ARCHIVED_PROVIDER_FAILURE", json.dumps({"http_statuses": sorted(observed_statuses),
+                                                          "error_types": sorted(historical_failure)}))
             PY
-            .venv/bin/python -B scripts/production_readiness_check.py \
-              --expected-sha "$EXPECTED_SHA" --skip-restore-drill-low-disk
-      - name: Check public terminal independently
-        if: always()
-        run: |
-          set -euo pipefail
-          for route in / /api/state /api/position; do
-            curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null -w "PUBLIC $route http=%{http_code} seconds=%{time_total}\n" "http://94.241.171.182:8790$route"
-          done
