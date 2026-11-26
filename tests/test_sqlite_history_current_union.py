@@ -89,7 +89,7 @@ def test_current_union_allows_new_hot_growth_beyond_original_catalog_budget(tmp_
     assert report['catalog_output_bound_bytes'] == 10 * 1024**2
 
 
-def test_current_union_does_not_hit_old_sqlite_page_cap_during_cold_merge(tmp_path):
+def test_current_union_does_not_hit_old_sqlite_page_cap_during_cold_merge(tmp_path, monkeypatch):
     source, proof, raw, _, client = _build_cutover_fixture(tmp_path, include_post_catalog=True)
     catalog = json.loads(raw)
     catalog['maximum_hydrated_bytes'] = source.stat().st_size + 32768
@@ -103,6 +103,7 @@ def test_current_union_does_not_hit_old_sqlite_page_cap_during_cold_merge(tmp_pa
         conn.execute('INSERT INTO growth VALUES(zeroblob(50000))')
         conn.commit()
     assert hot.stat().st_size < catalog['maximum_hydrated_bytes']
+    monkeypatch.setattr(union, 'MAX_OUTPUT_BYTES', catalog['maximum_hydrated_bytes'])
     out = tmp_path / 'with-cold.sqlite3'
     report = union.hydrate_current_snapshot(
         hot, out, source_receipt=_current_proof(hot, result), catalog_bytes=raw, client=client)

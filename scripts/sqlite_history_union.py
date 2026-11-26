@@ -24,6 +24,9 @@ CATALOG_CONTRACT = 'sqlite-history-catalog-v1'
 MAX_CATALOG_BYTES = 8 * 1024**2
 MAX_PARTITIONS = 1024
 MAX_OUTPUT_BYTES = 25 * 1024**3
+# A research union adds current observations to an unchanged frozen catalog.
+# Keep the larger allowance separate from catalog and deployable image limits.
+MAX_CURRENT_RESEARCH_OUTPUT_BYTES = 32 * 1024**3
 COPY_SECONDS = 300
 MERGE_SECONDS = 30
 MAX_SECONDS = 1800
@@ -198,7 +201,8 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
     # observations. Allow the verified current hot file in addition to that old
     # full-history budget, still inside the unchanged global analytical cap.
     # The immutable catalog and all row/count/root checks remain unchanged.
-    maximum = min(MAX_OUTPUT_BYTES, catalog_maximum + before['size']) if current else catalog_maximum
+    maximum = (min(MAX_CURRENT_RESEARCH_OUTPUT_BYTES, catalog_maximum + before['size'])
+               if current else catalog_maximum)
     deadline = time.monotonic() + MAX_SECONDS
     _check(deadline, destination.parent,
            needed=archive.RESERVE_BYTES + 2*maximum + 3*archive.MAX_BYTES)
@@ -335,6 +339,13 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
                     original_cold_table_roots_verified=current,
                     verified_local_file=archive._identity(destination),
                     production_authority=False, data_retirement_authorized=False)
+    except sqlite3.OperationalError as exc:
+        if exc.sqlite_errorcode == sqlite3.SQLITE_FULL:
+            raise ValueError(
+                f'History union SQLite capacity failure: output_bound_bytes={maximum} '
+                f'worker_free_bytes={shutil.disk_usage(destination.parent).free}'
+            ) from exc
+        raise
     finally:
         if original is not None:
             original.close()

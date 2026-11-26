@@ -209,11 +209,12 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     steps:
-      - name: Reclaim reproducible SDKs on the disposable research worker
+      - name: Reclaim reproducible SDKs and unused images on the disposable research worker
         run: |
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo docker image prune -af
           df -h "$RUNNER_TEMP"
       - uses: actions/checkout@v4
         with:
