@@ -127,6 +127,8 @@ export function mountUnifiedEdgeEnsemble(container, audit, { archived = false } 
     'HOLD — единственное допустимое действие; это не доказательство рыночного преимущества удержания. Другие действия не прошли обязательный допуск; совпадение схем не доказывает устойчивость выбора к весам.');
   appendTextLine(panel, 'tiny',
     `Модельная экономика после издержек: Expected ${signed(chosen.expected_net_r, 'R')} · CVaR10 ${signed(chosen.cvar10_net_r, 'R')} · ΔExpected к HOLD ${signed(chosen.delta_expected_r, 'R')}.`);
+  if (chosen.unconfirmed_tail_protection === true) appendTextLine(panel, 'ai-execution-warning',
+    `Защитное сокращение по модели. Относительно HOLD ΔExpected ${signed(chosen.delta_expected_r, 'R')}, ΔCVaR10 ${signed(chosen.delta_cvar_r, 'R')}. HOLD проходит лимит риска. Для сокращения нет отдельного подтверждения.`);
   if (audit.regime_context) appendTextLine(panel, 'tiny dim',
     `Применимость по режиму: ${audit.regime_context.reason || 'UNKNOWN'} · качество ${audit.regime_context.quality ?? 0}. Рабочая классификация без дополнительного голоса и динамической смены долей.`);
   appendTextLine(panel, 'tiny dim',

@@ -258,12 +258,12 @@ def _hydrate(source, destination, *, source_receipt, catalog_bytes, client, curr
                 suffix_where, suffix_params = ('', ()) if max_rowid is None else (' WHERE '+qalias+'>?', (max_rowid,))
                 post_count = conn.execute('SELECT COUNT(*) FROM '+qtable+suffix_where, suffix_params).fetchone()[0]
                 if post_count > 0:
-                    post_catalog_proofs[table] = dict(
-                        row_count=post_count,
-                        logical_sha256=archive._logical_hash(
-                            conn, qtable, proof['columns'], alias, suffix_where, suffix_params
-                        ),
-                    )
+                    post_catalog_proofs[table] = {'row_count': post_count}
+                    # The current union checks all existing hot rows against the
+                    # independently measured hot root, including this suffix.
+                    if not current:
+                        post_catalog_proofs[table]['logical_sha256'] = archive._logical_hash(
+                            conn, qtable, proof['columns'], alias, suffix_where, suffix_params)
         for receipt in catalog['partitions']:
             _check(deadline, destination.parent)
             with tempfile.TemporaryDirectory(prefix='.history-union-cold-', dir=destination.parent) as directory:

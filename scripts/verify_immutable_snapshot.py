@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,7 +38,8 @@ def verify(database: Path, manifest_path: Path) -> dict:
         if conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise RuntimeError('snapshot quick_check failed')
         history_state.validate_manifest_history(conn, manifest)
-    database.chmod(0o444)
+    if stat.S_IMODE(database.stat().st_mode) != 0o444:
+        database.chmod(0o444)
     return manifest
 
 

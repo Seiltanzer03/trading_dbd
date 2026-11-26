@@ -681,6 +681,13 @@ def rank_candidates(candidates, specs, snapshot, nominal, excluded=None):
                 row["ranking_eligible"], row["ranking_reason"] = False, "NO_MATERIAL_NET_OR_BOUNDED_TAIL_BENEFIT"
             elif best_expected - row["expected_net_r"] > band + 1e-8:
                 row["ranking_eligible"], row["ranking_reason"] = False, "EXPECTED_SACRIFICE_EXCEEDS_BUDGET"
+        row["unconfirmed_tail_protection"] = (
+            row["ranking_eligible"] and row["policy"] in BASE and row["policy"] != "HOLD"
+            and hold.get("eligible") is True
+            and row.get("admission_authority") == "MANUAL_COMPARISON_PREFLIGHT_PASS"
+            and benefit["basis"] == "BOUNDED_TAIL_PROTECTION"
+            and benefit["delta_expected_r"] < -1e-8
+        )
     # Only same-path paired evidence can establish model Pareto dominance.
     # Missing evidence or an uncertain expected-return ordering keeps choices.
     from .unified_candidate_economics import PAIRED_PARETO_CONTRACT
@@ -747,7 +754,7 @@ def _comparison(scheme, selected):
             "evidence_type": "MODEL_SCENARIOS_NOT_HISTORICAL_PROFIT"}
 
 
-def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
+def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced", *, include_tail_confirmation_study=False):
     candidates = collect_candidates(snapshot)
     from .unified_candidate_economics import price_unified_candidates
     economics = price_unified_candidates(snapshot, candidates)
@@ -862,8 +869,14 @@ def build_unified_ensemble(snapshot, current_llm=None, scheme="balanced"):
     legacy = ((snapshot.get("policy_manager") or {}).get("management_decision") or {}).get("policy")
     legacy_row = next((row for row in candidates if row["policy"] == legacy), None)
     comparisons.append(_comparison("legacy_control", legacy_row))
+    study = {}
+    if include_tail_confirmation_study:
+        study_candidates = [{**row, "eligible": False} if row["unconfirmed_tail_protection"] else row
+                            for row in candidates]
+        alternative, _, _ = rank_candidates(study_candidates, specs, snapshot, schemes[scheme])
+        study["tail_confirmation_study"] = _comparison("require_confirmed_tail_protection", alternative)
     from .research_working_context import research_context_audit
-    return {"contract_version": VERSION, "available": selected is not None,
+    return {**study, "contract_version": VERSION, "available": selected is not None,
             "instrument": (snapshot.get("strategy") or {}).get("instrument") or snapshot.get("instrument"),
             "regime": regime_label(snapshot),
             "regime_context": {key: value for key, value in (snapshot.get("edge_regime") or {}).items()

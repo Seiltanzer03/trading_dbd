@@ -20,19 +20,30 @@ from scripts.sqlite_history_union import MAX_CATALOG_BYTES, hydrate_current_snap
 from scripts.verify_immutable_snapshot import verify
 
 
+def _verify_input(database, manifest_path):
+    archive._identity(database)
+    # Seal the off-host input before pinning ctime for the verification pass.
+    database.chmod(0o444)
+    identity = archive._identity(database)
+    manifest = verify(database, manifest_path)
+    if archive._identity(database) != identity:
+        raise ValueError('Research input changed during verification')
+    return manifest, identity
+
+
 def prepare_research_snapshot(database, manifest_path, destination, *, client=None):
     """Expand physical encoding before any existing model/cold-history reader."""
     database,manifest_path,destination=map(Path,(database,manifest_path,destination))
     if os.path.lexists(destination) or os.path.lexists(str(destination)+'.manifest.json'):
         raise FileExistsError('Research history output already exists')
-    archive._identity(database)
-    manifest=verify(database,manifest_path)
+    manifest, verified_identity = _verify_input(database, manifest_path)
     fields=history_state.snapshot_history_manifest(database,manifest)
     if history_state.PAYLOAD_PIN_FIELD not in fields:
-        return _prepare_plain_research_snapshot(database,manifest_path,destination,client=client)
+        return _prepare_plain_research_snapshot(database, manifest_path, destination,
+            manifest=manifest, verified_identity=verified_identity, client=client)
     from scripts.sqlite_json_rebuild import rebuild_snapshot
     proof=dict(immutable_sqlite_read=True,immutable_snapshot_verified=True,
-        verified_local_file=archive._identity(database),database_sha256=manifest['database_sha256'],
+        verified_local_file=verified_identity,database_sha256=manifest['database_sha256'],
         database_size_bytes=manifest['database_size_bytes'])
     with tempfile.TemporaryDirectory(prefix='.json-research-',dir=destination.parent) as directory:
         has_cold='cold_history_catalog_sha256' in fields
@@ -55,10 +66,11 @@ def prepare_research_snapshot(database, manifest_path, destination, *, client=No
                 info=os.fstat(stream.fileno());manifest_identity=(info.st_dev,info.st_ino)
                 json.dump(expanded_manifest,stream,sort_keys=True,allow_nan=False)
                 stream.write('\n');stream.flush();os.fsync(stream.fileno())
-            verify(expanded,output_manifest)
+            checked_manifest, expanded_identity = _verify_input(expanded, output_manifest)
             if has_cold:
-                prepared=_prepare_plain_research_snapshot(expanded,output_manifest,destination,
-                    client=client,raw_manifest=manifest)
+                prepared=_prepare_plain_research_snapshot(expanded, output_manifest, destination,
+                    manifest=checked_manifest, verified_identity=expanded_identity,
+                    client=client, raw_manifest=manifest)
                 prepared['json_payloads_expanded']=True
                 return prepared
             return dict(database=str(expanded.resolve()),manifest=str(output_manifest.resolve()),
@@ -72,13 +84,14 @@ def prepare_research_snapshot(database, manifest_path, destination, *, client=No
             raise
 
 
-def _prepare_plain_research_snapshot(database, manifest_path, destination, *, client=None, raw_manifest=None):
+def _prepare_plain_research_snapshot(database, manifest_path, destination, *,
+                                     manifest, verified_identity, client=None, raw_manifest=None):
     database, manifest_path, destination = map(Path, (database, manifest_path, destination))
     output_manifest = Path(str(destination)+'.manifest.json')
     if os.path.lexists(destination) or os.path.lexists(output_manifest):
         raise FileExistsError('Research history output already exists')
-    archive._identity(database)
-    manifest = verify(database, manifest_path)
+    if archive._identity(database) != verified_identity:
+        raise ValueError('Verified research input changed before preparation')
     fields = history_state.snapshot_history_manifest(database, manifest)
     if not fields:
         if 'cold_history_catalog_sha256' in manifest:
@@ -106,7 +119,7 @@ def _prepare_plain_research_snapshot(database, manifest_path, destination, *, cl
         raise ValueError('Pinned history catalog SHA256 differs')
 
     proof = dict(immutable_sqlite_read=True, immutable_snapshot_verified=True,
-                 verified_local_file=archive._identity(database),
+                 verified_local_file=verified_identity,
                  database_sha256=manifest['database_sha256'],
                  database_size_bytes=manifest['database_size_bytes'],
                  storage_manifest=manifest, storage_manifest_sha256=manifest_digest(manifest))

@@ -82,6 +82,9 @@ def test_actual_snapshot_comparison_is_frozen_and_ledger_absence_is_not_zero():
     assert review['observed_hold_control']['available'] is True
     assert review['observed_management_policies']['HOLD'] == review['observed_hold_control']
     assert report['management_policy_replay']['base_actions']['complete_trade_n'] == 1
+    assert report['tail_confirmation_study']['paired_distinct_trade_n'] == 1
+    assert report['tail_confirmation_study']['paired_mean_delta_r'] == 0.
+    assert report['tail_confirmation_study']['promotion_authorized'] is False
     for summary in report['summary'].values():
         assert summary['historical_economic_completeness']['ledger_profit_net_r'] is None
         assert summary['historical_economic_completeness']['available'] is False
@@ -107,10 +110,10 @@ def test_held_out_path_never_enters_vote_snapshot(monkeypatch):
     from scripts import run_unified_edge_comparison as runner
     original = runner.build_unified_ensemble
     seen = []
-    def vote(snapshot, llm):
+    def vote(snapshot, llm, **options):
         seen.append(deepcopy(snapshot))
         assert 'path_points' not in snapshot and 'stored_replay' not in snapshot
-        return original(snapshot, llm)
+        return original(snapshot, llm, **options)
     monkeypatch.setattr(runner, 'build_unified_ensemble', vote)
     source = record()
     report = run_comparison({'read_only': True, 'reviews': [source]})
