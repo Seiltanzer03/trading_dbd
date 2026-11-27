@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
-      - name: Read live AI review traces and materializer timings
+      - name: Measure server contention and read-only calibration timings
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -21,57 +21,56 @@ jobs:
           script: |
             set -euo pipefail
             cd /opt/seiltanzer
-            git rev-parse HEAD
-            .venv/bin/python -B -u - <<'PY'
-            import collections
-            import json
-            import re
-            import subprocess
+            pid=$(systemctl show seiltanzer --property=MainPID --value)
+            uptime
+            free -m
+            df -h /opt/seiltanzer
+            ps -eo pid,ppid,pcpu,rss,stat,wchan:30,comm --sort=-pcpu | head -15 || true
+            ps -L -p "$pid" -o lwp,pcpu,stat,wchan:30,comm --sort=-pcpu | head -20 || true
+            command -v py-spy || true
+            SEILTANZER_DIAG_PID="$pid" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 timeout 30s nice -n 12 .venv/bin/python -B -u - <<'PY'
+            import os
+            import pathlib
+            import statistics
             import time
             import urllib.request
+            import json
             from concurrent.futures import ThreadPoolExecutor
-            base = "http://127.0.0.1:8790"
-            def read(path):
-                started = time.monotonic()
+            from seiltanzer.journal import Journal
+            pid = int(os.environ["SEILTANZER_DIAG_PID"])
+            db = set()
+            for descriptor in pathlib.Path(f"/proc/{pid}/fd").iterdir():
                 try:
-                    with urllib.request.urlopen(base + path, timeout=7) as r:
-                        d = json.load(r)
-                    if path == "/api/ai/snapshot/status":
-                        return path, round(time.monotonic()-started, 3), d
-                    if path.startswith("/api/ai/history"):
-                        return path, round(time.monotonic()-started, 3), {"trade_id": d.get("trade_id"),
-                          "reviews": [{k:item.get(k) for k in ("ts","model","provider_error")} for item in (d.get("items") or [])[-4:]]}
-                    if path == "/api/position":
-                        return path, round(time.monotonic()-started, 3), {"active": bool(d.get("trade_id")),
-                          "reconciliation_required": bool((d.get("execution_reconciliation") or {}).get("required"))}
-                    return path, round(time.monotonic()-started, 3), {"worker_running": (d.get("worker") or {}).get("running")}
-                except Exception as exc:
-                    return path, type(exc).__name__
-            paths = ("/api/ai/snapshot/status", "/api/position", "/api/ai/history?include_management=false",
-                     "/api/research/runtime/status")
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                for item in pool.map(read, paths): print("LIVE", json.dumps(item, ensure_ascii=True))
-            recent = subprocess.run(["journalctl","-u","seiltanzer","--since","35 minutes ago","-o","json",
-                "--no-pager","-n","4500"],text=True,timeout=10,capture_output=True,check=True).stdout
-            http_counts = collections.Counter()
-            trace = []
-            for line in recent.splitlines():
-                record = json.loads(line)
-                message = record.get("MESSAGE") or ""
-                if not isinstance(message,str): continue
-                if '"request_id":"ai-' in message:
-                    start = message.find('{"request_id":"ai-')
-                    try: event = json.JSONDecoder().raw_decode(message[start:])[0]
-                    except (TypeError,ValueError): continue
-                    selected = {k:event.get(k) for k in ("request_id","stage","event","elapsed_ms","duration_ms",
-                        "exception_class","provider_reason","status_code","completion_tokens") if k in event}
-                    trace.append((record.get("__REALTIME_TIMESTAMP"),selected))
-                match = re.search(r'\b(POST|GET) (/api/ai/(?:verdict|reviews/[0-9a-f]{32}|snapshot/status)) HTTP/[0-9.]+" ([0-9]{3})',message)
-                if match:
-                    kind = match.group(2).split("/")[3]
-                    http_counts[match.group(1)+" "+kind+" "+match.group(3)] += 1
-            for row in trace[-110:]: print("AI_TRACE", json.dumps(row))
-            print("HTTP_COUNTS",json.dumps(http_counts))
-            print("SERVER", subprocess.check_output(["systemctl","show","seiltanzer","-p","MainPID","-p","MemoryCurrent",
-                "-p","CPUUsageNSec","-p","NRestarts"],text=True,timeout=4).strip().replace("\n"," "))
+                    target = descriptor.readlink()
+                except OSError:
+                    continue
+                if target.is_absolute() and target.name in {"trades.db", "cache.db"}:
+                    db.add(target)
+            print("DB_FILES", [(p.name, p.stat().st_size) for p in sorted(db)])
+            def measure():
+                for path in sorted(db):
+                    if path.name != "trades.db":
+                        continue
+                    journal = Journal.__new__(Journal)
+                    journal._q_database_path = str(path)
+                    t = time.monotonic()
+                    cpu = time.process_time()
+                    result = journal.q_calibration_report()
+                    print("Q_CALIBRATION", round(time.monotonic()-t,3), round(time.process_time()-cpu,3), result.get("n"))
+            def status():
+                for attempt in range(2):
+                    t = time.monotonic()
+                    try:
+                        with urllib.request.urlopen("http://127.0.0.1:8790/api/ai/snapshot/status", timeout=6) as response:
+                            d=json.load(response)
+                        print("STATUS", round(time.monotonic()-t,3),
+                            {k:d.get(k) for k in ("ready","building","invalidated_reason","build_ms","build_started_at","build_n","last_error")})
+                    except Exception as exc:
+                        print("STATUS_ERROR", type(exc).__name__)
+                    if attempt == 0:
+                        time.sleep(5)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                handles=[pool.submit(fn) for fn in (measure,status)]
+                for handle in handles:
+                    handle.result()
             PY
