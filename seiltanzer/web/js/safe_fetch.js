@@ -90,43 +90,78 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function reviewTimeout(code, message, requestId = null) {
+  return Object.assign(new Error(message), { code, requestId });
+}
+
+async function fetchReviewStep(url, init, remainingMs) {
+  const controller = new AbortController();
+  const signal = init.signal;
+  const abort = () => controller.abort(signal.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(reviewTimeout('ai_review_transport_timeout',
+        'Сервер не ответил вовремя. Проверьте сохранённые разборы.'));
+      controller.abort();
+    }, Math.min(18000, remainingMs));
+  });
+  try {
+    return await Promise.race([
+      fetchStructuredOnce(url, { ...init, signal: controller.signal }), timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
 async function fetchAiVerdictUntilMaterialized(url, init = {}) {
   // A review-trigger event (+/-0.15R, a strategy/risk boundary, new option
   // chain or trade edit) can legitimately require the full deterministic
   // 6,500-path recalculation. The server performs that outside this HTTP call
   // and returns a fast 503 while it is warming. Poll with separate short HTTP
   // requests so Caddy never holds one request long enough to emit a 504.
-  const deadline = Date.now() + 120000;
+  const deadline = performance.now() + 120000;
   let currentUrl = url;
   let currentInit = init;
   let jobUrl = null;
-  while (true) {
+  let warmingError = null;
+  while (performance.now() < deadline) {
+    let delaySec;
     try {
-      const body = await fetchStructuredOnce(currentUrl, currentInit);
+      const body = await fetchReviewStep(currentUrl, currentInit, deadline - performance.now());
       if (body.status !== 'pending' || !body.review_job) return body;
       const poll = body.review_job.poll_url;
       if (typeof poll !== 'string' || !/^\/api\/ai\/reviews\/[a-f0-9]{32}$/.test(poll)
           || (jobUrl !== null && poll !== jobUrl)) {
         throw new Error('Некорректный адрес готовности ИИ-разбора');
       }
-      if (Date.now() >= deadline) throw new Error('Время ожидания ИИ-разбора истекло');
+      warmingError = null;
       jobUrl = poll;
       currentUrl = poll;
       currentInit = {...init, method: 'GET'};
       delete currentInit.body;
-      await sleep(Math.min(5, Math.max(1, Number(body.review_job.retry_after_sec || 1))) * 1000);
+      delaySec = Number(body.review_job.retry_after_sec) || 1;
     } catch (error) {
       const warming = error?.status === 503 && error?.code === 'ai_snapshot_warming';
-      if (!warming || Date.now() >= deadline) throw error;
+      if (!warming) throw error;
       // This job stopped before provider admission because the frozen cache
       // changed. A fresh POST may wait for materialization; no inference retry.
       currentUrl = url;
       currentInit = init;
       jobUrl = null;
-      const delaySec = Math.min(5, Math.max(1, Number(error?.retryAfterSec || 2)));
-      await sleep(delaySec * 1000);
+      warmingError = error;
+      delaySec = error.retryAfterSec || 2;
     }
+    const remainingMs = deadline - performance.now();
+    if (remainingMs > 0) await sleep(Math.min(remainingMs, Math.min(5, Math.max(1, delaySec)) * 1000));
   }
+  throw reviewTimeout('ai_review_deadline', warmingError
+    ? 'Сервер продолжает пересчитывать снимок сделки. Попробуйте открыть разбор позже.'
+    : 'Время ожидания ИИ-разбора истекло. Проверьте сохранённые разборы.', warmingError?.requestId);
 }
 
 export async function fetchStructured(url, init = {}) {

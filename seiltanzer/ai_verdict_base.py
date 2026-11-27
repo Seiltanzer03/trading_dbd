@@ -317,6 +317,16 @@ def build_snapshot(engine) -> dict:
         "p50_resolution_minutes": clock.get("median_resolution_minutes"),
         "p50_status": clock.get("median_status"),
     }
+    q_calibration = engine.journal.q_calibration_report()
+    validation = engine.journal.validation_report(
+        q_calibration=q_calibration,
+        policy_shadow=(policy.get("derived_scenario_ensemble") or {}).get("validation_gate"),
+    )
+    validation["q_calibration"] = {
+        key: q_calibration.get(key) for key in (
+            "authority", "take", "promotion_allowed", "production_replacement_allowed",
+        )
+    }
     snapshot = {
         "captured_ts": captured_ts, "trade_id": trade_id,
         "strategy": _strategy(engine, trade, tick=tick),
@@ -329,7 +339,7 @@ def build_snapshot(engine) -> dict:
         "metric_coverage": policy["metric_coverage"],
         "previous_reviews": [{"ts": x.get("ts"), "metrics": x.get("metrics")}
                              for x in previous_reviews],
-        "validation": engine.journal.validation_report(),
+        "validation": validation,
     }
     decision = engine.position.preview_decision(snapshot, trade)
     snapshot["policy_manager"]["management_decision"] = decision

@@ -1212,16 +1212,19 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
   $('#ai-close').addEventListener('click', closeModal);
   const out = $('#ai-verdict-text');
   const requestTradeId = S.tick?.trade?.id ?? null;
+  let armedRequest = 0;
+  let archived = false;
   const refreshArmed = async () => {
+    const request = ++armedRequest;
     try {
       const position = await fetchStructured('/api/position');
-      if ($('#ai-verdict-text') !== out) return;
+      if ($('#ai-verdict-text') !== out || request !== armedRequest || archived) return;
       mountArmedShadowActions(
         $("#ai-armed-actions"), position.shadow_actions, apiPost,
         async () => { await refreshJournalAndSetups(); });
     } catch (_) { /* Keep the verdict and existing controls usable. */ }
   };
-  await refreshArmed();
+  void refreshArmed();
   if ($('#ai-verdict-text') !== out) return;
   try {
     const body = await fetchStructured('/api/ai/verdict', { method: 'POST' });
@@ -1240,6 +1243,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
     await refreshArmed();
     await refreshAiHistory();
   } catch (err) {
+    if ($('#ai-verdict-text') !== out) return;
     const status = err.status ? ` · HTTP ${err.status}` : '';
     const req = err.requestId ? `\nID: ${err.requestId}` : '';
     const needsReconciliation = err.code === 'broker_reconciliation_required' && err.reconciliation;
@@ -1251,8 +1255,8 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
       mountBrokerReconciliation($('#ai-management-execution'), err.reconciliation, apiPost,
         async () => { await refreshJournalAndSetups(); await refreshArmed(); });
     }
-    if (err.status === 503 && err.code === 'authoritative_price_unavailable'
-        && requestTradeId !== null && $('#ai-verdict-text') === out) {
+    if (['authoritative_price_unavailable', 'ai_review_deadline', 'ai_review_transport_timeout']
+        .includes(err.code) && requestTradeId !== null) {
       const errorText = out.textContent;
       const archive = document.createElement('button');
       archive.type = 'button';
@@ -1277,6 +1281,7 @@ $('#btn-ai-verdict').addEventListener('click', async () => {
             out.textContent = errorText + '\n\nДля этой сделки нет пригодного сохранённого разбора.';
             return;
           }
+          archived = true;
           out.textContent = errorText + '\n\nАРХИВНЫЙ РАЗБОР · НЕ НОВОЕ РЕШЕНИЕ\nСохранён: '
             + new Date(latest.ts * 1000).toLocaleString('ru-RU')
             + '\nЦена, веса и рекомендации ниже относятся к сохранённому разбору. '

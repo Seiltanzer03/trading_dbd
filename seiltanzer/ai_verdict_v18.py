@@ -331,7 +331,8 @@ def build_snapshot(engine) -> dict:
                 key: uncertainty.get(key) for key in (
                     "expected_final_r", "cvar10_r", "effective_path_count")
             }
-    q_calibration = engine.journal.q_calibration_report()
+    validation = snapshot.get("validation") or {}
+    q_calibration = validation.get("q_calibration") or {}
     manager["calibration_contract"] = {
         "version": (q_calibration.get("authority") or {}).get("version"),
         "q_probability": "risk_neutral_Q",
@@ -363,17 +364,15 @@ def build_snapshot(engine) -> dict:
     snapshot["policy_manager"] = manager
     # Full longitudinal validation remains in the journal/research APIs. The
     # current AI decision needs only the frozen authority/evidence summary.
-    validation = snapshot.get("validation") or {}
-    q_validation = validation.get("q_calibration") or {}
     snapshot["validation"] = {
         "observations": validation.get("observations"),
         "resolved_trades": validation.get("resolved_trades"),
         "promotion_allowed": validation.get("promotion_allowed", False),
         "q_calibration": {
-            "authority": deepcopy(q_validation.get("authority") or {}),
-            "promotion_allowed": q_validation.get(
+            "authority": deepcopy(q_calibration.get("authority") or {}),
+            "promotion_allowed": q_calibration.get(
                 "promotion_allowed", False),
-            "production_replacement_allowed": q_validation.get(
+            "production_replacement_allowed": q_calibration.get(
                 "production_replacement_allowed", False),
         },
         "snapshot_scope": "bounded_authority_summary",
