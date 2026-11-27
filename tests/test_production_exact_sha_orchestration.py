@@ -38,7 +38,7 @@ def test_deploy_acquires_existing_gate_before_readiness_and_keeps_owner_downstre
 
 def test_deploy_timeout_covers_startup_grace_core_and_acceptance_checks():
     deploy = _workflow("deploy.yml")
-    assert "timeout-minutes: 50" in deploy
+    assert "timeout-minutes: 60" in deploy
     preacceptance = deploy[deploy.index("id: preacceptance"):]
     assert "command_timeout: 20m" in preacceptance.split(
         "- name: Verify exact production readiness", 1

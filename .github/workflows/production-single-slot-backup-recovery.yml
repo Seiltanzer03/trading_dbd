@@ -130,7 +130,7 @@ jobs:
             fi
             # A slow but current process is not a failed backup. Bind the
             # startup marker to its actual PID and this boot's monotonic clock;
-            # after16min the ordinary recovery path remains available.
+            # Match the 22-minute cold-start allowance in deploy.yml.
             defer_current_startup() {
               systemctl is-active --quiet seiltanzer || return 1
               startup_pid=$(systemctl show seiltanzer -p MainPID --value 2>/dev/null || true)
@@ -140,7 +140,7 @@ jobs:
               [[ "$startup_enter_us" =~ ^[1-9][0-9]{0,17}$ ]] || return 1
               [[ "$startup_now_us" =~ ^[1-9][0-9]{0,17}$ ]] || return 1
               startup_age_us=$((10#$startup_now_us - 10#$startup_enter_us))
-              [ "$startup_age_us" -ge 0 ] && [ "$startup_age_us" -le 960000000 ] || return 1
+              [ "$startup_age_us" -ge 0 ] && [ "$startup_age_us" -le 1320000000 ] || return 1
               startup_phase=$(journalctl -b -u seiltanzer "_PID=$startup_pid" --grep='^STARTUP_PHASE phase=' -n 1 --no-pager -o cat 2>/dev/null || true)
               [[ "$startup_phase" =~ ^STARTUP_PHASE\ phase=(begin|storage\.prepare\.(begin|complete)|app\.create\.complete|schema\.backup\.(begin|complete)|storage\.runtime\.(begin|complete)|routes\.complete|uvicorn\.run)\ elapsed_sec=[0-9]+\.[0-9]+$ ]] || return 1
               echo "RECOVERY_DEFERRED_STARTUP_IN_PROGRESS=1"

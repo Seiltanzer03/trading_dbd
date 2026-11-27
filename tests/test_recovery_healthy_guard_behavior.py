@@ -49,7 +49,8 @@ def test_undelivered_sha_refuses_recovery_before_service_stop(tmp_path,current_s
 @pytest.mark.parametrize('age_sec,pid,phase,deferred', [
     (755, '123', 'schema.backup.begin', True),
     (400, '123', 'storage.prepare.begin', True),
-    (961, '123', 'schema.backup.begin', False),
+    (1020, '123', 'schema.backup.begin', True),
+    (1321, '123', 'schema.backup.begin', False),
     (755, '0', 'schema.backup.begin', False),
     (755, '123', 'unrecognized', False),
 ])

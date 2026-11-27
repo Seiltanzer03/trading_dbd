@@ -170,3 +170,46 @@ def test_missing_authoritative_database_does_not_create_an_empty_one(tmp_path):
     db.unlink()
     assert fence.check_start(db, app)['start_allowed'] is False
     assert not db.exists()
+
+
+@pytest.mark.parametrize('guard_appears', [False, True])
+def test_service_retry_reopens_busy_database_and_rechecks_cutover(
+        tmp_path, monkeypatch, capsys, guard_appears):
+    db, app = _paths(tmp_path)
+    writer = sqlite3.connect(db)
+    writer.execute('BEGIN EXCLUSIVE')
+
+    def release_lock_after_first_check(_seconds):
+        writer.rollback()
+        if guard_appears:
+            (db.parent/'cutover.active').touch()
+
+    monkeypatch.setattr(fence.time, 'sleep', release_lock_after_first_check)
+    monkeypatch.setattr(sys, 'argv', ['history_service_fence.py', '--retry-transient',
+        '--database', str(db), '--application-root', str(app)])
+    try:
+        assert fence.main() == int(guard_appears)
+    finally:
+        writer.close()
+    first, final = map(json.loads, capsys.readouterr().out.splitlines())
+    assert first['reason'] == 'AUTHORITATIVE_DATABASE_BUSY'
+    assert first['retry_attempt'] == 1
+    assert final['reason'] == ('ACTIVE_CUTOVER_GUARD' if guard_appears else 'UNMARKED_DATABASE')
+    assert final['start_allowed'] is not guard_appears
+
+
+@pytest.mark.parametrize('reason,attempts', [
+    ('HOT_HISTORY_STATE_CHECK_TIMEOUT', 3),
+    ('HOT_HISTORY_STATE_INVALID', 1),
+    ('HOT_HISTORY_READER_CONTRACT_MISMATCH', 1),
+])
+def test_service_check_stays_blocked_after_bounded_or_permanent_failure(
+        monkeypatch, capsys, reason, attempts):
+    monkeypatch.setattr(fence, 'check_start',
+                        lambda *_args, **_kwargs: {'start_allowed': False, 'reason': reason})
+    monkeypatch.setattr(fence.time, 'sleep', lambda _seconds: None)
+    monkeypatch.setattr(sys, 'argv', ['history_service_fence.py', '--retry-transient'])
+    assert fence.main() == 1
+    results = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(results) == attempts
+    assert results[-1] == {'start_allowed': False, 'reason': reason}

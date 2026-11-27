@@ -9,11 +9,10 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
         encoding="utf-8"
     )
 
-    # Production required755s on2026-10-20 for the current19GB database.
-    # Keep a finite16min window without changing any
-    # live readiness/smoke timeout or acceptance criterion.
-    assert "cold_start_attempts=480" in workflow
-    assert "command_timeout: 20m" in workflow
+    # Leave room beyond the observed 901-second schema check without changing
+    # any live readiness or smoke latency criterion.
+    assert "cold_start_attempts=660" in workflow
+    assert "command_timeout: 30m" in workflow
     assert 'seq 1 "$cold_start_attempts"' in workflow
     assert "prestart_backup_bytes=$(find" in workflow
     assert "-name '.*.tmp.sqlite3'" in workflow
@@ -26,6 +25,7 @@ def test_deploy_has_bounded_progress_visible_prestart_window():
     cleanup = workflow.index("DEPLOY_ORPHAN_PRESTART_TEMPS_REMOVED")
     start = workflow.index("systemctl start seiltanzer")
     assert stop < cleanup < start
+    assert start < workflow.index("systemd skipped or failed the start") < workflow.index("cold_start_attempts=")
     assert "/opt/seiltanzer/data/backups/local" in workflow
     assert "DEPLOY_ORPHAN_PRESTART_TEMP_BYTES_REMOVED" in workflow
     assert "systemctl restart seiltanzer" not in workflow

@@ -64,7 +64,7 @@ def test_deploy_installs_external_condition_without_resetting_existing_prestart_
     assert 'scripts/history_service_fence.py /usr/local/lib/seiltanzer-history-start-guard.py' in script
     assert 'deploy/history-start-fence.conf /etc/systemd/system/seiltanzer.service.d/30-history-cutover.conf' in script
     unit = (ROOT/'deploy/history-start-fence.conf').read_text()
-    assert 'ExecCondition=/usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py' in unit
+    assert 'ExecCondition=/usr/bin/python3 /usr/local/lib/seiltanzer-history-start-guard.py --retry-transient' in unit
     assert 'ExecStartPre=' not in unit
     assert 'ConditionPathExists=!/opt/seiltanzer/data/cutover.active' in unit
 

@@ -21,6 +21,10 @@ RUNTIME_CONTRACT = 'sqlite-history-runtime-v1'
 MAX_JOURNAL_BYTES = 65536
 MAX_MODULE_BYTES = 262144
 SQL_SECONDS = 5
+SERVICE_CHECK_ATTEMPTS = 3
+_RETRYABLE_CHECKS = frozenset(('AUTHORITATIVE_DATABASE_BUSY',
+                               'HOT_HISTORY_STATE_CHECK_TIMEOUT',
+                               'JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT'))
 _PHASES = frozenset(('PREPARED', 'APPLYING_HOT', 'HOT_VERIFIED', 'RECOVERING',
                     'FAILED_GUARDED', 'FENCE_LOST_GUARDED', 'ORIGINAL_RESTORED', 'COMMITTED'))
 
@@ -139,6 +143,12 @@ def core_bytes(value):
     return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('ascii')
 
 
+def _retryable_sqlite(exc):
+    code = getattr(exc, 'sqlite_errorcode', None)
+    return isinstance(exc, sqlite3.OperationalError) and isinstance(code, int) and (
+        code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_INTERRUPT))
+
+
 def check_start(database, application_root, *, guard=None, journal=None,json_epoch=None):
     """Return a bounded safe startup decision, without importing the application."""
     database, app_root = Path(database), Path(application_root)
@@ -188,7 +198,9 @@ def check_start(database, application_root, *, guard=None, journal=None,json_epo
                 codec = dict(__name__='_payload_storage_start_guard',__file__=str(codec_path))
                 exec(compile(codec_path.read_bytes(),str(codec_path),'exec'),codec)
                 if not codec['manifest_fields'](conn): raise ValueError('Missing payload marker')
-            except Exception:
+            except Exception as exc:
+                if _retryable_sqlite(exc):
+                    return result(False, 'JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT')
                 return result(False,'JSON_PAYLOAD_STORAGE_INVALID')
             if time.monotonic() >= deadline:
                 return result(False,'JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT')
@@ -225,12 +237,16 @@ def check_start(database, application_root, *, guard=None, journal=None,json_epo
             if any(payload[key] != _literal_reader_contract(app_root, module, name)
                    for key, module, name in contracts):
                 return result(False, 'HOT_HISTORY_READER_CONTRACT_MISMATCH', marked=True)
-        except Exception:
+        except Exception as exc:
+            if _retryable_sqlite(exc):
+                return result(False, 'HOT_HISTORY_STATE_CHECK_TIMEOUT', marked=True)
             return result(False, 'HOT_HISTORY_STATE_INVALID', marked=True)
         if time.monotonic() >= deadline:
             return result(False, 'HOT_HISTORY_STATE_CHECK_TIMEOUT', marked=True)
         return result(True, 'VERIFIED_HOT_RUNTIME_CAPABILITY', marked=True)
-    except Exception:
+    except Exception as exc:
+        if _retryable_sqlite(exc):
+            return result(False, 'AUTHORITATIVE_DATABASE_BUSY')
         return result(False, 'AUTHORITATIVE_DATABASE_UNAVAILABLE')
     finally:
         if conn is not None:
@@ -243,9 +259,18 @@ def main():
     parser.add_argument('--application-root', default='/opt/seiltanzer')
     parser.add_argument('--guard')
     parser.add_argument('--journal')
+    parser.add_argument('--retry-transient', action='store_true',
+                        help='Repeat only interrupted or busy read-only startup checks')
     args = parser.parse_args()
-    result = check_start(args.database, args.application_root, guard=args.guard, journal=args.journal)
-    print(json.dumps(result, sort_keys=True))
+    attempts = SERVICE_CHECK_ATTEMPTS if args.retry_transient else 1
+    for attempt in range(1, attempts + 1):
+        result = check_start(args.database, args.application_root,
+                             guard=args.guard, journal=args.journal)
+        if result['reason'] not in _RETRYABLE_CHECKS or attempt == attempts:
+            break
+        print(json.dumps({**result, 'retry_attempt': attempt}, sort_keys=True), flush=True)
+        time.sleep(1)
+    print(json.dumps(result, sort_keys=True), flush=True)
     return 0 if result['start_allowed'] else 1
 
 

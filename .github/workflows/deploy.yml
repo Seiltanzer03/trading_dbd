@@ -38,7 +38,7 @@ jobs:
     # first research core has taken about nine minutes against the 9+ GiB live
     # database. Leave enough room for that exact-SHA pause plus readiness and
     # smoke checks; the individual SSH steps remain independently bounded.
-    timeout-minutes: 50
+    timeout-minutes: 60
     env:
       EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_sha }}
       ACCEPTANCE_RUN_ID: ${{ github.run_id }}
@@ -101,7 +101,7 @@ jobs:
           username: root
           password: ${{ secrets.SSH_PASSWORD }}
           port: 22
-          command_timeout: 20m
+          command_timeout: 30m
           envs: EXPECTED_SHA,ACCEPTANCE_RUN_ID
           script: |
             set -euo pipefail
@@ -124,11 +124,10 @@ jobs:
                 break
               fi
               printf 'History check %s/3 refused: %s\n' "$attempt" "$fence"
-              # The installed guard also uses STATE_INVALID when SQLite's five
-              # second deadline interrupts the projection check. Rerun the
-              # whole proof on a new connection before doing any mutation.
+              # The previously installed guard may group interrupted reads
+              # under STATE_INVALID. Repeat the complete proof before mutation.
               case "$fence" in
-                *'"reason": "HOT_HISTORY_STATE_INVALID"'*|*'"reason": "HOT_HISTORY_STATE_CHECK_TIMEOUT"'*|*'"reason": "JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT"'*) ;;
+                *'"reason": "HOT_HISTORY_STATE_INVALID"'*|*'"reason": "HOT_HISTORY_STATE_CHECK_TIMEOUT"'*|*'"reason": "JSON_PAYLOAD_STORAGE_CHECK_TIMEOUT"'*|*'"reason": "AUTHORITATIVE_DATABASE_BUSY"'*) ;;
                 *) break ;;
               esac
             done
@@ -371,14 +370,20 @@ jobs:
             systemctl start seiltanzer
 
             test "$(git -C /opt/seiltanzer rev-parse HEAD)" = "$EXPECTED_SHA"
+            start_state=$(systemctl is-active seiltanzer 2>/dev/null || true)
+            case "$start_state" in
+              inactive|failed)
+                echo '::error::systemd skipped or failed the start before HTTP readiness'
+                systemctl show seiltanzer -p ActiveState -p SubState -p Result || true
+                journalctl -u seiltanzer --since '-1 minute' --no-pager -n 30 || true
+                exit 1
+                ;;
+            esac
 
-            # The current 19GB database completed schema verification at755s
-            # on2026-10-20, beyond the old720s orchestration allowance. Retain
-            # a finite16min startup window so recovery does not interrupt an
-            # integrity check that is still progressing. This changes only
-            # orchestration; integrity and actual HTTP gates remain mandatory.
-            # This does not relax the live route latency/readiness gates below.
-            cold_start_attempts=480
+            # A real restart on 2026-11-27 reached the end of schema checking
+            # 901 seconds after the process started. Allow up to 22 minutes of
+            # two-second delays for all startup phases, with unchanged probes.
+            cold_start_attempts=660
             ready=0
             for attempt in $(seq 1 "$cold_start_attempts"); do
               active=$(systemctl is-active seiltanzer 2>/dev/null || true)
