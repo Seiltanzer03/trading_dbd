@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
-      - name: Read native CPU samples and snapshot state without provider calls
+      - name: Read current exact release startup and review readiness
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -21,22 +21,27 @@ jobs:
           script: |
             set -euo pipefail
             cd /opt/seiltanzer
-            pid=$(systemctl show seiltanzer --property=MainPID --value)
-            printf 'APP_MAIN_PID %s\n' "$pid"
-            vmstat 1 3
-            if command -v perf >/dev/null 2>&1; then
-                timeout 9s perf record -e cpu-clock -F 37 --pid "$pid" -o - -- sleep 4 |
-                    perf report -i - --stdio --no-children --percent-limit 3 --sort dso,symbol 2>&1 || true
-            fi
+            git rev-parse HEAD
+            systemctl show seiltanzer --property=ActiveState,SubState,MainPID,ControlPID,Result,ExecMainStatus,NRestarts,MemoryCurrent
+            ss -ltnH 'sport = :8790'
+            journalctl -u seiltanzer --since '9 minutes ago' --no-pager -o cat |
+                awk '/STARTUP|PRESTART|SQLITE_QUICK_CHECK|HOT_HISTORY|ready|Application startup|Uvicorn running|Started|Failed|timed out|exited with/ {print substr($0,1,280)}' | tail -24
             .venv/bin/python -B -u - <<'PY'
             import json
-            import time
             import urllib.request
-            for i in range(3):
-                with urllib.request.urlopen("http://127.0.0.1:8790/api/ai/snapshot/status",timeout=6) as response:
-                    d=json.load(response)
-                fields=("ready","building","build_n","build_ms","build_started_at","invalidated_reason","last_error")
-                print("LIVE_SNAPSHOT", {k:d.get(k) for k in fields})
-                if i < 2:
-                    time.sleep(3)
+            from urllib.error import HTTPError
+            for path in ('/api/ai/snapshot/status', '/api/ai/history?include_management=false'):
+                try:
+                    with urllib.request.urlopen('http://127.0.0.1:8790'+path,timeout=6) as response:
+                        d=json.load(response)
+                    if 'snapshot/status' in path:
+                        keys=('ready','building','current_trade_id','current_instrument','build_ms','build_phase','build_phase_ms',
+                              'invalidated_reason','changed_expert_sources','last_error')
+                        print('SNAPSHOT', {key:d.get(key) for key in keys})
+                    else:
+                        print('REVIEWS',d.get('trade_id'),[{key:row.get(key) for key in ('ts','model')} for row in d.get('items',[])[-3:]])
+                except HTTPError as exc:
+                    print('API_HTTP',path,exc.code)
+                except (OSError,ValueError) as exc:
+                    print('API_ERROR',path,type(exc).__name__)
             PY
