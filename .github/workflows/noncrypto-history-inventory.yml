@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
-      - name: Measure exact production release report reads and scheduler pressure
+      - name: Read native CPU samples and snapshot state without provider calls
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -22,48 +22,21 @@ jobs:
             set -euo pipefail
             cd /opt/seiltanzer
             pid=$(systemctl show seiltanzer --property=MainPID --value)
-            getconf _NPROCESSORS_ONLN
-            for exe in gdb py-spy perf strace; do command -v "$exe" || true; done
+            printf 'APP_MAIN_PID %s\n' "$pid"
             vmstat 1 3
-            ps -T -p "$pid" -o spid,stat,time,wchan:27,comm | head -60 || true
-            OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 SEILTANZER_DIAG_PID="$pid" timeout 35s nice -n 12 .venv/bin/python -B -u - <<'PY'
+            if command -v perf >/dev/null 2>&1; then
+                timeout 9s perf record -e cpu-clock -F 37 --pid "$pid" -o - -- sleep 4 |
+                    perf report -i - --stdio --no-children --percent-limit 3 --sort dso,symbol 2>&1 || true
+            fi
+            .venv/bin/python -B -u - <<'PY'
             import json
-            import os
-            import pathlib
-            import sqlite3
             import time
             import urllib.request
-            from types import SimpleNamespace
-            from seiltanzer.active_edge_ai_integration import build_active_edge_context
-            from seiltanzer.edge_discovery.evidence_ledger import latest_frozen_evidence
-            from seiltanzer.journal import Journal
-            
-            pid = int(os.environ["SEILTANZER_DIAG_PID"])
-            for descriptor in pathlib.Path(f"/proc/{pid}/fd").iterdir():
-                try:
-                    path = descriptor.readlink()
-                except OSError:
-                    continue
-                if path.name == "trades.db" and path.is_absolute():
-                    break
-            else:
-                raise SystemExit("trades.db descriptor unavailable")
-            owner=SimpleNamespace(settings=SimpleNamespace(data_dir=str(path.parent)))
-            snapshot={"captured_ts":time.time(),"strategy":{"instrument":"NAS100","direction":"long"}}
-            for p in sorted((path.parent / "research").iterdir()):
-                if p.name.startswith(("active_", "mathematical_edge_", "ede_frozen_")) and p.is_file():
-                    print("RESEARCH_FILE",p.name,p.stat().st_size,flush=True)
-            for name,fn in (("ACTIVE_EDGE",lambda:build_active_edge_context(owner,snapshot)),
-                            ("EDE_LEDGER",lambda:latest_frozen_evidence(path.parent/"research"/"ede_frozen_evidence.jsonl",time.time()))):
-                t=time.monotonic()
-                result=fn()
-                print("MEASURED",name,round(time.monotonic()-t,3),bool(result),flush=True)
-            journal=Journal.__new__(Journal)
-            journal._conn=sqlite3.connect(path.as_uri()+"?mode=ro",uri=True,timeout=.5)
-            journal._conn.row_factory=sqlite3.Row
-            from contextlib import nullcontext
-            journal._lock=nullcontext()
-            t=time.monotonic()
-            report=journal.policy_shadow_report()
-            print("MEASURED","POLICY_SHADOW",round(time.monotonic()-t,3),report.get("observations"),flush=True)
+            for i in range(3):
+                with urllib.request.urlopen("http://127.0.0.1:8790/api/ai/snapshot/status",timeout=6) as response:
+                    d=json.load(response)
+                fields=("ready","building","build_n","build_ms","build_started_at","invalidated_reason","last_error")
+                print("LIVE_SNAPSHOT", {k:d.get(k) for k in fields})
+                if i < 2:
+                    time.sleep(3)
             PY
