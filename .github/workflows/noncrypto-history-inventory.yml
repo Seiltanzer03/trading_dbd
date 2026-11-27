@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
-      - name: Measure server contention and read-only calibration timings
+      - name: Measure exact production release report reads and scheduler pressure
         uses: appleboy/ssh-action@v1
         with:
           host: 94.241.171.182
@@ -22,55 +22,48 @@ jobs:
             set -euo pipefail
             cd /opt/seiltanzer
             pid=$(systemctl show seiltanzer --property=MainPID --value)
-            uptime
-            free -m
-            df -h /opt/seiltanzer
-            ps -eo pid,ppid,pcpu,rss,stat,wchan:30,comm --sort=-pcpu | head -15 || true
-            ps -L -p "$pid" -o lwp,pcpu,stat,wchan:30,comm --sort=-pcpu | head -20 || true
-            command -v py-spy || true
-            SEILTANZER_DIAG_PID="$pid" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 timeout 30s nice -n 12 .venv/bin/python -B -u - <<'PY'
+            getconf _NPROCESSORS_ONLN
+            for exe in gdb py-spy perf strace; do command -v "$exe" || true; done
+            vmstat 1 3
+            ps -T -p "$pid" -o spid,stat,time,wchan:27,comm | head -60 || true
+            OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 SEILTANZER_DIAG_PID="$pid" timeout 35s nice -n 12 .venv/bin/python -B -u - <<'PY'
+            import json
             import os
             import pathlib
-            import statistics
+            import sqlite3
             import time
             import urllib.request
-            import json
-            from concurrent.futures import ThreadPoolExecutor
+            from types import SimpleNamespace
+            from seiltanzer.active_edge_ai_integration import build_active_edge_context
+            from seiltanzer.edge_discovery.evidence_ledger import latest_frozen_evidence
             from seiltanzer.journal import Journal
+            
             pid = int(os.environ["SEILTANZER_DIAG_PID"])
-            db = set()
             for descriptor in pathlib.Path(f"/proc/{pid}/fd").iterdir():
                 try:
-                    target = descriptor.readlink()
+                    path = descriptor.readlink()
                 except OSError:
                     continue
-                if target.is_absolute() and target.name in {"trades.db", "cache.db"}:
-                    db.add(target)
-            print("DB_FILES", [(p.name, p.stat().st_size) for p in sorted(db)])
-            def measure():
-                for path in sorted(db):
-                    if path.name != "trades.db":
-                        continue
-                    journal = Journal.__new__(Journal)
-                    journal._q_database_path = str(path)
-                    t = time.monotonic()
-                    cpu = time.process_time()
-                    result = journal.q_calibration_report()
-                    print("Q_CALIBRATION", round(time.monotonic()-t,3), round(time.process_time()-cpu,3), result.get("n"))
-            def status():
-                for attempt in range(2):
-                    t = time.monotonic()
-                    try:
-                        with urllib.request.urlopen("http://127.0.0.1:8790/api/ai/snapshot/status", timeout=6) as response:
-                            d=json.load(response)
-                        print("STATUS", round(time.monotonic()-t,3),
-                            {k:d.get(k) for k in ("ready","building","invalidated_reason","build_ms","build_started_at","build_n","last_error")})
-                    except Exception as exc:
-                        print("STATUS_ERROR", type(exc).__name__)
-                    if attempt == 0:
-                        time.sleep(5)
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                handles=[pool.submit(fn) for fn in (measure,status)]
-                for handle in handles:
-                    handle.result()
+                if path.name == "trades.db" and path.is_absolute():
+                    break
+            else:
+                raise SystemExit("trades.db descriptor unavailable")
+            owner=SimpleNamespace(settings=SimpleNamespace(data_dir=str(path.parent)))
+            snapshot={"captured_ts":time.time(),"strategy":{"instrument":"NAS100","direction":"long"}}
+            for p in sorted((path.parent / "research").iterdir()):
+                if p.name.startswith(("active_", "mathematical_edge_", "ede_frozen_")) and p.is_file():
+                    print("RESEARCH_FILE",p.name,p.stat().st_size,flush=True)
+            for name,fn in (("ACTIVE_EDGE",lambda:build_active_edge_context(owner,snapshot)),
+                            ("EDE_LEDGER",lambda:latest_frozen_evidence(path.parent/"research"/"ede_frozen_evidence.jsonl",time.time()))):
+                t=time.monotonic()
+                result=fn()
+                print("MEASURED",name,round(time.monotonic()-t,3),bool(result),flush=True)
+            journal=Journal.__new__(Journal)
+            journal._conn=sqlite3.connect(path.as_uri()+"?mode=ro",uri=True,timeout=.5)
+            journal._conn.row_factory=sqlite3.Row
+            from contextlib import nullcontext
+            journal._lock=nullcontext()
+            t=time.monotonic()
+            report=journal.policy_shadow_report()
+            print("MEASURED","POLICY_SHADOW",round(time.monotonic()-t,3),report.get("observations"),flush=True)
             PY
