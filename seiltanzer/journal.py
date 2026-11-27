@@ -921,9 +921,24 @@ class Journal:
 
     def policy_shadow_report(self) -> dict:
         """Observed agreement and conservative outcome proxies; never auto-promotes."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM policy_shadow_reviews ORDER BY ts").fetchall()
+        query = """
+            SELECT trade_id, ts, old_policy, candidate_policy, review_r,
+                   expected_delta_r, cvar_delta_r, execution_cost_delta_r,
+                   instrument, market_regime, final_result_r, resolved_at,
+                   resolution_kind, execution_cost_sensitivity_json
+            FROM policy_shadow_reviews ORDER BY ts
+        """
+        path = getattr(self, "_q_database_path", None)
+        if path:
+            # The report is one committed read. Do not hold the operational
+            # journal mutex across an increasingly large history traversal.
+            uri = Path(path).as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query).fetchall()
+        else:
+            with self._lock:
+                rows = self._conn.execute(query).fetchall()
         if not rows:
             return {
                 "observations": 0, "resolved_observations": 0,
@@ -1051,9 +1066,10 @@ class Journal:
             ),
         }
 
-    def validation_report(self) -> dict:
+    def validation_report(self, *, q_calibration: dict | None = None,
+                          policy_shadow: dict | None = None) -> dict:
         """Compatibility view over horizon-aligned, leakage-safe labels."""
-        score = self.q_calibration_report()
+        score = self.q_calibration_report() if q_calibration is None else q_calibration
         take = score.get("take") or {}
         return {
             "version": score.get("version"),
@@ -1066,7 +1082,7 @@ class Journal:
             "oos_scorecard": score.get("oos_scorecard") or {},
             "message": ("horizon-aligned forecast outcomes; manual-close paths "
                         "without coverage to H are censored"),
-            "policy_shadow": self.policy_shadow_report(),
+            "policy_shadow": self.policy_shadow_report() if policy_shadow is None else policy_shadow,
             "promotion_allowed": False,
         }
 

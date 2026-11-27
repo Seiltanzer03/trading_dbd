@@ -116,6 +116,9 @@ class AISnapshotMaterializer:
         self._built_at: float | None = None
         self._build_started_at: float | None = None
         self._build_ms: float | None = None
+        self._build_phase: str | None = None
+        self._build_phase_started: float | None = None
+        self._build_phase_ms: dict[str, float] = {}
         self._building = False
         self._last_error: str | None = None
         self._build_n = 0
@@ -126,6 +129,7 @@ class AISnapshotMaterializer:
         self._baseline_quote_available: bool | None = None
         self._baseline_quote_authority: tuple | None = None
         self._baseline_publication: tuple | None = None
+        self._changed_expert_sources: tuple[str, ...] = ()
         self._baseline_completed_bar: tuple | None = None
         self._baseline_instrument: str | None = None
         self._budget_degraded_build_n = 0
@@ -296,8 +300,16 @@ class AISnapshotMaterializer:
         if snapshot_trade != current_trade:
             return "TRADE_CHANGED"
         from .ai_frozen_expert_inputs import publication_marker
-        if baseline_publication is not None and publication_marker(self.engine) != baseline_publication:
-            return "EXPERT_PUBLICATION_CHANGED"
+        if baseline_publication is not None:
+            live_publication = publication_marker(self.engine)
+            if live_publication != baseline_publication:
+                before = {row[0]: row[1:] for row in baseline_publication}
+                after = {row[0]: row[1:] for row in live_publication or ()}
+                changed = tuple(sorted(name for name in before.keys() | after.keys()
+                                       if before.get(name) != after.get(name)))
+                with self._lock:
+                    self._changed_expert_sources = changed
+                return "EXPERT_PUBLICATION_CHANGED"
         from .ai_frozen_expert_inputs import completed_bar_marker, completed_bar_advanced
         live_completed_bar = completed_bar_marker(self.engine)
         if completed_bar_advanced(baseline_completed_bar,live_completed_bar):
@@ -374,6 +386,21 @@ class AISnapshotMaterializer:
             self._wake.wait(self.watch_interval_sec)
             self._wake.clear()
 
+    @contextlib.contextmanager
+    def _measure_build_phase(self, name: str):
+        started = time.monotonic()
+        with self._lock:
+            self._build_phase = name
+            self._build_phase_started = started
+        try:
+            yield
+        finally:
+            elapsed = round((time.monotonic() - started) * 1000, 1)
+            with self._lock:
+                self._build_phase_ms[name] = elapsed
+                self._build_phase = None
+                self._build_phase_started = None
+
     def _build_once(self) -> None:
         current_trade_row = self.current_trade()
         current_trade = _trade_id(current_trade_row)
@@ -402,6 +429,7 @@ class AISnapshotMaterializer:
                 return
             self._building = True
             self._build_started_at = started_wall
+            self._build_phase_ms = {}
         try:
             from .ai_frozen_expert_inputs import freeze_expert_inputs, publication_marker, completed_bar_marker, merge_completed_bar_marker, capture_market_inputs
             # A publication arriving during the heavy builder must trigger a
@@ -409,14 +437,16 @@ class AISnapshotMaterializer:
             baseline_publication = publication_marker(self.engine)
             baseline_completed_bar = merge_completed_bar_marker(
                 self._baseline_completed_bar,completed_bar_marker(self.engine))
-            market_inputs = capture_market_inputs(self.engine,lock_timeout_sec=.25)
+            with self._measure_build_phase("capture_market_inputs"):
+                market_inputs = capture_market_inputs(self.engine,lock_timeout_sec=.25)
             if getattr(market_inputs.market,'freeze_reason',None)=='MARKET_INPUT_FREEZE_BUSY':
                 with self._lock:
                     self._invalidated_reason='MARKET_INPUT_FREEZE_BUSY'
                 raise RuntimeError('MARKET_INPUT_FREEZE_BUSY')
             from .decision_metric_inputs import pinned_decision_context
-            with pinned_decision_context(self.engine,getattr(market_inputs.market,'live_metric_context',None)):
-                snapshot = self.builder(self.engine)
+            with self._measure_build_phase("deterministic_snapshot"):
+                with pinned_decision_context(self.engine,getattr(market_inputs.market,'live_metric_context',None)):
+                    snapshot = self.builder(self.engine)
             snapshot_trade = (
                 str(snapshot.get("trade_id"))
                 if isinstance(snapshot, dict) and snapshot.get("trade_id") is not None
@@ -428,9 +458,10 @@ class AISnapshotMaterializer:
                 or not isinstance(snapshot.get("policy_manager"), dict)
             ):
                 raise RuntimeError("BUILT_SNAPSHOT_TRADE_MISMATCH_OR_UNAVAILABLE")
-            freeze_expert_inputs(self.engine, snapshot, market_inputs=market_inputs)
-            from .edge_family_market import family_runtime_status
-            family_status=family_runtime_status(snapshot)
+            with self._measure_build_phase("freeze_expert_inputs"):
+                freeze_expert_inputs(self.engine, snapshot, market_inputs=market_inputs)
+                from .edge_family_market import family_runtime_status
+                family_status=family_runtime_status(snapshot)
             if (family_status.get('available_forecasts_at_capture')==0 and any(
                     row.get('trained_model_valid') is True
                     and row.get('target_provider')=='TradingView chart'
@@ -552,7 +583,17 @@ class AISnapshotMaterializer:
                 "canonical_quote_available": self._baseline_quote_available,
                 "boundary_r": [round(x, 6) for x in self._boundaries_r],
                 "invalidated_reason": self._invalidated_reason,
+                "changed_expert_sources": (
+                    list(self._changed_expert_sources)
+                    if self._invalidated_reason == "EXPERT_PUBLICATION_CHANGED" else []
+                ),
                 "build_ms": round(self._build_ms, 1) if self._build_ms is not None else None,
+                "build_phase": self._build_phase,
+                "build_phase_elapsed_ms": (
+                    round((time.monotonic() - self._build_phase_started) * 1000, 1)
+                    if self._build_phase_started is not None else None
+                ),
+                "build_phase_ms": dict(self._build_phase_ms),
                 "build_started_at": self._build_started_at,
                 "build_n": self._build_n,
                 "snapshot_budget": {

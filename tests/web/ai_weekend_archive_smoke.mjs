@@ -16,11 +16,12 @@ class Element {
   click() { return this.listeners.click(); }
 }
 async function fixture({code = 'authoritative_price_unavailable', history, historyError, beforeHistory,
-  reopenDuringFirstPosition = false, review} = {}) {
+  reopenDuringFirstPosition = false, stallPosition = false, review} = {}) {
   const nodes = new Map([['#btn-ai-verdict', new Element()]]);
   const state = {tick: {trade: {id: 7}}};
   const calls = [];
   const archives = [];
+  let replacementComplete;
   const openModal = () => {
     for (const id of ['ai-verdict-text','ai-edge-management','ai-management-execution',
       'ai-shadow-action','ai-armed-actions','ai-close']) nodes.set('#' + id, new Element());
@@ -29,9 +30,13 @@ async function fixture({code = 'authoritative_price_unavailable', history, histo
   const fetchStructured = async (url, init) => {
     calls.push({url, method: init?.method || 'GET'});
     if (url === '/api/position') {
+      if (stallPosition) return new Promise(() => {});
       if (reopenDuringFirstPosition && calls.filter((call) => call.url === url).length === 1) {
-        await nodes.get('#btn-ai-verdict').click();
-        await nodes.get('#ai-close').parentElement.children[0].click();
+        replacementComplete = (async () => {
+          await nodes.get('#btn-ai-verdict').click();
+          await nodes.get('#ai-close').parentElement.children[0].click();
+        })();
+        await replacementComplete;
         return {shadow_actions: [{action_id: 'old-modal-action'}]};
       }
       return {shadow_actions: []};
@@ -61,6 +66,7 @@ async function fixture({code = 'authoritative_price_unavailable', history, histo
     }, noDecision, noDecision, noDecision, noDecision, noDecision, noDecision,
     state, {createElement: () => new Element()}, (container, archive) => { archives.push(archive); }, aiProviderWarning);
   await nodes.get('#btn-ai-verdict').click();
+  await replacementComplete;
   return {nodes, state, calls, archives, out: nodes.get('#ai-verdict-text'),
     button: nodes.get('#ai-close').parentElement.children.find((node) => node !== nodes.get('#ai-close'))};
 }
@@ -102,6 +108,10 @@ for (const options of [
 }
 const unrelated = await fixture({code: 'some_other_error'});
 assert.equal(unrelated.button, undefined);
+const positionStalled = await fixture({stallPosition: true, code: 'ai_review_transport_timeout'});
+assert.equal(positionStalled.calls.filter((call) => call.method === 'POST').length, 1,
+  'a stalled position sidebar must not delay starting the review');
+assert.ok(positionStalled.button, 'a review timeout must offer the saved review');
 const dismissed = await fixture({beforeHistory: (_state, nodes) => {
   nodes.set('#ai-verdict-text', new Element());
 }});

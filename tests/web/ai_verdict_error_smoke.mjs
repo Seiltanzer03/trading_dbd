@@ -104,3 +104,39 @@ try {
   }));
   await assert.rejects(fetchStructured('/api/ai/verdict', {method: 'POST'}), /Некорректный адрес/);
 } finally { globalThis.fetch = originalFetch; }
+
+// Bound both the first response headers and a stalled response body. Neither
+// case proves preflight rejected the POST, so neither may retry automatically.
+const originalSetTimeout = globalThis.setTimeout;
+const originalClearTimeout = globalThis.clearTimeout;
+for (const stallBody of [false, true]) {
+  let expire;
+  let signal;
+  let posts = 0;
+  globalThis.setTimeout = (callback, delay) => {
+    assert.equal(delay, 18000);
+    expire = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+  globalThis.fetch = async (_url, init) => {
+    posts += 1;
+    signal = init.signal;
+    const stalled = new Promise(() => {});
+    return stallBody
+      ? { ...response(200, 'application/json', ''), text: () => stalled }
+      : stalled;
+  };
+  try {
+    const pending = fetchStructured('/api/ai/verdict', { method: 'POST' });
+    await Promise.resolve();
+    expire();
+    await assert.rejects(pending, { code: 'ai_review_transport_timeout' });
+    assert.equal(signal.aborted, true);
+    assert.equal(posts, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+}

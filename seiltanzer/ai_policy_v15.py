@@ -179,11 +179,10 @@ def _compact_option_state(state: dict) -> dict:
 def _record_shadow(engine, tick: dict, result: dict, ensemble: dict,
                    cost_sensitivity: dict | None = None) -> dict:
     journal = getattr(engine, "journal", None)
-    report = journal.policy_shadow_report() if journal and hasattr(
-        journal, "policy_shadow_report") else {"promotion_allowed": False}
     trade = tick.get("trade") or {}
     if not journal or not trade or not hasattr(journal, "record_policy_shadow"):
-        return report
+        return journal.policy_shadow_report() if journal and hasattr(
+            journal, "policy_shadow_report") else {"promotion_allowed": False}
     old = ensemble["old_policy"]
     candidate = ensemble["candidate_policy"]
     old_row = (ensemble.get("policies") or {}).get(old) or {}

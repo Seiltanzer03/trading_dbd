@@ -64,7 +64,7 @@ def test_prompt_makes_quant_engine_authoritative_and_bans_vague_language():
     assert "РАСЧЁТ ПОЛИТИК" in SYSTEM_PROMPT
 
 
-def test_snapshot_contains_quant_policy_and_all_recent_metric_families(tmp_path):
+def test_snapshot_contains_quant_policy_and_all_recent_metric_families(tmp_path, monkeypatch):
     engine = Engine(Settings(demo=True, data_dir=str(tmp_path)))
     try:
         trade = engine.journal.open_trade(3, "NAS100", "long", 21500, 21450, 21625)
@@ -72,8 +72,20 @@ def test_snapshot_contains_quant_policy_and_all_recent_metric_families(tmp_path)
         engine.market.refresh_price()
         engine.market.refresh_vols()
         engine.market.refresh_correlation()
+        original = engine.journal.q_calibration_report
+        scores = []
+
+        def read_score():
+            score = original()
+            scores.append(score)
+            return score
+
+        monkeypatch.setattr(engine.journal, "q_calibration_report", read_score)
         snapshot = build_snapshot(engine)
         manager = snapshot["policy_manager"]
+        assert len(scores) == 1
+        assert manager["calibration_contract"]["authority"] == scores[0]["authority"]
+        assert snapshot["validation"]["q_calibration"]["authority"] == scores[0]["authority"]
         assert snapshot["trade_id"] == trade["id"]
         assert set(manager["policies"]) == {"HOLD", "CLOSE_10", "CLOSE_25", "CLOSE_50", "EXIT"}
         for policy in manager["policies"].values():
